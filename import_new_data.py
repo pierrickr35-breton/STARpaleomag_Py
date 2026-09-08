@@ -52,40 +52,41 @@ from convert_ren_to_r import _measurement_rows
 _JR6_UNRECOGNIZED = ("?", "?", 999)
 
 
-def _jr6_step_code(truc1: str) -> Tuple[str, str, int]:
+def _jr6_step_code(truc1: str) -> Tuple[str, str, float]:
     """Port de la classification de code d'etape JR6 (ImportJR6data.f95,
     branches `importinoldren`/`importinoldtxt`) : `truc1` (8 caracteres)
     ex. "NRM     ", "AD10.0  ", "TD300   ", "ARM100  ", "IRM1000 ".
-    "AD"/"ARM" (champs AF/ARM, mT) sont multiplies par 10 - meme
-    convention Oersted-equivalent que testlect._PRMAG_OERSTED_CODES/
-    convert_ren_to_r._step_value pour cod1 'F'/'A'."""
+    "AD"/"ARM" (champs AF/ARM) sont deja en mT reel dans le fichier JR6 -
+    plus multiplies par 10 (l'ancienne echelle Oersted-equivalente de
+    Measurement.etape a ete supprimee, demande explicite utilisateur
+    "convert all step integer to float")."""
     t = truc1.strip().upper()
     if t.startswith("NRM"):
-        return "N", "O", 0
+        return "N", "O", 0.0
     if t.startswith("AD"):
         try:
             step = float(t[2:])
         except ValueError:
             return _JR6_UNRECOGNIZED
-        return "F", "=", int(round(step * 10))
+        return "F", "=", step
     if t.startswith("TD"):
         try:
             step = float(t[2:])
         except ValueError:
             return _JR6_UNRECOGNIZED
-        return "D", "=", int(round(step))
+        return "D", "=", round(step)
     if t.startswith("ARM"):
         try:
             step = float(t[3:])
         except ValueError:
             return _JR6_UNRECOGNIZED
-        return "A", "Z", int(round(step * 10))
+        return "A", "Z", step
     if t.startswith("IRM"):
         try:
             step = float(t[3:])
         except ValueError:
             return _JR6_UNRECOGNIZED
-        return "I", "Z", int(round(step))
+        return "I", "Z", round(step)
     return _JR6_UNRECOGNIZED
 
 

@@ -207,26 +207,29 @@ def _s_value(ech: "SelectedSample", m: Measurement) -> float:
 
 
 # cod1 -> unite d'etape affichable - meme convention que xygraph._AF_CODES/
-# _THERMAL_CODES et testlect._PRMAG_OERSTED_CODES (etape stockee en dixiemes
-# de mT pour A/F, directement en degC pour D/S/T/K) - limitee a ces deux
-# groupes bien etablis, pas etendue aux codes paleointensite (R/V/P) ni aux
-# autres (I, N...) pour rester coherente avec le reste du code plutot que de
-# deviner une unite non confirmee ailleurs.
+# _THERMAL_CODES (etape = valeur physique reelle directement, mT pour A/F,
+# degC pour D/S/T/K) - R/V/P (paleointensite Thellier/IZZI) INCLUS ici,
+# egalement en degC - demande explicite utilisateur ("when the cod1 is R,
+# V, P, the unit is also °C"), confirme apres une premiere version qui les
+# excluait par prudence (unite alors non confirmee). PAS etendue aux
+# autres codes (I, N...) qui n'ont pas d'unite de temperature/champ
+# univoque.
 _AF_CODES = {"A", "F"}
-_THERMAL_CODES = {"D", "S", "T", "K"}
+_THERMAL_CODES = {"D", "S", "T", "K", "R", "V", "P"}
 
 
 def _fmt_step(m: "Measurement") -> str:
     """Affiche l'etape avec son unite quand elle est sans ambiguite (degC
-    pour un pas thermique, mT pour un pas AF - etape stockee en dixiemes de
-    mT pour A/F, voir testlect._PRMAG_OERSTED_CODES) suivie du code - demande
-    explicite utilisateur ("can we clean the list data... 210D+ -> 210 degC
-    D+")."""
+    pour un pas thermique, mT pour un pas AF - etape est directement la
+    valeur physique reelle, plus une echelle Oersted a diviser - voir
+    testlect.Measurement) suivie du code - demande explicite utilisateur
+    ("can we clean the list data... 210D+ -> 210 degC D+" puis "convert
+    all step integer to float")."""
     if m.cod1 in _AF_CODES:
-        return f"{m.etape / 10.0:5.1f} mT {m.cod1}{m.cod2}"
+        return f"{m.etape:5.1f} mT {m.cod1}{m.cod2}"
     if m.cod1 in _THERMAL_CODES:
-        return f"{m.etape:5d} °C {m.cod1}{m.cod2}"
-    return f"{m.etape:5d}    {m.cod1}{m.cod2}"
+        return f"{m.etape:5.0f} °C {m.cod1}{m.cod2}"
+    return f"{m.etape:5.0f}    {m.cod1}{m.cod2}"
 
 
 def _selection_norme_labels(selected: List["SelectedSample"]) -> Tuple[str, str]:
@@ -324,8 +327,8 @@ def _build_selected_sample(p: Pmag, matched_mesures: List[Measurement]) -> Selec
 def select_samples(
     pmag_list: List[Pmag],
     pattern: str = "*",
-    step_min: int = 0,
-    step_max: int = 9999,
+    step_min: float = 0,
+    step_max: float = 9999,
     demag1: str = "*",
     demag2: str = "*",
     verbose: bool = True,
@@ -382,8 +385,8 @@ def select_samples(
 def select_samples_by_site(
     pmag_list: List[Pmag],
     site: str = "*",
-    step_min: int = 0,
-    step_max: int = 9999,
+    step_min: float = 0,
+    step_max: float = 9999,
     demag1: str = "*",
     demag2: str = "*",
     verbose: bool = True,
@@ -486,8 +489,8 @@ def init_selection() -> List[SelectedSample]:
 def delete_measurements(
     selected: List[SelectedSample],
     pattern: str = "*",
-    step_min: int = 0,
-    step_max: int = 9000,
+    step_min: float = 0,
+    step_max: float = 9000,
     demag1: str = "*",
     demag2: str = "*",
     occurrence: str = "*",
@@ -601,7 +604,7 @@ _HEADERS_EN = {
 
 def _write_report_header(out: TextIO, idiom: str, orientation: int, columns_fr: str, columns_en: str) -> None:
     # HEADER_MARK ("\x01") entoure la ligne de titres de colonnes pour que
-    # StarmacApp._afficher (app.py) l'affiche en gras - demande explicite
+    # STARpaleomagApp._afficher (app.py) l'affiche en gras - demande explicite
     # utilisateur ("throughout the software, is it possible to write the
     # header in bold"). Meme caractere que app.HEADER_MARK, redefini
     # localement (pas d'import depuis app.py - creerait une dependance
@@ -821,7 +824,7 @@ def diff_measurements(
             mtot, _unit = normalized_intensity(ech, mtot)
 
             out.write(
-                f"{ij:4d}: {ech.id:<12s}  {a.etape:4d}{a.cod1}{a.cod2}  "
+                f"{ij:4d}: {ech.id:<12s}  {_fmt_step(a)}  "
                 f"{mtot:10.3E} {dec:6.1f} {inc:6.1f}{a.q:4d}  {a.ins:<2s}{a.s:7.1f}\n"
             )
             ij += 1

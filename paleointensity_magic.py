@@ -8,10 +8,10 @@ appelees (`pmag.sortarai`, `pmag.find_dmag_rec`, `pmag.PintPars`) sont
 CELLES utilisees par le Thellier GUI officiel pour calculer les
 statistiques standard (Paterson et al. 2014) : b (pente Arai), sigma, MAD,
 DANG, FRAC, gap_max, SCAT, f, g, q, DRATS, MD, ZigZag - independamment du
-calcul natif Starmac (`paleointensity.py`, porte du Fortran).
+calcul natif STARpaleomag_Py (`paleointensity.py`, porte du Fortran).
 
 Adaptateur (`build_magic_dataframe`) : construit le DataFrame MagIC data
-model 3 attendu par ces fonctions a partir d'un specimen Starmac. Reutilise
+model 3 attendu par ces fonctions a partir d'un specimen STARpaleomag_Py. Reutilise
 `magic_export._measurement_treatment` (deja valide, utilise par
 convert_ren_to_r.py/l'export MagIC) pour method_codes/treat_temp(K)/
 treat_dc_field(T)/phi/theta - PAS reimplemente ici.
@@ -127,7 +127,7 @@ def build_magic_dataframe(ech: Pmag) -> pd.DataFrame:
     `pmag.sortmwarai`, pas pour sortarai). R et V sont donc TOUS LES DEUX
     reellement mesures EN CHAMP (voir magic_export._measurement_treatment,
     theta=+90/-90) - il n'existe pas de pas zero-field distinct. Reconstruit
-    ici la meme moyenne que le natif Starmac (paleointensity.py:464,
+    ici la meme moyenne que le natif STARpaleomag_Py (paleointensity.py:464,
     `nrm_vec = (R+V)/2`) : le contenu (dec/inc/moment) du pas R est
     REMPLACE par la moyenne cartesienne (R+V)/2 et tague "LT-T-Z" (zero-
     field synthetique), V restant INCHANGE ("LT-T-I", en-champ) - PmagPy
@@ -176,7 +176,7 @@ def compute_magic_paleointensity(
     """Lance `pmag.sortarai` + `pmag.find_dmag_rec` + `pmag.PintPars` (le
     code PmagPy/MagIC reel, pas une reimplementation) sur ce specimen.
     `step_first`/`step_last` (degC, meme convention que le fit natif
-    Starmac - None = toute la sequence disponible) selectionnent
+    STARpaleomag_Py - None = toute la sequence disponible) selectionnent
     l'intervalle NRM utilise pour la pente/MAD/DANG/etc, convertis ici en
     indices dans `araiblock[0]` (PintPars les attend en indices, pas en
     temperature). Leve ValueError si les donnees ne ressemblent pas a une

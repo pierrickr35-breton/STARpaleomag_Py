@@ -17,11 +17,12 @@ import numpy as np
 
 from selection import (
     Measurement, SelectedSample, apply_orientation, polere, select_samples, normalized_intensity,
+    _fmt_step,
 )
 from testlect import Pmag
 
 # Voir app.HEADER_MARK / selection._HEADER_MARK - marque une ligne de
-# titres de colonnes pour un affichage en gras cote console (StarmacApp.
+# titres de colonnes pour un affichage en gras cote console (STARpaleomagApp.
 # _afficher), meme valeur, redefinie localement dans chaque module plutot
 # qu'importee (evite tout couplage sur un nom prive).
 _HEADER_MARK = "\x01"
@@ -743,7 +744,7 @@ def fit_lines_auto(selected: List[SelectedSample], anchored: bool = True) -> Lis
 # ---------------------------------------------------------------------------
 
 def _resolve_step_range_by_value(
-    ech: SelectedSample, tempmin: int, tempmax: int
+    ech: SelectedSample, tempmin: float, tempmax: float
 ) -> Optional[Tuple[int, int]]:
     jdeb = jfin = None
     for idx, m in enumerate(ech.mesures, start=1):
@@ -792,7 +793,7 @@ def fit_from_redo_file(
         if ech is None or len(ech.mesures) < 3:
             continue
         try:
-            tempmin, tempmax, numcomp = int(tempmin_s), int(tempmax_s), int(numcomp_s)
+            tempmin, tempmax, numcomp = float(tempmin_s), float(tempmax_s), int(numcomp_s)
         except ValueError:
             continue
 
@@ -842,7 +843,7 @@ def _correct_dec_inc(res: FitResult, orientation: int) -> Tuple[float, float]:
     bedding correction") : un resultat "mean:" est DEJA fige dans UNE
     orientation precise (par3_mean : 1=echantillon/2=in-situ/3=apres
     pendage), pas dans le repere echantillon brut comme un resultat L/P -
-    Starmac n'a pas les directions specimen individuelles pour le
+    STARpaleomag_Py n'a pas les directions specimen individuelles pour le
     reprojeter dans une AUTRE orientation (une moyenne de Fisher ne
     s'inverse pas comme une simple rotation, contrairement a un fit
     L/P individuel - voir recompute_fit_geometry, qui resout le meme
@@ -921,7 +922,7 @@ def dir_to_vgp(dec: float, inc: float, site_lat: float, site_lon: float) -> Tupl
     calculated for the site, if the user want to archive this mean, this
     mean needs to be recorded in the .pmagres file") : jusqu'ici seul
     l'import MagIC archivait un VGP (deja calcule par la contribution
-    source, jamais recalcule ici - voir convert_magic_to_r), Starmac_Py
+    source, jamais recalcule ici - voir convert_magic_to_r), STARpaleomag_Py
     n'avait pas sa propre transformation direction->VGP."""
     dec_r, inc_r = math.radians(dec), math.radians(inc)
     slat_r, slon_r = math.radians(site_lat), math.radians(site_lon)
@@ -1152,7 +1153,7 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
         else:
             lines.append(
                 f"{i:4d}: {r.id:<13s}{r.numcomp:5d}   {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
-                f"  {r.step_first:5d}  {r.step_last:5d}  {r.nb:4d}  {dec:6.1f} {inc:6.1f}  {r.mad:5.1f}"
+                f"  {r.step_first:5.0f}  {r.step_last:5.0f}  {r.nb:4d}  {dec:6.1f} {inc:6.1f}  {r.mad:5.1f}"
             )
     return "\n".join(lines)
 
@@ -1310,7 +1311,7 @@ _FILE_CODE_TO_ANCHOR = {"anc": "o", "not": "n", "o": "o", "n": "n"}
 # complet) au lieu de 2.0/3.0 dans la colonne "IS/TC" du fichier .pmagres -
 # demande explicite utilisateur ("for the mean, can we use 0 and 100 for
 # IS and full TC like in magic"). Le champ interne `par3_mean` garde la
-# convention Starmac existante (1/2/3, partagee avec `self.orientation`
+# convention STARpaleomag_Py existante (1/2/3, partagee avec `self.orientation`
 # ailleurs dans l'appli, voir _ORIENT_MODE_TAG) - seule la serialisation
 # fichier change, comme _ANCHOR_TO_FILE_CODE ci-dessus. "1" (coordonnees
 # echantillon) n'est normalement plus produit pour une moyenne (voir
@@ -2080,17 +2081,13 @@ def compute_mdf(ech: SelectedSample) -> Optional[MdfResult]:
     if demagcod in ("A.R.N.", "A.R.I.", "A.R.i."):
         return None
 
-    # `steps` (etape brut) est en dixiemes de mT pour un pas AF (convention
-    # historique Oersted - 1 mT = 10 Oe, voir testlect._PRMAG_OERSTED_CODES) :
-    # xmdf1/xmdf2, interpolation LINEAIRE de ces steps, sortent donc dans
-    # cette meme echelle - divise par 10 pour un M.D.F. (AF) afin de
-    # rapporter un vrai MDF en mT, pas un Oersted-equivalent - demande
-    # explicite utilisateur ("remove the historical background in oersted
-    # and now work only the AF in mT... especially if new users are going
-    # to use it"). Sans effet sur un M.D.T. (thermique, etape deja en degC).
-    if demagcod == "M.D.F.":
-        xmdf1 /= 10.0
-        xmdf2 /= 10.0
+    # `steps` (etape) est directement la valeur physique reelle (mT pour
+    # un pas AF, degC pour thermique - plus d'echelle Oersted-equivalente,
+    # voir testlect.Measurement) : xmdf1/xmdf2, interpolation LINEAIRE de
+    # ces steps, sortent donc DEJA dans la bonne unite - AUCUNE mise a
+    # l'echelle supplementaire ici (l'ancienne division par 10, necessaire
+    # quand `etape` restait Oersted-scale, ferait desormais doublement
+    # petit le resultat).
 
     rapport = xmdf2 / xmdf1 if xmdf1 != 0 else 0.0
     return MdfResult(id=ech.id, demagcod=demagcod, unite=unite,
@@ -2392,8 +2389,9 @@ def compute_koenigsberger(selected: List[SelectedSample], valk: float) -> List[K
 def format_koenigsberger(rows: List[KoenigsbergerRow]) -> str:
     lines = [f"{_HEADER_MARK}Sample        step       Mag           K            Koenigsberger ratio{_HEADER_MARK}"]
     for r in rows:
+        fake_m = Measurement(etape=r.etape, cod1=r.cod1, cod2=r.cod2, x=0, y=0, z=0, q=0, ins="", s=0)
         lines.append(
-            f"{r.id:<12s}  {r.etape:4d}{r.cod1}{r.cod2}  {r.mag:.3e}  {r.ind_mag:.3e}   {r.ratio:7.3f}"
+            f"{r.id:<12s}  {_fmt_step(fake_m)}  {r.mag:.3e}  {r.ind_mag:.3e}   {r.ratio:7.3f}"
         )
     return "\n".join(lines)
 
@@ -2418,7 +2416,7 @@ def list_diff_measurements(selected: List[SelectedSample], orientation: int = 1)
             # Fortran confirme) - demande explicite utilisateur.
             mag, _unit = normalized_intensity(ech, mag)
             lines.append(
-                f"{ij:4d}: {ech.id:<12s}  {a.etape:4d}{a.cod1}{a.cod2}  "
+                f"{ij:4d}: {ech.id:<12s}  {_fmt_step(a)}  "
                 f"{mag:10.3e} {dec:6.1f} {inc:6.1f}  q={a.q:<4d} {a.ins:<2s} s={a.s:.1f}"
             )
             ij += 1
@@ -2637,7 +2635,9 @@ def format_cooling_rate(r: CoolingRateResult) -> str:
 @dataclass
 class AniTensor:
     id: str
-    code2: str  # 'A0'=TRM, 'F0'=ARM, 'N0'=susceptibilite
+    code2: str  # 'A0'=TRM, 'F0'=ARM (calcul natif/AMS_Py), 'N0'=susceptibilite,
+    # 'AA'=ARM DEJA calcule par une contribution MagIC importee (voir
+    # extract_magic.magic_anisotropy_rows) - deliberement distinct de 'F0'
     k11: float
     k22: float
     k33: float
@@ -2649,7 +2649,7 @@ class AniTensor:
     # most complete .pmagani file") : nombre de positions ayant servi au
     # calcul et statistiques de Hext (sigma, test F global/F12/F23), issues
     # UNIQUEMENT du chemin PmagPy (voir anisotropy_magic.compute_aarm_
-    # pmagpy) - le calcul natif Starmac (jackknife geometrique, calcul.f)
+    # pmagpy) - le calcul natif STARpaleomag_Py (jackknife geometrique, calcul.f)
     # ne les calcule pas ; None/absent si non disponible.
     n_positions: Optional[int] = None
     sigma: Optional[float] = None
@@ -2668,7 +2668,56 @@ class AniTensor:
     quality: Optional[str] = None
 
 
-_ANI_CODE2 = {1: "A0", 2: "F0", 3: "N0"}
+@dataclass
+class AniMeanTensor:
+    """Une moyenne tensorielle au niveau SITE (PAS specimen) dans le
+    fichier .pmagani - demande explicite utilisateur ("can we have the
+    pmagani as pmagres with two blocks one at a specimen level, the next
+    one at site level with both blocks having their own set of
+    parameters"), meme principe que .pmagres (voir _SPECIMEN_HEADER/
+    _MEAN_HEADER plus haut dans ce module) : deux sections dans le MEME
+    fichier, chacune avec ses PROPRES colonnes plutot que de forcer les
+    deux niveaux dans un seul schema commun. Les 3 axes propres (k1>=
+    k2>=k3, convention Jelinek/AMS_Py - PAS k11/k22/k33 bruts comme le
+    niveau specimen, qui n'a pas de notion d'axes propres) avec leur
+    dec/inc et l'ellipse de confiance a 95% (alpha1/alpha2 = demi-grand/
+    demi-petit axe, meme convention que AMS_Py.ams_stats.AxisResult -
+    voir sa docstring pour l'ecart documente avec le formalisme Hext de
+    pmagpy). `id` porte le nom du SITE (pas un specimen) - `n` : nombre
+    de specimens effectivement utilises dans la moyenne (apres exclusion
+    des tenseurs isotropes, meme convention que TensorialMeanResult.n
+    cote AMS_Py)."""
+    id: str  # nom du site
+    code2: str
+    n: int
+    k1: float
+    k2: float
+    k3: float
+    dec1: float
+    inc1: float
+    dec2: float
+    inc2: float
+    dec3: float
+    inc3: float
+    alpha1_1: float = 0.0
+    alpha2_1: float = 0.0
+    alpha1_2: float = 0.0
+    alpha2_2: float = 0.0
+    alpha1_3: float = 0.0
+    alpha2_3: float = 0.0
+    # Parametres de forme (Jelinek 1978, meme convention/formules que
+    # AMS_Py.ams_stats.shape_params - PAS recalcules ici, fournis par
+    # l'appelant) - "n.d" possible si non fournis (ex. tenseur moyen
+    # isotrope, ou provenance qui ne les calcule pas).
+    P: Optional[float] = None
+    T: Optional[float] = None
+    L: Optional[float] = None
+    F: Optional[float] = None
+    Pprim: Optional[float] = None
+    info: str = ""
+
+
+_ANI_CODE2 = {1: "A0", 2: "F0", 3: "N0", 4: "AA"}
 _ANI_POSITION_KEYS = ("X+", "X-", "Y+", "Y-", "Z+", "Z-")
 
 
@@ -2768,10 +2817,28 @@ class AnisotropyPositionDiag:
     inc: float
 
 
+@dataclass
+class AnisotropyPairNrm:
+    """Une ligne 'ARN X+X-'/'ARN Y+Y-'/'ARN Z+Z-' (calcul.f:4206-4328) :
+    estimation de la NRM residuelle a partir d'UNE SEULE paire d'axes
+    (moyenne (position+ + position-)/2), AVANT la moyenne des 3 qui donne
+    `nrm_mean`/"Mean NRM" - demande explicite utilisateur ("I want also
+    the listing of the three NRM determined from each pair... and not
+    only the mean") : les 3 valeurs prises separement font apparaitre si
+    UNE paire specifique porte une NRM residuelle nettement differente
+    des deux autres (probleme localise a cette paire), ce que la seule
+    moyenne des 3 ne montre pas."""
+    key: str  # "X+X-" / "Y+Y-" / "Z+Z-"
+    intensity: float
+    dec: float
+    inc: float
+
+
 def _nrm_mean_and_diag(
     positions: Dict[str, Measurement], holder: Optional[ArmHolderBackground],
     norme: str, vol: float,
-) -> Tuple[Tuple[float, float, float], List[AnisotropyPositionDiag], float, Dict[str, Tuple[float, float, float]]]:
+) -> Tuple[Tuple[float, float, float], List[AnisotropyPositionDiag], float,
+           Dict[str, Tuple[float, float, float]], List[AnisotropyPairNrm], AnisotropyPairNrm]:
     """Equivalent de calcul.f:4206-4479 : moyenne des 3 paires (X+/X-,
     Y+/Y-, Z+/Z-) -> `nrm_mean` (la "NRM residuelle" commune aux 6
     positions - une anisotropie basee sur des TRM PARTIELLES laisse
@@ -2780,7 +2847,12 @@ def _nrm_mean_and_diag(
     isolement - demande explicite de l'utilisateur). Retourne (nrm_mean,
     liste de diagnostics par position, deviation_pct (`deviatTRM`),
     composantes brutes NRM-soustraites par position - utilisees par
-    _check_position_inversion)."""
+    _check_position_inversion -, liste des 3 estimations PAR PAIRE de la
+    NRM residuelle - voir AnisotropyPairNrm -, et cette MEME nrm_mean
+    exprimee en moment/dec/inc plutot qu'en x/y/z brut - demande
+    explicite utilisateur ("provide Mean NRM... in moment dec inc; it is
+    easier for the user to compare with the three NRM above"), meme
+    format que les 3 estimations par paire pour une comparaison directe)."""
     idx_of = {"X+": 0, "X-": 1, "Y+": 2, "Y-": 3, "Z+": 4, "Z-": 5}
     vecs = {k: _position_vector(positions, k, idx_of[k], holder) for k in _ANI_POSITION_KEYS}
 
@@ -2791,6 +2863,15 @@ def _nrm_mean_and_diag(
 
     def scale(intensity: float) -> float:
         return intensity * 1.0e3 / vol if norme == "m" else intensity * 1.0e6 / vol
+
+    def pair_nrm(key: str, pair_mean: Tuple[float, float, float]) -> AnisotropyPairNrm:
+        mag, dec, inc = polere(*pair_mean)
+        return AnisotropyPairNrm(key=key, intensity=scale(mag), dec=dec, inc=inc)
+
+    pair_nrms = [
+        pair_nrm("X+X-", pair_mean_x), pair_nrm("Y+Y-", pair_mean_y), pair_nrm("Z+Z-", pair_mean_z),
+    ]
+    nrm_mean_diag = pair_nrm("Mean", nrm_mean)
 
     diags: List[AnisotropyPositionDiag] = []
     raw_components: Dict[str, Tuple[float, float, float]] = {}
@@ -2812,7 +2893,67 @@ def _nrm_mean_and_diag(
     trmmean /= 6.0
     deviation_pct = 100.0 * sommetrm / trmmean if trmmean else 0.0
 
-    return nrm_mean, diags, deviation_pct, raw_components
+    return nrm_mean, diags, deviation_pct, raw_components, pair_nrms, nrm_mean_diag
+
+
+def replace_position_by_symmetry(
+    positions: Dict[str, Measurement], holder: Optional[ArmHolderBackground], replace_key: str,
+) -> Dict[str, Measurement]:
+    """Reconstruit UNE position suspecte a partir de SA PROPRE PAIRE et de
+    la moyenne des DEUX AUTRES paires - port du bloc DESACTIVE de
+    calcul.f:4481-4552 (le meme "c ... voulez-vous supprimer une des 6
+    mesures ? laquelle:" que le prompt lui-meme, jamais active dans la
+    version livree) - demande explicite utilisateur ("when we remove one
+    line, it is replaced by the antiparallel... also easier to write the
+    number of the line from 1 to 6").
+
+    PAS une nouvelle mesure a choisir : `new_vector = -partner_vector +
+    2 * avg(other_two_pair_means)` - ou `partner_vector` est l'AUTRE
+    membre de la MEME paire (X- pour X+, etc.) et `other_two_pair_means`
+    les moyennes (position+ + position-)/2 des deux paires NON concernees
+    (dans lesquelles la mesure suspecte n'intervient pas). Le raisonnement :
+    en l'absence de tout probleme, chaque paire devrait donner la MEME
+    estimation de la NRM residuelle commune aux 6 positions ; si UNE
+    position est suspecte, les deux AUTRES paires restent une estimation
+    fiable de cette NRM commune, et permettent de reconstruire la position
+    manquante en supposant sa propre paire parfaitement antiparallele une
+    fois recalee sur ce niveau de NRM partage - PAS un simple `-partner`
+    (qui ignorerait completement la NRM residuelle commune).
+
+    Retourne une COPIE de `positions` avec seulement `replace_key` change
+    (vers une Measurement SYNTHETIQUE, meme etape/cod1/cod2/q/ins/s que
+    l'originale, x/y/z recalcules) - la mesure BRUTE d'origine dans
+    ech.mesures n'est JAMAIS modifiee, contrairement au Fortran qui
+    mutait `mes(ixp)` directement (aurait corrompu la mesure source pour
+    le reste de la session)."""
+    idx_of = {"X+": 0, "X-": 1, "Y+": 2, "Y-": 3, "Z+": 4, "Z-": 5}
+    vecs = {k: _position_vector(positions, k, idx_of[k], holder) for k in _ANI_POSITION_KEYS}
+    pair_mean = {
+        axis: tuple((vecs[f"{axis}+"][c] + vecs[f"{axis}-"][c]) / 2 for c in range(3))
+        for axis in ("X", "Y", "Z")
+    }
+
+    axis, sign = replace_key[0], replace_key[1]
+    partner_key = axis + ("-" if sign == "+" else "+")
+    other_axes = [a for a in ("X", "Y", "Z") if a != axis]
+    anrm_other = tuple(
+        (pair_mean[other_axes[0]][c] + pair_mean[other_axes[1]][c]) / 2 for c in range(3))
+    partner_vec = vecs[partner_key]
+    new_vec = tuple(-partner_vec[c] + 2 * anrm_other[c] for c in range(3))
+
+    # _position_vector soustrait la ligne de base porte-echantillon - la
+    # rajouter ici pour que la Measurement synthetique, une fois repassee
+    # dans le pipeline normal (qui la soustrait de nouveau), reconstruise
+    # exactement `new_vec`.
+    if holder is not None:
+        idx = idx_of[replace_key]
+        new_vec = (new_vec[0] + holder.x[idx], new_vec[1] + holder.y[idx], new_vec[2] + holder.z[idx])
+
+    original = positions[replace_key]
+    synthetic = replace(original, x=new_vec[0], y=new_vec[1], z=new_vec[2])
+    new_positions = dict(positions)
+    new_positions[replace_key] = synthetic
+    return new_positions
 
 
 def _check_position_inversion(raw: Dict[str, Tuple[float, float, float]]) -> Optional[str]:
@@ -2890,6 +3031,8 @@ class AnisotropyComputation:
     swapped_axes: List[str]  # ex. ['X'] si une inversion a ete corrigee
     trm_evolution_pct: Optional[float]  # `TRMevol`, None si pas de ZB trouvee
     zb_used: bool  # Zplus remplace par ZB (evolution > seuil + use_zb_on_evolution)
+    pair_nrm: List[AnisotropyPairNrm]  # les 3 estimations "ARN X+X-/Y+Y-/Z+Z-" avant leur moyenne (nrm_mean)
+    nrm_mean_diag: AnisotropyPairNrm  # nrm_mean, en moment/dec/inc - meme format que pair_nrm, pour comparaison directe
 
 
 def _all_ani_variants(
@@ -2998,7 +3141,7 @@ def compute_anisotropy_tensor(
 
     swapped_axes: List[str] = []
     for _ in range(4):  # borne de securite - converge en 1-2 iterations en pratique
-        nrm_mean, diags, deviation_pct, raw_components = _nrm_mean_and_diag(
+        nrm_mean, diags, deviation_pct, raw_components, pair_nrm, nrm_mean_diag = _nrm_mean_and_diag(
             positions, holder, ech.norme, ech.vol)
         axis = _check_position_inversion(raw_components)
         if axis is None:
@@ -3021,7 +3164,7 @@ def compute_anisotropy_tensor(
             if reclassified is not None:
                 positions = reclassified
                 zb_used = True
-                nrm_mean, diags, deviation_pct, raw_components = _nrm_mean_and_diag(
+                nrm_mean, diags, deviation_pct, raw_components, pair_nrm, nrm_mean_diag = _nrm_mean_and_diag(
                     positions, holder, ech.norme, ech.vol)
 
     xpx, xpy, xpz = _position_vector(positions, "X+", 0, holder)
@@ -3048,6 +3191,7 @@ def compute_anisotropy_tensor(
         holder_used=holder is not None,
         nrm_mean=nrm_mean, position_diags=diags, deviation_pct=deviation_pct,
         swapped_axes=swapped_axes, trm_evolution_pct=trm_evolution_pct, zb_used=zb_used,
+        pair_nrm=pair_nrm, nrm_mean_diag=nrm_mean_diag,
     )
 
 
@@ -3064,7 +3208,7 @@ def compute_anisotropy_tensor(
 # associe a son .prmag (meme nom de base, jointure par specimen - voir
 # ani_path_for) ; etape est conserve (diagnostic, PAS dans .prmag).
 # n_positions/sigma/ftest/ftest12/ftest23 sont NOUVEAUX - "n.d" si non
-# disponibles (le calcul natif Starmac, jackknife geometrique, ne calcule
+# disponibles (le calcul natif STARpaleomag_Py, jackknife geometrique, ne calcule
 # pas les statistiques de Hext ; seul le chemin PmagPy - voir
 # anisotropy_magic.compute_aarm_pmagpy - les fournit).
 _PMAGANI_HEADER = [
@@ -3081,12 +3225,35 @@ _PMAGANI_HEADER = [
 # de savoir SANS ambiguite si le tenseur relu depuis le fichier est
 # satisfactory ou non).
 
+# Deux sections dans le MEME fichier .pmagani, MEME principe que
+# .pmagres (_SPECIMEN_HEADER/_MEAN_HEADER plus haut dans ce module) -
+# demande explicite utilisateur ("can we have the pmagani as pmagres
+# with two blocks one at a specimen level, the next one at site level
+# with both blocks having their own set of parameters") : colonnes
+# specimen (_PMAGANI_HEADER, k11..k13 bruts) INCHANGEES, colonnes site
+# mean (_PMAGANI_MEAN_HEADER, axes propres k1>=k2>=k3 + dec/inc/ellipse
+# de confiance, PAS un simple duplicata du schema specimen). Un ancien
+# fichier .pmagani (avant ce changement, jamais de marqueur
+# _ANI_MEAN_HEADER) reste lisible tel quel - _read_pmagani_tensors le
+# traite ENTIEREMENT comme section specimen, exactement comme avant.
+_ANI_SPECIMEN_HEADER = "#specimen tensor results"
+_ANI_MEAN_HEADER = "#site mean tensor results"
+
+_PMAGANI_MEAN_HEADER = [
+    "site", "code2", "n",
+    "k1", "k2", "k3",
+    "dec1", "inc1", "dec2", "inc2", "dec3", "inc3",
+    "alpha1_1", "alpha2_1", "alpha1_2", "alpha2_2", "alpha1_3", "alpha2_3",
+    "P", "T", "L", "F", "Pprim",
+    "info",
+]
+
 # `s` (susceptibilite scalaire) est en SI*1e-5 (ex. 7261 = 0.07261 SI) -
 # convention Bartington ("since the 80s ... measure in 1e-5 SI assuming a
 # volume of 10cc ... could read between 0 and 9999"), gardee par
 # l'utilisateur pour pouvoir comparer Bartington et AGICO - demande
 # explicite utilisateur ("We should add in the header that s is in
-# SI*1e-5"). Ecrite en commentaire d'entete par _ensure_pmagani_header
+# SI*1e-5"). Ecrite en commentaire d'entete par _insert_pmagani_line
 # (et cote AMS_Py par import_legacy_ani/import_asc_file).
 _PMAGANI_UNITS_NOTE = "# s(SI*1e-5): susceptibility in units of 1e-5 SI (Bartington/AGICO convention, e.g. 7261 = 0.07261 SI)\n"
 
@@ -3105,22 +3272,68 @@ def _parse_pmagani_stat(v: str) -> Optional[float]:
         return None
 
 
-def _ensure_pmagani_header(path: str) -> None:
+def _insert_pmagani_line(path: str, line: str, is_mean: bool) -> None:
+    """Insere UNE ligne .pmagani a la bonne section - meme discipline a
+    deux sections que calcul.archivres pour .pmagres (voir le commentaire
+    au-dessus de _ANI_SPECIMEN_HEADER) : une ligne specimen va en fin de
+    la section specimen (juste avant l'en-tete '#site mean tensor
+    results' si elle existe deja, en sautant les lignes vides qui la
+    precedent) ; une ligne site mean va TOUJOURS en fin de fichier
+    (section mean, creee au besoin avec son propre en-tete). REMPLACE
+    l'ancien `_ensure_pmagani_header` (simple `open(path, "a")` en
+    aveugle) qui aurait, une fois une section mean ajoutee, laisse un
+    NOUVEAU tenseur specimen s'ecrire APRES elle - cassant les deux
+    sections."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("# pmagani v1 - companion of .prmag/.pmagres, join key = specimen\n")
-            f.write(_PMAGANI_UNITS_NOTE)
-            f.write("\t".join(_PMAGANI_HEADER) + "\n")
+        lines = [
+            "# pmagani v2 - companion of .prmag/.pmagres, join key = specimen "
+            "(specimen section) / site (site mean section)",
+            _PMAGANI_UNITS_NOTE.rstrip("\n"),
+            _ANI_SPECIMEN_HEADER,
+            "\t".join(_PMAGANI_HEADER),
+        ]
+    else:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+
+    mean_header_idx = next(
+        (i for i, l in enumerate(lines) if l.strip() == _ANI_MEAN_HEADER), None)
+
+    if is_mean:
+        if mean_header_idx is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(_ANI_MEAN_HEADER)
+            lines.append("\t".join(_PMAGANI_MEAN_HEADER))
+        lines.append(line.rstrip("\n"))
+    elif mean_header_idx is None:
+        lines.append(line.rstrip("\n"))
+    else:
+        insert_idx = mean_header_idx
+        while insert_idx > 0 and not lines[insert_idx - 1].strip():
+            insert_idx -= 1
+        lines.insert(insert_idx, line.rstrip("\n"))
+
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _format_pmagani_line(
-    ech: "SelectedSample", tensor: AniTensor, etape: int,
+    specimen_id: str, tensor: AniTensor, etape: int,
     zplus_label: str, zminus_label: str, trm_evolution_pct: float, deviation_pct: float,
+    info_text: Optional[str] = None,
 ) -> str:
-    info_text = (
-        f"TRM evo: {trm_evolution_pct:5.1f} deviation:{deviation_pct:5.1f}"
-        f"  steps: X+ X- Y+ Y- {zplus_label} {zminus_label}"
-    )
+    """`info_text` : override total du texte informatif habituel (etape/
+    positions/evolution TRM) - utilise par write_ani_tensors_from_magic
+    (tenseur DEJA calcule par une contribution MagIC importee, aucune des
+    6 positions/etape STARpaleomag_Py n'est disponible ici) ; None (par defaut)
+    reconstruit le texte usuel a partir de etape/zplus_label/zminus_label/
+    trm_evolution_pct/deviation_pct comme avant."""
+    if info_text is None:
+        info_text = (
+            f"TRM evo: {trm_evolution_pct:5.1f} deviation:{deviation_pct:5.1f}"
+            f"  steps: X+ X- Y+ Y- {zplus_label} {zminus_label}"
+        )
     if tensor.quality == "g":
         info_text += " - PmagPy Hext F-test: significant anisotropy (satisfactory)"
     elif tensor.quality == "b":
@@ -3128,7 +3341,7 @@ def _format_pmagani_line(
     info = f'"{info_text}"'
     n_positions = tensor.n_positions if tensor.n_positions is not None else 6
     fields = [
-        ech.id, tensor.code2, str(etape),
+        specimen_id, tensor.code2, str(etape),
         f"{tensor.k11:.6E}", f"{tensor.k22:.6E}", f"{tensor.k33:.6E}",
         f"{tensor.k12:.6E}", f"{tensor.k23:.6E}", f"{tensor.k13:.6E}",
         "1.00000", str(n_positions),
@@ -3145,12 +3358,22 @@ def _read_pmagani_tensors(path: str) -> List[AniTensor]:
     n_positions,sigma,ftest,ftest12,ftest23,quality,info (voir
     _PMAGANI_HEADER) - PLUS de cin/caz/dip/str (voir commentaire au-dessus
     de _PMAGANI_HEADER) : ces champs viennent maintenant du .prmag associe
-    (jointure par specimen), pas de ce fichier."""
+    (jointure par specimen), pas de ce fichier.
+
+    S'ARRETE des que l'en-tete '#site mean tensor results' est rencontre
+    (voir _read_pmagani_mean_tensors pour cette section) - un fichier
+    ANTERIEUR a l'ajout de cette 2e section (jamais ce marqueur) est lu
+    exactement comme avant, en entier."""
     out: List[AniTensor] = []
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\n")
-            if not line or line.startswith("#"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                if stripped == _ANI_MEAN_HEADER:
+                    break
                 continue
             parts = line.split("\t")
             if not parts or parts[0] == "specimen":
@@ -3181,6 +3404,90 @@ def _read_pmagani_tensors(path: str) -> List[AniTensor]:
                 ftest12=ftest12, ftest23=ftest23, quality=quality,
             ))
     return out
+
+
+def _format_pmagani_mean_line(mean: AniMeanTensor) -> str:
+    info = f'"{mean.info}"' if mean.info else '""'
+    fields = [
+        mean.id, mean.code2, str(mean.n),
+        f"{mean.k1:.6E}", f"{mean.k2:.6E}", f"{mean.k3:.6E}",
+        f"{mean.dec1:.2f}", f"{mean.inc1:.2f}", f"{mean.dec2:.2f}", f"{mean.inc2:.2f}",
+        f"{mean.dec3:.2f}", f"{mean.inc3:.2f}",
+        f"{mean.alpha1_1:.3f}", f"{mean.alpha2_1:.3f}",
+        f"{mean.alpha1_2:.3f}", f"{mean.alpha2_2:.3f}",
+        f"{mean.alpha1_3:.3f}", f"{mean.alpha2_3:.3f}",
+        _fmt_pmagani_stat(mean.P), _fmt_pmagani_stat(mean.T),
+        _fmt_pmagani_stat(mean.L), _fmt_pmagani_stat(mean.F), _fmt_pmagani_stat(mean.Pprim),
+        info,
+    ]
+    return "\t".join(fields) + "\n"
+
+
+def _read_pmagani_mean_tensors(path: str) -> List[AniMeanTensor]:
+    """Lit UNIQUEMENT la section '#site mean tensor results' - voir
+    _PMAGANI_MEAN_HEADER pour les colonnes. [] si le fichier n'a jamais
+    cette section (fichier ecrit avant son introduction, ou qui n'a
+    encore aucune moyenne de site archivee)."""
+    out: List[AniMeanTensor] = []
+    in_mean_section = False
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                if stripped == _ANI_MEAN_HEADER:
+                    in_mean_section = True
+                continue
+            if not in_mean_section:
+                continue
+            parts = line.split("\t")
+            if not parts or parts[0] == "site":
+                continue  # ligne d'entete
+            if len(parts) < len(_PMAGANI_MEAN_HEADER):
+                continue
+            try:
+                out.append(AniMeanTensor(
+                    id=parts[0], code2=parts[1], n=int(float(parts[2])),
+                    k1=float(parts[3]), k2=float(parts[4]), k3=float(parts[5]),
+                    dec1=float(parts[6]), inc1=float(parts[7]),
+                    dec2=float(parts[8]), inc2=float(parts[9]),
+                    dec3=float(parts[10]), inc3=float(parts[11]),
+                    alpha1_1=float(parts[12]), alpha2_1=float(parts[13]),
+                    alpha1_2=float(parts[14]), alpha2_2=float(parts[15]),
+                    alpha1_3=float(parts[16]), alpha2_3=float(parts[17]),
+                    P=_parse_pmagani_stat(parts[18]), T=_parse_pmagani_stat(parts[19]),
+                    L=_parse_pmagani_stat(parts[20]), F=_parse_pmagani_stat(parts[21]),
+                    Pprim=_parse_pmagani_stat(parts[22]),
+                    info=parts[23].strip('"') if len(parts) > 23 else "",
+                ))
+            except ValueError:
+                continue
+    return out
+
+
+def write_ani_mean_tensor(path: str, mean: AniMeanTensor) -> None:
+    """Ajoute UNE moyenne de site au fichier .pmagani, dans la section
+    '#site mean tensor results' (creee au besoin, toujours en fin de
+    fichier - voir _insert_pmagani_line) - demande explicite utilisateur
+    ("can we have the pmagani as pmagres with two blocks one at a
+    specimen level, the next one at site level with both blocks having
+    their own set of parameters")."""
+    _insert_pmagani_line(path, _format_pmagani_mean_line(mean), is_mean=True)
+
+
+def read_ani_mean_tensor(path: str, site: str, code2: str) -> Optional[AniMeanTensor]:
+    """Retrouve la moyenne de site `code2` (ex. 'A0') pour `site` (ex.
+    '12TU74') - meme convention que read_ani_tensor (recherche
+    insensible a la casse sur l'id). None si absente/fichier introuvable."""
+    if not os.path.exists(path):
+        return None
+    site_upper = site.strip().upper()
+    for t in _read_pmagani_mean_tensors(path):
+        if t.id.strip().upper() == site_upper and t.code2 == code2:
+            return t
+    return None
 
 
 def _read_ani_tensors_legacy(path: str) -> List[AniTensor]:
@@ -3225,10 +3532,8 @@ def write_ani_tensor(
     etape = positions["X+"].etape if positions else 0
     zplus_label = positions["Z+"].cod1 + positions["Z+"].cod2 if positions else ""
     zminus_label = positions["Z-"].cod1 + positions["Z-"].cod2 if positions else ""
-    _ensure_pmagani_header(path)
-    line = _format_pmagani_line(ech, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line)
+    line = _format_pmagani_line(ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct)
+    _insert_pmagani_line(path, line, is_mean=False)
 
 
 def write_ani_tensors(
@@ -3250,11 +3555,47 @@ def write_ani_tensors(
     etape = positions["X+"].etape if positions else 0
     zplus_label = positions["Z+"].cod1 + positions["Z+"].cod2 if positions else ""
     zminus_label = positions["Z-"].cod1 + positions["Z-"].cod2 if positions else ""
-    _ensure_pmagani_header(path)
-    with open(path, "a", encoding="utf-8") as f:
-        for tensor in tensors:
-            f.write(_format_pmagani_line(
-                ech, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct))
+    for tensor in tensors:
+        _insert_pmagani_line(path, _format_pmagani_line(
+            ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct),
+            is_mean=False)
+
+
+def write_ani_tensors_from_magic_rows(path: str, rows: List[dict]) -> int:
+    """Archive dans le .pmagani UN tenseur DEJA calcule par une
+    contribution MagIC importee (voir extract_magic.magic_anisotropy_rows,
+    qui produit `rows`) - demande explicite utilisateur ("lors de
+    l'importation des fichiers Magic, archiver dans le fichier pmagani
+    les donnees de tenseurs d'anisotropie avec le code A0 si c'est un
+    tenseur de TRM, N0 pour l'AMS, AA pour l'ARM").
+
+    A la difference de write_ani_tensor/write_ani_tensors (calcul natif
+    STARpaleomag_Py, 6 positions X+/X-/Y+/Y-/Z+/Z- toujours disponibles), il n'y a
+    ici ni etape ni positions a rapporter - `info_text` remplace le texte
+    "steps: X+ X- ..." habituel par une mention explicite de la
+    provenance, pour qu'une ligne "AA"/"A0"/"N0" issue d'un import MagIC
+    ne soit jamais confondue, en relisant le fichier, avec un tenseur
+    recalcule nativement a partir des 6 mesures. `etape` est ecrit a 0
+    (aucune mesure STARpaleomag_Py associee - diagnostic seulement, voir
+    _PMAGANI_HEADER). Retourne le nombre de lignes ecrites (une par
+    element de `rows`, PAS un total de specimens : plusieurs protocoles
+    d'anisotropie sur le meme specimen produisent plusieurs lignes)."""
+    if not rows:
+        return 0
+    for row in rows:
+        tensor = AniTensor(
+            id=row["specimen"], code2=row["code2"],
+            k11=row["k11"], k22=row["k22"], k33=row["k33"],
+            k12=row["k12"], k23=row["k23"], k13=row["k13"],
+            n_positions=row.get("n_positions"), sigma=row.get("sigma"),
+            ftest=row.get("ftest"), ftest12=row.get("ftest12"), ftest23=row.get("ftest23"),
+            quality=row.get("quality"),
+        )
+        _insert_pmagani_line(path, _format_pmagani_line(
+            row["specimen"], tensor, 0, "", "", 0.0, 0.0,
+            info_text="tensor imported as-is from a MagIC contribution (not recomputed by STARpaleomag_Py)",
+        ), is_mean=False)
+    return len(rows)
 
 
 # ---------------------------------------------------------------------------

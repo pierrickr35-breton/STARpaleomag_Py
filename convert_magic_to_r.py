@@ -39,13 +39,16 @@ from typing import Dict, List, Optional, Tuple
 
 from extract_magic import (
     _OUT_OF_SCOPE_PROTOCOLS, magic_results_to_redo_lines, magic_site_means,
-    magic_pint_results_to_redo_lines,
+    magic_pint_results_to_redo_lines, magic_anisotropy_rows,
 )
 from testlect import read_prmag_file
-from calcul import FitResult, archivres, fit_from_redo_file, results_path_for, dp_dm_from_a95
+from calcul import (
+    FitResult, archivres, fit_from_redo_file, results_path_for, dp_dm_from_a95,
+    ani_path_for, write_ani_tensors_from_magic_rows,
+)
 
 FORMAT_HEADER = (
-    "#Starmac .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
+    "#STARpaleomag_Py .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
     "fields AF or IRM and in microTesla (uT) for low field paleointensity "
     "or ARM  temperatures in degC  date=ISO8601"
 )
@@ -184,7 +187,7 @@ def _sample_header_block(specimen: str, spec_row, sample_row, site_row, loc_row)
     lat = _f(sample_row, "lat") if sample_row and sample_row.get("lat") else _f(site_row, "lat")
     lon = _f(sample_row, "lon") if sample_row and sample_row.get("lon") else _f(site_row, "lon")
     elevation = _f(site_row, "elevation")
-    # convention Starmac != convention MagIC (voir DIFF_WITH_MAGIC) :
+    # convention STARpaleomag_Py != convention MagIC (voir DIFF_WITH_MAGIC) :
     # azimuth = azimuth de X MagIC +90 ; dip = -(dip MagIC) - meme
     # transformation que extract_magic.py (az_trans = core_az_raw+90,
     # inc_trans = -core_dip_raw), appliquee ici a l'import plutot qu'a
@@ -421,7 +424,7 @@ def _derive_cod(row: Dict[str, str], letters: Dict[int, str], prev_cod2: str):
         # classique) et LT-PTRM-Z ("after in-field step, zero field
         # cooling at a lower temperature", pTRM tail check a temperature
         # plus basse) sont TOUS LES DEUX un pas 'P' cote Rennes - le
-        # format natif Starmac ne distingue pas les deux variantes par
+        # format natif STARpaleomag_Py ne distingue pas les deux variantes par
         # cod1 (voir magic_export.py cod1=='P', qui les distingue plutot
         # via dc_field selon que le pas precedent est 'S' ou 'R' - demande
         # explicite utilisateur, "there is two ways of doing this ...").
@@ -500,7 +503,7 @@ def _measurement_rows(specimen: str, meas_rows: List[Dict[str, str]], problems: 
         if sig.startswith("SKIP:"):
             prefix = sig[len("SKIP:"):]
             label = _OUT_OF_SCOPE_PROTOCOLS.get(prefix, prefix)
-            problems.append((f"{label} ({prefix}) - not processed by Starmac", len(group), specimen))
+            problems.append((f"{label} ({prefix}) - not processed by STARpaleomag_Py", len(group), specimen))
             continue
 
         # letters/prev_cod2 scopes a l'experience (voir _experiment_groups)
@@ -569,7 +572,9 @@ def _measurement_rows(specimen: str, meas_rows: List[Dict[str, str]], problems: 
     return rows
 
 
-def convert_magic_file(path_in: str, path_out: str) -> Tuple[int, str, int, int, int, Optional[str]]:
+def convert_magic_file(
+    path_in: str, path_out: str,
+) -> Tuple[int, str, int, int, int, Optional[str], int]:
     tables = parse_magic_contribution(path_in)
     locations = _index_by(tables.get("locations", []), "location")
     sites = _index_by(tables.get("sites", []), "site")
@@ -609,7 +614,8 @@ def convert_magic_file(path_in: str, path_out: str) -> Tuple[int, str, int, int,
     report = format_problems_report(path_in, problems)
     nb_results, nb_means = _convert_magic_results(path_in, path_out)
     nb_pint, redo_pint_path = _write_pint_redo_file(path_in, path_out)
-    return len(blocks), report, nb_results, nb_means, nb_pint, redo_pint_path
+    nb_aniso = _write_ani_tensors_from_magic(path_in, path_out)
+    return len(blocks), report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso
 
 
 def _write_pint_redo_file(path_in: str, path_out: str) -> Tuple[int, Optional[str]]:
@@ -637,6 +643,22 @@ def _write_pint_redo_file(path_in: str, path_out: str) -> Tuple[int, Optional[st
     return len(lines), redo_path
 
 
+def _write_ani_tensors_from_magic(path_in: str, path_out: str) -> int:
+    """Archive dans le .pmagani compagnon de `path_out` les tenseurs
+    d'anisotropie DEJA calcules par la contribution MagIC source (voir
+    extract_magic.magic_anisotropy_rows) - demande explicite utilisateur
+    ("lors de l'importation des fichiers Magic, archiver dans le fichier
+    pmagani les donnees de tenseurs d'anisotropie avec le code A0 si
+    c'est un tenseur de TRM, N0 pour l'AMS, AA pour l'ARM"). Retourne le
+    nombre de lignes ecrites (0 si specimens.txt n'a aucune ligne
+    d'anisotropie exploitable - pas une erreur, la plupart des
+    contributions n'en ont pas)."""
+    rows = magic_anisotropy_rows(path_in, combined=True)
+    if not rows:
+        return 0
+    return write_ani_tensors_from_magic_rows(ani_path_for(path_out), rows)
+
+
 def _convert_magic_results(path_in: str, path_out: str) -> Tuple[int, int]:
     """Genere AUSSI le .pmagres compagnon a partir de la MEME contribution
     MagIC - demande explicite utilisateur ("is the pmagres file also
@@ -651,12 +673,12 @@ def _convert_magic_results(path_in: str, path_out: str) -> Tuple[int, int]:
 
     1) specimens.txt deja interprete (dir_dec/dir_inc/method_codes DE-BFL/
        DE-BFP calcules par pmagpy/demag_gui) -> RECALCULE via le fit natif
-       Starmac (calcul.fit_from_redo_file) sur les mesures qu'on vient
+       STARpaleomag_Py (calcul.fit_from_redo_file) sur les mesures qu'on vient
        d'ecrire dans path_out (relues via testlect.read_prmag_file, pas
        recopiees depuis MagIC) - memes raisons qu'avant :
-       rester coherent avec ce que Starmac calculerait lui-meme.
+       rester coherent avec ce que STARpaleomag_Py calculerait lui-meme.
     2) sites.txt (dir_dec/dir_inc/dir_alpha95/dir_k/vgp_lat/vgp_lon deja
-       calcules) -> archive TEL QUEL (rien a recalculer, Starmac n'a pas
+       calcules) -> archive TEL QUEL (rien a recalculer, STARpaleomag_Py n'a pas
        les directions specimen individuelles utilisees pour ce calcul),
        `liste` cross-reference les specimens de la colonne "specimens"
        contre les resultats FRAICHEMENT archives a l'etape 1 ci-dessus
@@ -746,9 +768,12 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output")
     args = parser.parse_args()
     out = args.output or os.path.splitext(args.magic_file)[0] + ".prmag"
-    n, report, nb_results, nb_means, nb_pint, redo_pint_path = convert_magic_file(args.magic_file, out)
+    n, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
+        args.magic_file, out)
     print(report)
     print(f"{n} specimen(s) converted -> {out}")
     print(f"{nb_results} result(s) and {nb_means} site mean(s) -> {results_path_for(out)}")
     if redo_pint_path:
         print(f"{nb_pint} paleointensity determination(s) -> {redo_pint_path}")
+    if nb_aniso:
+        print(f"{nb_aniso} anisotropy tensor(s) -> {ani_path_for(out)}")

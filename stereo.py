@@ -428,7 +428,7 @@ def draw_stereo_results(
 
         if nbech == 1 and len(results) == 1:
             fit = results[0]
-            titre = f" ech:{fit.id:<12s}  fit between {fit.step_first:4d} et {fit.step_last:4d}"
+            titre = f" ech:{fit.id:<12s}  fit between {fit.step_first:4.0f} et {fit.step_last:4.0f}"
             dimster_equiv = r * 3.0
             u = -dimster_equiv / 3.0 - 1.0
             v = -dimster_equiv / 3.0 - 1.2

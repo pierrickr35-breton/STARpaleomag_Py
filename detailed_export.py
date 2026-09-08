@@ -1,45 +1,67 @@
 """
-Port de `exportpmagren` ("export detailed Rennes") et `exporttolatex`
-("export Latex"), toutes deux dans dataselect.f. Dans le Fortran,
-`exportpmagren` appelle `exporttolatex` automatiquement a la fin (un seul
-menu declenche les deux exports a la suite) ; ici elles sont deliberement
-SEPAREES en deux fonctions/menus independants, comme demande.
+Port de `exportpmagren` ("export detailed Rennes", dataselect.f) : fichier
+texte unique avec, pour chaque echantillon, un bloc de parametres complet
+puis le tableau de mesures.
+
+`exporttolatex` (l'export Latex compagnon dans le Fortran d'origine, que
+`exportpmagren` enchainait automatiquement) a ete PORTE puis RETIRE -
+demande explicite utilisateur ("we can remove the Latex export... a
+paleomagnetist who want to see the data can do it through
+STARpaleomag_Py") : necessitait une chaine LaTeX installee juste pour
+produire un PDF, un cout injustifie des lors que l'application elle-meme
+reste le bon outil de consultation. export_detailed_txt genere desormais
+AUTOMATIQUEMENT une copie PDF monospace du meme texte a la place (voir
+_render_text_as_pdf) - demande explicite utilisateur ("a PDF copy of the
+text export: do it automatically with the export text").
 
 Hors perimetre (documente, pas un oubli) :
 - Declinaison IGRF (`decli_igrf`/`declin`, via `orient_sample`/
   IGRFstarmac.f) : IGRF n'est pas porte ailleurs dans ce projet
   (selection.py le note deja) - ecrit "n.d" comme le fait le Fortran
   lui-meme pour ses propres cas de donnees manquantes.
-- Le bloc `includegraphics{zijder-<id>.pdf}` de exporttolatex (suppose
-  des PDF de Zijderveld deja generes sur disque par un export SVG/PDF
-  separe, hors du perimetre de cette fonction) : non reproduit.
 
 Les champs Site/Sample/Fm/Age/GC/SMT/Li/Loc viennent directement des
 champs magic_* deja decodes depuis la ligne roche (testlect.decode_roche)
 - pas besoin de la reparser ici.
 """
 
+import os
 from typing import Dict, List, Optional
 
-import math
-
 from selection import SelectedSample, Measurement, polere, corfor, corpen
-from calcul import FitResult
 
 _HEADER_COMMENT = [
     "! Paleomagnetic laboratory - Geosciences Rennes",
-    "! Equipments 2G magnetometer - Molspin spinner - Agico JR6",
+    "! codes for the Equipments when available 2G magnetometer - Molspin spinner - Agico JR6",
     "! 2G one measurement between two zeros  : code C1",
     "! 2G four measurements between two zeros : code C4",
     "! Molspin spinner 6 positions : code Mo",
     "! Jr6a spinner automated mode : code Ja",
     "! Jr6/Jr5 spinner 2 positions : code J2",
-    "! MMTD Furnace D+ and D- = sample orientation changed in the furnace between two steps along +Z and -Z",
+    "! thermal demagnetization: D+ and D- = sample orientation changed in the furnace between two steps along +Z and -Z",
     "! AF 2G Online three axis F+ = sequence coils  X,Z,Y, F- = sequence coils  Y,Z,X",
     "! FX = along X; FY = along Y, FZ = along Z;  FG = combine FX,FY and FZ to remove GRM",
     "! Paleointensities with the Coe/Tauxe or Thellier method",
-    "! R: indicates field along Z axis; V: indicates field along Z axis; P: Ptrm check",
+    "! R: indicates field along Z axis; V: indicates field along -Z ; P: Ptrm check",
 ]
+
+
+def _header_lines(source_file: Optional[str]) -> List[str]:
+    """`_HEADER_COMMENT` + une ligne "data from file: ..." quand
+    `source_file` est fourni - demande explicite utilisateur ("as we are
+    now importing data from other files, we should adapt the header and
+    indicate the name of the file") : le bloc d'origine ("Equipments 2G
+    magnetometer - Molspin spinner - Agico JR6", "MMTD Furnace...")
+    supposait implicitement une acquisition faite a Rennes ; les donnees
+    exportees peuvent maintenant venir d'une contribution MagIC ou d'un
+    autre laboratoire (import Utrecht, etc.) sans ces equipements -
+    "codes for the Equipments when available" et le nom du fichier source
+    rendent l'en-tete correct dans les deux cas plutot que de sous-
+    entendre a tort une acquisition Rennes."""
+    lines = list(_HEADER_COMMENT)
+    if source_file:
+        lines.append(f"! data from file: {source_file}")
+    return lines
 
 
 def _sample_display_name(ech: SelectedSample) -> str:
@@ -53,33 +75,64 @@ def _sample_display_name(ech: SelectedSample) -> str:
 
 def _dc_field_string(m: Measurement, prev: List[Measurement], rfield: float, thellier: bool) -> str:
     """Equivalent du bloc de 8 `if` construisant `dc_field` (dataselect.f,
-    juste avant l'ecriture de chaque ligne de mesure)."""
-    def fmt(val: float, template_small: str, template_big: str) -> str:
-        return (template_small if abs(val) < 100.0 else template_big) % int(val)
+    juste avant l'ecriture de chaque ligne de mesure).
+
+    Deux corrections par rapport a la premiere version du port :
+
+    1) `dc_field` est declare `CHARACTER*9` en Fortran (dataselect.f:1853)
+       - CHAQUE `write(dc_field, ...)`, quelle que soit la branche, aboutit
+       donc TOUJOURS a exactement 9 caracteres (complete/tronque
+       automatiquement). Les gabarits Python precedents ("  0:0:%d " etc.)
+       n'imposaient PAS cette largeur fixe - une valeur a 3 chiffres, par
+       exemple, produisait une chaine plus longue que prevu, decalant
+       toutes les colonnes suivantes (Mag, Dsc, Isc...) sur cette ligne
+       precise - demande explicite utilisateur ("is it also possible to
+       align the text for the data in the listing"). Construit maintenant
+       le contenu "x:y:z" puis le force a 9 caracteres (`:>9.9s`), quelle
+       que soit la branche.
+
+    2) Utilise PRIORITAIREMENT m.treat_dc_field (colonne treat_dc_lowfield
+       des .prmag - par MESURE, voir testlect.Measurement/read_prmag_file)
+       quand elle est renseignee, plutot que le seul `rfield` reconstruit
+       depuis le commentaire (ech.com[:2] - convention Fortran d'origine,
+       qui ne lit jamais de champ reel par mesure et reste le seul repli
+       pour les fichiers .ren historiques sans cette colonne) - demande
+       explicite utilisateur ("the dc field value is not exported") :
+       pour un fichier issu d'une contribution MagIC, ech.com n'encode
+       rien d'utilisable et rfield restait a 0.0 sur toutes les lignes,
+       alors que la vraie valeur EST deja lue par read_prmag_file, juste
+       jamais utilisee dans cet export."""
+    effective = m.treat_dc_field if m.treat_dc_field is not None else rfield
+
+    def axis(x: str = "0", y: str = "0", z: str = "0") -> str:
+        return f"{x}:{y}:{z}"
 
     if m.cod1 == "R":
-        return fmt(rfield, "  0:0:%d ", " 0:0:%d")
-    if m.cod1 == "V":
-        return fmt(-rfield, " 0:0:%d ", " 0:0:%d")
-    if m.cod1 == "P":
+        content = axis(z=str(int(effective)))
+    elif m.cod1 == "V":
+        content = axis(z=str(int(-effective)))
+    elif m.cod1 == "P":
         if thellier:
-            return fmt(rfield, "  0:0:%d ", " 0:0:%d")
-        if prev and prev[-1].cod1 == "S":
-            return fmt(rfield, "  0:0:%d ", " 0:0:%d")
-        return "  0:0:0  "
-    if m.cod1 == "Z" and m.cod2 == "+":
-        return fmt(rfield, "  0:0:%d ", " 0:0:%d")
-    if m.cod1 == "Z" and m.cod2 == "-":
-        return fmt(-rfield, " 0:0:%d ", " 0:0:%d")
-    if m.cod1 == "Y" and m.cod2 == "+":
-        return fmt(rfield, "  0:%d:0 ", " 0:%d:0 ")
-    if m.cod1 == "Y" and m.cod2 == "-":
-        return fmt(-rfield, " 0:%d:0 ", " 0:%d:0")
-    if m.cod1 == "X" and m.cod2 == "+":
-        return fmt(rfield, " %d:0:0  ", " %d:0:0 ")
-    if m.cod1 == "X" and m.cod2 == "-":
-        return fmt(-rfield, " %d:0:0 ", "%d:0:0 ")
-    return "  0:0:0  "
+            content = axis(z=str(int(effective)))
+        elif prev and prev[-1].cod1 == "S":
+            content = axis(z=str(int(effective)))
+        else:
+            content = axis()
+    elif m.cod1 == "Z" and m.cod2 == "+":
+        content = axis(z=str(int(effective)))
+    elif m.cod1 == "Z" and m.cod2 == "-":
+        content = axis(z=str(int(-effective)))
+    elif m.cod1 == "Y" and m.cod2 == "+":
+        content = axis(y=str(int(effective)))
+    elif m.cod1 == "Y" and m.cod2 == "-":
+        content = axis(y=str(int(-effective)))
+    elif m.cod1 == "X" and m.cod2 == "+":
+        content = axis(x=str(int(effective)))
+    elif m.cod1 == "X" and m.cod2 == "-":
+        content = axis(x=str(int(-effective)))
+    else:
+        content = axis()
+    return f"{content:>9.9s}"
 
 
 def _sample_param_lines(ech: SelectedSample, depthsam: Optional[float]) -> List[str]:
@@ -159,7 +212,9 @@ def _measurement_table_lines(ech: SelectedSample) -> List[str]:
         x3, y3, z3 = corpen(x2, y2, z2, ech.dip, ech.str_)
         _mag3, dec3, inc3 = polere(x3, y3, z3)
 
-        step_mag = m.etape / 10.0 if m.cod1 == "F" else float(m.etape)
+        # m.etape est deja la valeur physique reelle (mT pour AF, degC
+        # sinon) - plus d'echelle Oersted a compenser ici.
+        step_mag = float(m.etape)
         if ech.norme == "m":
             rxx = mag1 * 1.0e3 / ech.vol if ech.vol else 0.0
             k = m.s * 1.0e-7 / ech.vol if ech.vol else 0.0
@@ -175,48 +230,70 @@ def _measurement_table_lines(ech: SelectedSample) -> List[str]:
     return lines
 
 
-def _fit_result_lines(ech: SelectedSample, results: List[FitResult]) -> List[str]:
-    """Equivalent de `lisreslatex` : pour chaque FitResult de cet
-    echantillon, une ligne D_is/I_is (in-situ) et D_tc/I_tc (apres
-    correction de pendage) - utilise UNIQUEMENT par l'export Latex, pas
-    par l'export texte detaille (fidele au Fortran)."""
-    matches = [r for r in results if r.id.strip() == ech.id.strip()]
-    if not matches:
-        return []
-    lines = ["", "---- ChRM Best line  or best plane ----", "",
-             "   sample    L_P   ori   D  Ncomp  TC    D_is  I_is   D_tc  I_tc    mad     T1    T2"]
-    for r in matches:
-        incr, decr = r.inc, r.dec
-        x = math.cos(math.radians(incr)) * math.cos(math.radians(decr))
-        y = math.cos(math.radians(incr)) * math.sin(math.radians(decr))
-        z = math.sin(math.radians(incr))
-        x2, y2, z2 = corfor(x, y, z, r.cin, r.caz)
-        _m2, dec2, inc2 = polere(x2, y2, z2)
-        x3, y3, z3 = corpen(x2, y2, z2, r.dip, r.str_)
-        _m3, dec3, inc3 = polere(x3, y3, z3)
-        if r.demag == "F":
-            etapmin, etapmax = r.step_first // 10, r.step_last // 10
-        else:
-            etapmin, etapmax = r.step_first, r.step_last
-        lines.append(
-            f"   {r.id:<12s} {r.cat1}   {r.orig}     {r.demag:<3s}  {r.numcomp:1d}  "
-            f"{r.nb:3d}   {dec2:5.1f} {inc2:5.1f}   {dec3:5.1f} {inc3:5.1f}  "
-            f"{r.mad:4.1f}  {etapmin:5d} {etapmax:5d}"
-        )
-    return lines
-
-
 # ---------------------------------------------------------------------------
 # export detailed Rennes (exportpmagren)
 # ---------------------------------------------------------------------------
+
+def _render_text_as_pdf(lines: List[str], out_path: str) -> None:
+    """Copie PDF du meme texte, police MONOSPACE - demande explicite
+    utilisateur ("a PDF copy of the text export: do it automatically
+    with the export text"), suite a "perhaps a PDF copy of the text file
+    might be useful as text editor and fonts may change with different
+    computers" : un .txt ouvert dans un editeur quelconque peut perdre
+    l'alignement en colonnes si la police par defaut n'est pas a chasse
+    fixe - le PDF fige une police monospace, l'alignement reste garanti
+    partout. Remplace l'export Latex (retire - necessitait une chaine
+    LaTeX installee juste pour obtenir un PDF, un cout que
+    STARpaleomag_Py lui-meme rend inutile pour consulter les donnees).
+
+    matplotlib (deja une dependance du projet, utilisee partout ailleurs
+    pour les graphiques) plutot qu'une nouvelle dependance PDF dediee.
+    Page US Letter PAYSAGE (les lignes de donnees font ~100-130
+    caracteres, plus larges que hautes) ; taille de police calculee pour
+    que la ligne la plus longue tienne sur la largeur de page, puis
+    paginee en consequence."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.figure import Figure
+
+    # chr(12) (form feed) prefixe certaines lignes dans le .txt - une
+    # convention d'imprimante (saut de page) reprise du Fortran, qui n'a
+    # pas de glyphe dans une police normale (avertissement matplotlib
+    # "Glyph 12 missing") : la pagination du PDF est deja geree ci-dessous
+    # independamment, ce caractere ne sert plus a rien ici.
+    lines = [l.replace("\x0c", "") for l in lines]
+
+    page_w, page_h = 11.0, 8.5  # pouces, paysage
+    margin = 0.4
+    usable_w_pt = (page_w - 2 * margin) * 72.0
+    usable_h_pt = (page_h - 2 * margin) * 72.0
+
+    max_len = max((len(l) for l in lines), default=1) or 1
+    # largeur moyenne d'un caractere monospace ~ 0.60 * taille de police
+    font_size = max(5.0, min(9.0, usable_w_pt / (max_len * 0.60)))
+    linespacing = 1.15
+    line_height_pt = font_size * linespacing
+    lines_per_page = max(1, int(usable_h_pt / line_height_pt))
+
+    with PdfPages(out_path) as pdf:
+        for start in range(0, len(lines), lines_per_page):
+            page_lines = lines[start:start + lines_per_page]
+            fig = Figure(figsize=(page_w, page_h))
+            fig.text(
+                margin / page_w, 1.0 - margin / page_h, "\n".join(page_lines),
+                family="monospace", fontsize=font_size, va="top", ha="left",
+                linespacing=linespacing,
+            )
+            pdf.savefig(fig)
+
 
 def export_detailed_txt(
     samples: List[SelectedSample],
     location: str,
     out_path: str,
     heights: Optional[Dict[str, float]] = None,
+    source_file: Optional[str] = None,
 ) -> None:
-    lines = list(_HEADER_COMMENT)
+    lines = _header_lines(source_file)
     lines += ["", "", f"Location :{location}", ""]
 
     for ech in samples:
@@ -233,101 +310,5 @@ def export_detailed_txt(
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-
-# ---------------------------------------------------------------------------
-# export Latex (exporttolatex)
-# ---------------------------------------------------------------------------
-
-_LATEX_PREAMBLE = r"""\documentclass[a4paper,14pt, titlepage, twoside]{article}
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage[francais]{babel}
-\usepackage{amsmath}
-\usepackage{amssymb,amsfonts,textcomp}
-\usepackage{color}
-\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,bookmarks=true]{hyperref}
-\usepackage{multicol}
-\usepackage{graphicx}
-\usepackage[table]{xcolor}
-\usepackage{longtable}
-\usepackage{xcolor}
-\usepackage{datetime}
-\usepackage{lastpage}
-\usepackage{alltt}
-\usepackage{fancyhdr}
-\usepackage{adjustbox}
-\usepackage{fancyvrb}
-\usepackage{geometry}
-\geometry{hmargin=1.5cm,vmargin=1.5cm}
-\pagestyle{fancy}
-\renewcommand{\footrulewidth}{1pt}
-\fancyfoot[R]{\small{page~\thepage~sur~\pageref{LastPage}}}
-\fancyfoot[c]{\small{Paleomagnetism laboratory -- Geosciences Rennes INSU-CNRS Univ. Rennes1}}
-\renewcommand{\headrulewidth}{1pt}
-\fancyhead[C]{}
-\fancyhead[L]{}
-\fancyhead[R]{}
-\usepackage{fancybox}
-"""
-
-
-def _latex_escape(s: str) -> str:
-    for a, b in (("\\", r"\textbackslash{}"), ("_", r"\_"), ("&", r"\&"),
-                 ("%", r"\%"), ("#", r"\#"), ("$", r"\$")):
-        s = s.replace(a, b)
-    return s
-
-
-def export_latex(
-    samples: List[SelectedSample],
-    location: str,
-    out_path: str,
-    results: Optional[List[FitResult]] = None,
-    heights: Optional[Dict[str, float]] = None,
-) -> None:
-    results = results or []
-    parts = [_LATEX_PREAMBLE, r"\begin{document}", ""]
-
-    parts.append(r"\fontsize{28}{28}")
-    parts.append(r"\begin{center}\selectfont{")
-    parts.append("")
-    parts.append(f"Country and study area : {_latex_escape(location)}")
-    parts.append("}")
-    parts.append(r"\end{center}")
-
-    parts.append(r"\fontsize{8}{10}")
-    parts.append(r"\Large List of samples \\")
-
-    sitetest = "xxxxxx"
-    for ech in samples:
-        if len(ech.mesures) < 2:
-            continue
-        site6 = ech.id[:6]
-        if site6 != sitetest:
-            parts.append(r"\\")
-            parts.append(rf"\Large Site: {_latex_escape(site6)} \large \\")
-            sitetest = site6
-        parts.append(rf"\hyperlink{{{ech.id}}}{{ {ech.id}    }}")
-
-    parts.append(r"\fontsize{10}{12}")
-    parts.append(r"\begin{verbatim}")
-    parts.extend(_HEADER_COMMENT)
-    parts.append(r"\end{verbatim}")
-
-    for ech in samples:
-        if len(ech.mesures) < 2:
-            continue
-        depthsam = heights.get(ech.id.strip()) if heights else None
-        parts.append(r"\pagebreak")
-        parts.append(rf"\hypertarget{{{ech.id}}}{{ }}")
-        parts.append(r"\begin{verbatim}")
-        parts.extend(_sample_param_lines(ech, depthsam))
-        parts.append("")
-        parts.extend(_measurement_table_lines(ech))
-        parts.extend(_fit_result_lines(ech, results))
-        parts.append(r"\end{verbatim}")
-
-    parts.append(r"\end{document}")
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(parts) + "\n")
+    pdf_path = os.path.splitext(out_path)[0] + ".pdf"
+    _render_text_as_pdf(lines, pdf_path)

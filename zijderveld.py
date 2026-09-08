@@ -442,13 +442,29 @@ def build_zijderveld_stereo_results_figure(
     deux ensemble aide a confirmer visuellement l'ajustement de plan contre
     le trajet de desaimantation brut.
 
-    Panneau gauche : Zijderveld de `ech` (`fits=[result]` pour l'etiquette
+    `result` accepte soit un FitResult unique (usage historique -
+    afficher_visres, un seul resultat archive a la fois), soit une LISTE de
+    FitResult - demande explicite utilisateur pour l'auto-interpretation
+    ("in data + interpretation, the original plot is lost; the data were
+    shown on a zijderveld and stereo. I was asking to plot the plane on
+    the stereo with the data when a result was a plane and keep the
+    zijderveld") : ouvrir_autointerpretation_dialog superpose jusqu'a 2
+    suggestions (primary+secondary) AVANT toute decision de sauvegarde, et
+    utilisait jusque-la le Zijderveld seul (build_zijderveld_figure, encart
+    stereo integre limite aux points bruts - JAMAIS de grand cercle, voir
+    draw_zijderveld/draw_stereo_measurements) : une suggestion de PLAN y
+    etait donc invisible. Memes panneaux que l'usage a un seul resultat,
+    juste sur la liste complete plutot que sur `[result]`.
+
+    Panneau gauche : Zijderveld de `ech` (`fits=results` pour l'etiquette
     "fit between X and Y" - le petit encart stereo integre est DESACTIVE
     ici, `show_stereo=False`, redondant avec le panneau droit qui montre le
-    MEME reseau en plus grand et avec le grand cercle du plan, absent de
-    l'encart). Panneau droit : Stereo Results (draw_stereo_results, meme
-    fonction que `build_stereo_results_figure`) sur `[result]` uniquement -
-    trace le grand cercle si `result.cat1=='P'`, un point sinon (L/f)."""
+    MEME reseau en plus grand et avec le(s) grand(s) cercle(s) de plan,
+    absent(s) de l'encart). Panneau droit : Stereo Results
+    (draw_stereo_results, meme fonction que `build_stereo_results_figure`)
+    sur `results` - trace un grand cercle pour chaque resultat de plan
+    (cat1=='P'), un point pour chaque ligne/direction (L/f)."""
+    results = result if isinstance(result, list) else [result]
     if fig is None:
         fig = Figure(figsize=(11.0, 6.0), dpi=100)
     else:
@@ -458,7 +474,7 @@ def build_zijderveld_stereo_results_figure(
     ctx_zij = PlotContext(ax_zij)
     ctx_zij.clear()
     ctx_zij.plot(0.0, 0.0, -3)
-    draw_zijderveld(ctx_zij, ech, orientation, [result], True, False)
+    draw_zijderveld(ctx_zij, ech, orientation, results, True, False)
     ax_zij.relim()
     ax_zij.margins(y=0.01)
     ax_zij.autoscale_view()
@@ -470,7 +486,7 @@ def build_zijderveld_stereo_results_figure(
     dimster = 12.0 * 1.5
     point_size = (0.18 * dimster) / 10.0
     r = draw_stereo_net(ctx_ster, orientation, dimster=dimster)
-    draw_stereo_results(ctx_ster, [result], r, orientation, point_size=point_size, nbech=1)
+    draw_stereo_results(ctx_ster, results, r, orientation, point_size=point_size, nbech=1)
     ax_ster.relim()
     ax_ster.autoscale_view()
     ax_ster.set_title("Stereo Results")

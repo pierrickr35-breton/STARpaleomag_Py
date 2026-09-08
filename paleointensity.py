@@ -58,7 +58,7 @@ stereo.py).
 import math
 import os
 from dataclasses import dataclass, field, replace as _dc_replace
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from matplotlib.figure import Figure
@@ -88,12 +88,13 @@ def _cartest(ctype: str, table: str) -> int:
 
 def _step_of(m: Measurement) -> float:
     """Valeur de pas a AFFICHER/UTILISER en calcul (AraiPoint.temp,
-    PtrmCheck.temp) : `step_value` (precis, voir testlect.Measurement) si
-    disponible (.prmag), sinon `float(etape)` (comportement historique,
-    .ren) - demande explicite utilisateur : garder `etape` (entier)
-    inchange partout ailleurs dans l'application, n'utiliser la valeur
-    precise que la ou elle sert reellement (paleointensite)."""
-    return m.step_value if m.step_value is not None else float(m.etape)
+    PtrmCheck.temp). `Measurement.etape` est desormais directement cette
+    valeur precise (le champ separe `step_value` a ete supprime, devenu
+    redondant - demande explicite utilisateur "convert all step integer
+    to float") - cette fonction reste comme point d'appel unique, au cas
+    ou paleointensity.py aurait de nouveau besoin d'une source distincte
+    a l'avenir."""
+    return float(m.etape)
 
 
 @dataclass
@@ -1477,7 +1478,7 @@ def _ensure_pmagint_header(path: str) -> None:
             f.write("# pmagint v1 - companion of .prmag/.pmagres/.pmagani, join key = specimen\n")
             f.write(
                 "# mad/dang/fvds/frac/gap_max/n_ptrm: from the PmagPy/MagIC parallel "
-                "computation (pmag.PintPars), not the native Starmac fit - n.d if PmagPy "
+                "computation (pmag.PintPars), not the native STARpaleomag_Py fit - n.d if PmagPy "
                 "could not process this specimen/interval\n"
             )
             f.write(
@@ -1506,7 +1507,7 @@ def write_pmagint_line(
 
     `mad`/`dang`/`fvds`/`frac`/`gap_max`/`n_ptrm` viennent du traitement
     PmagPy/MagIC PARALLELE (pmag.PintPars, voir paleointensity_magic.
-    MagicPintResult), PAS du calcul natif Starmac - demande explicite
+    MagicPintResult), PAS du calcul natif STARpaleomag_Py - demande explicite
     utilisateur ("replace the mad and dang from the Pmagpy calculation of
     the values MAD (free): DANG: and add f_vds: FRAC: and gap_max... also
     add the number of pTRM checks"). `f1`/`f2` : port exact de `rf1rf2`
@@ -1544,3 +1545,33 @@ def write_pmagint_line(
     ]
     with open(path, "a", encoding="utf-8") as f_out:
         f_out.write("\t".join(fields) + "\n")
+
+
+def read_pmagint(path: str) -> Dict[str, Dict[str, str]]:
+    """Lit un fichier .pmagint DEJA ecrit (write_pmagint_line) et retourne
+    specimen -> ses champs (chaines brutes, "n.d" pour une valeur absente -
+    voir _PMAGINT_HEADER pour l'ordre/le nom des colonnes) - demande
+    explicite utilisateur ("in export to Magic, it is not asking for
+    Paleointensity" : magic_export.export_to_magic ignorait jusqu'ici
+    entierement .pmagint, voir son propre docstring "Paleointensite...
+    HORS PERIMETRE pour l'instant (a ajouter plus tard si besoin)").
+
+    Un specimen peut avoir ete revu plusieurs fois (append a chaque
+    passage dans "View batch of Paleoint Results..."/l'interpretation
+    interactive) : seule la DERNIERE ligne de chaque specimen est gardee
+    (la plus recente revue, la plus probable a etre la version finale
+    voulue pour l'export) - les lignes precedentes du meme specimen sont
+    silencieusement remplacees au fil de la lecture, pas additionnees."""
+    if not os.path.exists(path):
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if not parts or parts[0] == "specimen" or len(parts) < len(_PMAGINT_HEADER):
+                continue
+            out[parts[0]] = dict(zip(_PMAGINT_HEADER, parts))
+    return out

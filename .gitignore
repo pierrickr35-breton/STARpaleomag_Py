@@ -6,7 +6,7 @@ __pycache__/
 # PyInstaller build artifacts
 build/
 dist/
-Starmac_Py_dev.app/
+STARpaleomag_Py_dev.app/
 
 # macOS
 .DS_Store
@@ -15,11 +15,17 @@ Starmac_Py_dev.app/
 *.prmag
 *.prmag.bak
 *.pmagres
+*.pmagani
 *.ren
+*.ori
 magic_contribution_*.txt
 example_*.txt
 example_*.prmag
 exemple*.txt
+Orient_examplefile*
+redo_pint_contribution_*.txt
+17NQ27_28_pmag*.txt
+Cont_1987/
 
 # Scratch/debug output
 svg_debug/

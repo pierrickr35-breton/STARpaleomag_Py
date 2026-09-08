@@ -54,7 +54,7 @@ from magic_export import _measurement_treatment, _instrument, _specimen_method_c
 from calcul import results_path_for, convert_legacy_results_file
 
 FORMAT_HEADER = (
-    "#Starmac .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
+    "#STARpaleomag_Py .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
     "fields AF or IRM and in microTesla (uT) for low field paleointensity "
     "or ARM  temperatures in degC  date=ISO8601"
 )
@@ -184,16 +184,14 @@ _MEAS_HEADER = (
 _DC_STRONGFIELD_CODES = {"I"}
 _DC_LOWFIELD_CODES = _DC_FIELD_CODES - _DC_STRONGFIELD_CODES
 
-# cod1 pour lesquels `etape` est historiquement code en Oersted (demag AF,
-# ARM) - demande explicite utilisateur : diviser par 10 pour obtenir le
-# mT (1 Oe ~ 0.1 mT), formate en float fixe (equivalent Fortran f6.1).
-# Pour les autres cod1, `etape` est deja dans la bonne unite (degC pour
-# les pas thermiques, mT pour IRM) - simplement reformate, pas divise.
-_OERSTED_CODES = {"A", "F"}
-
-
 def _step_value(m) -> float:
-    return m.etape / 10.0 if m.cod1 in _OERSTED_CODES else float(m.etape)
+    """`m.etape` est deja la valeur physique reelle (mT pour A/F, degC
+    sinon) - testlect.parse_measure_line convertit l'Oersted historique
+    (mT*10) DES LA LECTURE d'un .ren, plus a la conversion (ni a une
+    echelle dediee) ici - demande explicite utilisateur ("on importing
+    legacy files from Rennes, we can divide by 10 from oersted to
+    mT... convert all step integer to float")."""
+    return float(m.etape)
 
 
 def _measurement_rows(p: Pmag) -> List[str]:

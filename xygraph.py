@@ -74,14 +74,10 @@ def _sample_demag_code(ech: SelectedSample) -> Optional[str]:
 
 
 def _sample_values(ech: SelectedSample, component: str):
-    # les etapes AF sont stockees en Oersted dans les fichiers .ren ; on
-    # divise par 10 (1 mT = 10 Oe) pour rester coherent avec l'unite "mT"
-    # deja affichee sur l'axe (voir _UNITS) - pas de conversion pour le
-    # thermique (deja en degC directement).
-    if _sample_demag_code(ech) in _AF_CODES:
-        steps = [m.etape / 10.0 for m in ech.mesures]
-    else:
-        steps = [m.etape for m in ech.mesures]
+    # m.etape est deja la valeur physique reelle (mT pour AF, degC pour
+    # thermique - plus d'echelle Oersted a compenser ici, voir
+    # testlect.Measurement) - meme colonne pour les deux cas desormais.
+    steps = [m.etape for m in ech.mesures]
     if component == "x":
         vals = [abs(m.x) for m in ech.mesures]
     elif component == "y":
@@ -91,6 +87,20 @@ def _sample_values(ech: SelectedSample, component: str):
     else:
         vals = [math.sqrt(m.x ** 2 + m.y ** 2 + m.z ** 2) for m in ech.mesures]
     return steps, vals
+
+
+def _normalize_ref(vals: List[float]) -> float:
+    """Reference de normalisation (mag@step0, comme le Fortran) - sauf si un
+    pas ulterieur depasse 2x ce point, auquel cas le maximum de l'echantillon
+    est utilise a la place (demande explicite de l'utilisateur : "when a
+    specimen has a wrong strong data the normalisation of the plot with
+    several samples go wrong... when mag@step(i)/mag@step0 > 2, better use
+    maximum value of this specimen"). Un point aberrant isole normalise a
+    ~1.0 au lieu de partir a 2x+ sinon ecrase (via ymax partage, cf.
+    _plot_group) l'echelle Y commune de TOUS les echantillons du graphe."""
+    ref = vals[0] if vals[0] else 1.0
+    vmax = max(vals) if vals else ref
+    return vmax if vmax > 2.0 * ref else ref
 
 
 def _plot_group(
@@ -103,7 +113,7 @@ def _plot_group(
         if not ech.mesures:
             continue
         steps, vals = _sample_values(ech, component)
-        ref = vals[0] if vals[0] else 1.0
+        ref = _normalize_ref(vals)
         norm = [v / ref for v in vals]
         ymax = max(ymax, max(norm))
         color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
@@ -122,7 +132,7 @@ def _plot_group(
         if not ech.mesures:
             continue
         steps, vals = _sample_values(ech, component)
-        ref = vals[0] if vals[0] else 1.0
+        ref = _normalize_ref(vals)
         norm = [v / ref for v in vals]
         ymax = max(ymax, max(norm))
         color = _COLOR_CYCLE[(n_samples + j) % len(_COLOR_CYCLE)]

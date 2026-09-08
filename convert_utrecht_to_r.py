@@ -22,7 +22,7 @@ Notes :
    the col file") : `site` = nom du fichier .col source (sans extension),
    voir `convert_files`. Approximation assumee (un fichier peut regrouper
    plusieurs sites reels, ex. "SR1-3-4-10-11.col") - a raffiner
-   manuellement dans Starmac au besoin (meme mecanisme que
+   manuellement dans STARpaleomag_Py au besoin (meme mecanisme que
    `magic_site`/`Site: "..."`, deja decouple du nom de specimen pour les
    imports MagIC "case 1").
 
@@ -34,9 +34,9 @@ Notes :
    Convention donnee par l'utilisateur ("the coredip is usually
    90-dip_rennes and the azimuth is azimuth of the X axis as in Magic") :
 
-       caz (Starmac) = coreAzimuth + 90   (meme regle que MagIC, voir
+       caz (STARpaleomag_Py) = coreAzimuth + 90   (meme regle que MagIC, voir
                                             DIFF_WITH_MAGIC)
-       cin (Starmac) = 90 - coreDip
+       cin (STARpaleomag_Py) = 90 - coreDip
 
    Verifiee numeriquement sur les 156 interpretations reelles des 4
    fichiers fournis (BN/SR1-3-4-10-11/SR2/SR5-6-7-8-9) : `corfor(x,y,z,
@@ -60,7 +60,7 @@ Notes :
    l'attend - confirme dans le code source de PMAG2
    (interpretation/js/importing.js:importUtrecht, "Step is in pico Am^2
    .. divide by sample volume to get uAm/m!") et par coherence physique
-   (sans reconversion, la magnetisation recalculee par Starmac serait de
+   (sans reconversion, la magnetisation recalculee par STARpaleomag_Py serait de
    l'ordre de 1e8 A/m, impossible pour une roche). Reconverti en Am2 ici
    (voir _measurement_rows : moment = uA/m * volume(cm3) * 1e-12) avant
    ecriture dans .prmag.
@@ -76,7 +76,7 @@ from magic_export import _measurement_treatment
 from selection import polere
 
 FORMAT_HEADER = (
-    "#Starmac .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
+    "#STARpaleomag_Py .prmag v1  angles=deg  fields in milliTesla (mT) for strong "
     "fields AF or IRM and in microTesla (uT) for low field paleointensity "
     "or ARM  temperatures in degC  date=ISO8601"
 )
@@ -130,7 +130,7 @@ def _sample_header_block(sp: dict, site: str = "n.d") -> str:
         f"stratigraphic_height: n.d\t"
         f"comment: n.d"
     )
-    # azimuth/dip : convention Utrecht -> Starmac donnee par l'utilisateur
+    # azimuth/dip : convention Utrecht -> STARpaleomag_Py donnee par l'utilisateur
     # et verifiee numeriquement sur les 156 interpretations reelles
     # fournies (voir docstring module) : caz=coreAzimuth+90 (meme regle
     # que MagIC), cin=90-coreDip.
@@ -173,12 +173,12 @@ def _measurement_rows(sp: dict) -> List[str]:
     for j, step in enumerate(sp["steps"]):
         cod1 = "N" if j == 0 else cod1_demag
         step_val = float(step["step"])
-        # etape : convention interne Starmac (Oersted-equivalent pour
-        # A/F, degC brut sinon) - voir testlect._PRMAG_OERSTED_CODES /
-        # convert_ren_to_r._step_value. Le NRM (j==0) est toujours ecrit
-        # avec etape=0, quelle que soit la valeur brute Utrecht (ex.
-        # thermal commence a "20", pas "0").
-        etape = 0.0 if cod1 == "N" else (step_val * 10.0 if cod1 == "F" else step_val)
+        # etape : valeur physique reelle directement (mT pour A/F, degC
+        # sinon - plus d'echelle Oersted-equivalente, voir testlect.
+        # Measurement/magic_export._measurement_treatment). Le NRM (j==0)
+        # est toujours ecrit avec etape=0, quelle que soit la valeur brute
+        # Utrecht (ex. thermal commence a "20", pas "0").
+        etape = 0.0 if cod1 == "N" else step_val
         fake_m = _FakeMeasurement(etape=etape, cod1=cod1, cod2="0")
         codes, _temp_k, af_field, _dc, _phi, _theta = _measurement_treatment(fake_m, [], 0.0)
 
@@ -227,17 +227,20 @@ def _fit_results_for_specimen(sp: dict) -> List[FitResult]:
         step_labels = it.get("steps", [])
         if not step_labels:
             continue
+        # step_vals (mT/degC reels, tels que fournis par Utrecht/PMAG2) se
+        # comparent desormais directement a Measurement.etape (lui aussi
+        # en unite reelle - plus d'echelle Oersted-equivalente a
+        # appliquer ici pour un demag AF, voir testlect.Measurement).
         step_vals = [float(s) for s in step_labels]
         step_first_raw, step_last_raw = min(step_vals), max(step_vals)
-        to_internal = (lambda v: v * 10.0) if demag == "F" else (lambda v: v)
 
         results.append(FitResult(
             id=sp["name"], cat1=cat1, cat2="",
             orig="o" if it.get("anchored") else "n",
             demag=demag, numcomp=numcomp, nb=len(step_labels),
             dec=dec, inc=inc, mad=it.get("MAD", 0.0),
-            step_first=int(round(to_internal(step_first_raw))),
-            step_last=int(round(to_internal(step_last_raw))),
+            step_first=int(round(step_first_raw)),
+            step_last=int(round(step_last_raw)),
         ))
     return results
 

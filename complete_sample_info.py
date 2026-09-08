@@ -144,14 +144,43 @@ def _rewrite_kv_line(original_line: str, updates: Dict[str, str]) -> str:
     return "\t".join(new_chunks)
 
 
+_INFO_FIELDS = ("lat", "lon") + _ROCHE_TABLE_FIELDS
+
+
+def _missing_fields(line_a: dict, line_d: dict, check_height: bool) -> List[str]:
+    """Champs encore a "n.d" (placeholder ecrit par TOUS les convertisseurs
+    .prmag quand une valeur est inconnue - convert_ren_to_r/
+    convert_magic_to_r/convert_utrecht_to_r - voir leurs `_nd`/formattage
+    de formation/age/.../lat/lon/stratigraphic_height) APRES application de
+    la table de completion - demande explicite utilisateur ("it will be
+    good to know what are the samples with missing information, when we
+    complete the file"). `stratigraphic_height` seulement en mode
+    specimen/sample (le mode site ne le touche jamais, cf. docstring
+    module - le signaler comme "manquant" y serait du bruit puisque cette
+    routine n'a jamais pour but de le remplir dans ce mode)."""
+    missing = []
+    for field in ("lat", "lon"):
+        if line_a.get(field, "").strip().lower() in ("", "n.d"):
+            missing.append(field)
+    if check_height and line_a.get("stratigraphic_height", "").strip().lower() in ("", "n.d"):
+        missing.append("stratigraphic_height")
+    for field in _ROCHE_TABLE_FIELDS:
+        if line_d.get(field, "").strip().lower() in ("", "n.d"):
+            missing.append(field)
+    return missing
+
+
 def _apply_table(
     prmag_path: str, table: Dict[str, dict], key_field: str,
-) -> Tuple[int, List[str]]:
+) -> Tuple[int, List[str], List[Tuple[str, List[str]]]]:
     """Parcourt le .prmag bloc par specimen (meme detection que
     testlect.read_prmag_file), patche les lignes 'specimen:'/'formation:'
     de chaque bloc dont la cle (`site`, `specimen` ou `sample` selon
     `key_field`) est trouvee dans `table`. Retourne (nb_specimens_mis_a_
-    jour, liste_specimens_sans_correspondance)."""
+    jour, liste_specimens_sans_correspondance, liste_specimens_encore_
+    incomplets) - ce dernier couvre AUSSI les specimens matches dont la
+    table ne fournissait qu'une partie des champs (pas seulement les
+    specimens sans aucune correspondance)."""
     with open(prmag_path, "r", encoding="utf-8") as f:
         lines = [raw.rstrip("\n") for raw in f]
     original_text = "\n".join(lines) + "\n"
@@ -159,6 +188,7 @@ def _apply_table(
     i = 0
     n_updated = 0
     unmatched: List[str] = []
+    still_missing: List[Tuple[str, List[str]]] = []
 
     def skip_blank():
         # meme comportement que testlect.read_prmag_file._skip_blank_and_comments
@@ -191,6 +221,12 @@ def _apply_table(
         record = table.get(lookup_key)
         if record is None:
             unmatched.append(specimen or f"(line {idx_a + 1})")
+            missing = _missing_fields(
+                _prmag_kv_line(lines[idx_a]), _prmag_kv_line(lines[idx_d]),
+                check_height=(key_field in ("specimen", "sample")),
+            )
+            if missing:
+                still_missing.append((specimen or f"(line {idx_a + 1})", missing))
             skip_blank()
             continue
 
@@ -239,6 +275,13 @@ def _apply_table(
 
         if a_updates or d_updates:
             n_updated += 1
+
+        missing = _missing_fields(
+            _prmag_kv_line(lines[idx_a]), _prmag_kv_line(lines[idx_d]),
+            check_height=(key_field in ("specimen", "sample")),
+        )
+        if missing:
+            still_missing.append((specimen or f"(line {idx_a + 1})", missing))
         skip_blank()
 
     if n_updated:
@@ -249,13 +292,16 @@ def _apply_table(
         with open(prmag_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-    return n_updated, unmatched
+    return n_updated, unmatched, still_missing
 
 
-def complete_site_info(prmag_path: str, table_path: str, encoding: str = "utf-8") -> Tuple[int, List[str]]:
+def complete_site_info(
+    prmag_path: str, table_path: str, encoding: str = "utf-8",
+) -> Tuple[int, List[str], List[Tuple[str, List[str]]]]:
     """Table indexee par SITE (colonne 'site' obligatoire) - voir
     docstring module. Retourne (nb_specimens_mis_a_jour,
-    liste_specimens_sans_site_correspondant_dans_la_table)."""
+    liste_specimens_sans_site_correspondant_dans_la_table,
+    liste_specimens_encore_incomplets)."""
     header, rows = _read_table_rows(table_path, encoding=encoding)
     if "site" not in header:
         raise ValueError("Table file must have a 'site' column header (site-level mode).")
@@ -268,10 +314,13 @@ def complete_site_info(prmag_path: str, table_path: str, encoding: str = "utf-8"
     return _apply_table(prmag_path, table, key_field="site")
 
 
-def complete_specimen_info(prmag_path: str, table_path: str, encoding: str = "utf-8") -> Tuple[int, List[str]]:
+def complete_specimen_info(
+    prmag_path: str, table_path: str, encoding: str = "utf-8",
+) -> Tuple[int, List[str], List[Tuple[str, List[str]]]]:
     """Table indexee par SPECIMEN complet (colonne 'specimen' obligatoire) -
     voir docstring module. Retourne (nb_specimens_mis_a_jour,
-    liste_specimens_sans_correspondance_dans_la_table)."""
+    liste_specimens_sans_correspondance_dans_la_table,
+    liste_specimens_encore_incomplets)."""
     header, rows = _read_table_rows(table_path, encoding=encoding)
     if "specimen" not in header:
         raise ValueError("Table file must have a 'specimen' column header (specimen-level mode).")
@@ -284,7 +333,9 @@ def complete_specimen_info(prmag_path: str, table_path: str, encoding: str = "ut
     return _apply_table(prmag_path, table, key_field="specimen")
 
 
-def complete_sample_height(prmag_path: str, table_path: str, encoding: str = "utf-8") -> Tuple[int, List[str]]:
+def complete_sample_height(
+    prmag_path: str, table_path: str, encoding: str = "utf-8",
+) -> Tuple[int, List[str], List[Tuple[str, List[str]]]]:
     """Table indexee par SAMPLE (colonnes 'sample' ET 'stratigraphic_height'
     obligatoires) - cas particulier explicite utilisateur ("add a
     specific case for stratigraphic_height filled from sample and height
@@ -295,7 +346,10 @@ def complete_sample_height(prmag_path: str, table_path: str, encoding: str = "ut
     repeter la meme hauteur autant de fois qu'il y a de specimens. Ne
     touche QUE `stratigraphic_height` - pour lat/lon/geologie, voir
     complete_site_info/complete_specimen_info. Retourne (nb_specimens_
-    mis_a_jour, liste_specimens_sans_sample_correspondant_dans_la_table)."""
+    mis_a_jour, liste_specimens_sans_sample_correspondant_dans_la_table,
+    liste_specimens_encore_incomplets - couvre TOUS les champs, pas
+    seulement stratigraphic_height, pour une vue d'ensemble utile meme
+    dans ce mode restreint)."""
     header, rows = _read_table_rows(table_path, encoding=encoding)
     if "sample" not in header:
         raise ValueError("Table file must have a 'sample' column header (sample-level mode).")

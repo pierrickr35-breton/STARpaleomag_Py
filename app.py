@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tkinter as tk
+import webbrowser
 from tkinter import ttk, filedialog, messagebox
 
 from matplotlib.figure import Figure
@@ -28,7 +29,7 @@ from selection import (
     sample_info,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
-from auto_interpretation import propose_components, format_suggestions
+from auto_interpretation import propose_components, propose_components_for_site, format_suggestions
 from calcul import (
     FitResult,
     fit_line,
@@ -69,6 +70,7 @@ from calcul import (
     read_ani_tensor,
     apply_inverse_anisotropy,
     compute_anisotropy_tensor,
+    replace_position_by_symmetry,
     detect_six_positions,
     write_ani_tensors,
     compute_anicor_factor,
@@ -97,6 +99,7 @@ from paleointensity import (
     build_paleoint_review_figure,
     draw_arai,
     write_pmagint_line,
+    read_pmagint,
 )
 from paleointensity_magic import compute_magic_paleointensity, format_magic_paleointensity
 from datatools import (
@@ -110,8 +113,8 @@ from datatools import (
 )
 from magic_export import export_to_magic, classify_anisotropy_experiment
 from anisotropy_magic import compute_aarm_pmagpy, format_aarm_pmagpy
-from export_stereo import export_results_to_stereo, export_poles_to_stereo
-from detailed_export import export_detailed_txt, export_latex
+from export_stereo import export_stereo_project
+from detailed_export import export_detailed_txt
 from field_notes import (
     parse_orientation_file,
     parse_complement_file,
@@ -234,7 +237,7 @@ SHORTCUTS = _SHORTCUTS_WIN if sys.platform.startswith("win") else _SHORTCUTS_MAC
 
 # Marque une ligne de TITRE DE COLONNES ("header" au sens tableau, pas
 # "en-tete de fichier") a l'interieur d'un texte de rapport, pour que
-# StarmacApp._afficher l'affiche en gras - demande explicite utilisateur
+# STARpaleomagApp._afficher l'affiche en gras - demande explicite utilisateur
 # ("throughout the software, is it possible to write the header in bold,
 # the output text might be easier to read"). Un caractere de controle
 # improbable dans un texte normal (pas de conflit avec les donnees
@@ -253,16 +256,41 @@ ORIENTATIONS = {
 }
 
 
-class StarmacApp:
+def _step_token(m) -> str:
+    """"<etape><cod1><cod2>" compact, ex. "250D+" ou "15.5F+" - pour les
+    listes de pas disponibles montrees dans les dialogues interactifs
+    (pas le rapport complet "List data", voir selection._fmt_step pour
+    celui-la). `etape` est un float depuis "convert all step integer to
+    float" (demande explicite utilisateur) : affiche sans decimale quand
+    la valeur est entiere (le cas thermique, ex. "250" pas "250.0") et
+    avec une decimale sinon (le cas AF fractionnaire, ex. "15.5")."""
+    v = m.etape
+    num = f"{v:.0f}" if v == int(v) else f"{v:.1f}"
+    return f"{num}{m.cod1}{m.cod2}"
+
+
+def _resource_path(*parts: str) -> str:
+    """Chemin absolu d'une ressource livree AVEC l'appli (ex. le guide
+    utilisateur HTML, voir ouvrir_user_guide) - fonctionne aussi bien
+    lancee depuis les sources (repertoire de ce fichier) qu'empaquetee par
+    PyInstaller (sys._MEIPASS, le dossier temporaire ou l'executable
+    autonome extrait ses fichiers - voir STARpaleomag_Py.spec, datas=[
+    ('help', 'help')])."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+class STARpaleomagApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Starmac_AWE_4.0 - Paleomagnetism")
+        self.root.title("STARpaleomag_Py - Paleomagnetism")
         self._maximize_window()
 
         self.donnees = []  # Stockage des données d'échantillons (List[Pmag])
         self.selection = []  # Dernière sélection (List[SelectedSample])
         self.results = []  # Ajustements de droite (List[FitResult], equivalent tr/nbres)
         self.results_path = None  # equivalent filr - fichier .r, fixe au chargement des donnees
+        self.data_file_path = None  # chemin du .ren/.prmag/.txt charge - voir _load_data_file
         self._archived_ids = None  # cache des `c` deja utilises dans results_path (voir _save_result)
         self._arm_holder_background = None  # equivalent xholarm/yholarm/zholarm (holderarm), pour Anisotropy
         self.entete = ""  # Préfixe de sélection (equivalent selentete)
@@ -414,10 +442,9 @@ class StarmacApp:
         file_menu.add_command(label="export to Magic database", command=self.ouvrir_export_magic_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="export pmag content as a text file", command=self.ouvrir_export_detailed_dialog)
-        file_menu.add_command(label="export pmag content as a LaTeX file", command=self.ouvrir_export_latex_dialog)
         file_menu.add_command(label="export results to Stereo_Py...", command=self.ouvrir_export_stereo_dialog)
         file_menu.add_separator()
-        file_menu.add_command(label=self._labeled("Quit Starmac", "starend"), command=self.root.quit)
+        file_menu.add_command(label=self._labeled("Quit STARpaleomag_Py", "starend"), command=self.root.quit)
         menubar.add_cascade(label="PmagFile", menu=file_menu)
 
         # Menu Pmag data
@@ -546,6 +573,17 @@ class StarmacApp:
         graph_menu.add_separator()
         graph_menu.add_command(label="Export SVG...", command=self.exporter_svg)
         menubar.add_cascade(label="Graphics", menu=graph_menu)
+
+        # Aide statique, locale, sans cle API ni cout recurrent (option
+        # retenue par l'utilisateur parmi 3 formes possibles d'"aide en
+        # ligne par Claude" - "OK pour la 3", le guide HTML deja ecrit,
+        # livre avec l'appli plutot qu'un assistant en direct qui aurait
+        # exige soit une cle API a la charge de chaque utilisateur, soit
+        # un serveur relais a heberger pour ne jamais exposer une cle
+        # partagee dans le code source public).
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="User Guide", command=self.ouvrir_user_guide)
+        menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
 
@@ -752,7 +790,7 @@ class StarmacApp:
 
         if kind == "zijderveld_step":
             m = item
-            self._afficher(f"[Zijderveld] step {m.etape}{m.cod1}{m.cod2}\n")
+            self._afficher(f"[Zijderveld] step {_step_token(m)}\n")
         elif kind == "stereo_specimen":
             self._afficher(f"[Stereo Results] {item}\n")
 
@@ -900,6 +938,7 @@ class StarmacApp:
             # equivalent filr=fil1(1:(nlen-4))//'.r' : fichier resultats
             # derive du fichier de donnees (meme dossier, extension .r)
             self.results_path = results_path_for(fichier_path)
+            self.data_file_path = fichier_path
             self._archived_ids = None  # relit le fichier .r au prochain archivage
 
             # Réinitialisation et affichage dans la zone de texte
@@ -1110,7 +1149,17 @@ class StarmacApp:
         ("add a specific case for stratigraphic_height filled from sample
         and height as all specimens have the same height").
         Patche le .prmag EN PLACE (une sauvegarde .bak est ecrite avant
-        toute modification, une seule fois)."""
+        toute modification, une seule fois). Rapporte aussi, en plus des
+        specimens sans correspondance dans la table, ceux qui ont encore
+        au moins un champ a "n.d" APRES completion (table incomplete ou
+        specimen non trouve) - demande explicite utilisateur ("it will be
+        good to know what are the samples with missing information, when
+        we complete the file"). Les deux listes sont ecrites en entier
+        dans un fichier compagnon "<base>_completion_report.txt" (pas
+        tassees sur une ligne de console tronquee a 20 - demande
+        explicite utilisateur, cas reel a 251 specimens sans
+        correspondance : "can you write all missing in a file instead of
+        a long line")."""
         self.text_area.insert(tk.END, "\n--- Complete sample information (Escape to cancel) ---\n", "prompt")
         mode = self._console_input(
             "Table indexed by site (assumes specimen/sample/site already correct) (s) "
@@ -1138,22 +1187,46 @@ class StarmacApp:
 
         func = {"s": complete_site_info, "p": complete_specimen_info, "h": complete_sample_height}[mode]
         try:
-            n_updated, unmatched = func(prmag_path, table_path)
+            n_updated, unmatched, still_missing = func(prmag_path, table_path)
         except Exception as e:
             self._showerror("Error", f"Completion failed:\n{e}")
             return
 
+        # Les listes (potentiellement des centaines de specimens - cas reel
+        # signale par l'utilisateur, 251 "no table match") sont ecrites
+        # dans un fichier compagnon plutot que tassees sur une ligne de
+        # console tronquee a 20 - demande explicite utilisateur ("can you
+        # write all missing in a file instead of a long line"), meme
+        # convention de nommage que write_diagnostics_report
+        # (<base>_diagnostics.txt) plus haut dans ce module.
+        report_path = None
+        if unmatched or still_missing:
+            base, _ext = os.path.splitext(prmag_path)
+            report_path = base + "_completion_report.txt"
+            report_lines = [f"Completion report for {prmag_path}"]
+            if unmatched:
+                report_lines.append(f"\nNo table match ({len(unmatched)}):")
+                report_lines.extend(unmatched)
+            if still_missing:
+                report_lines.append(f"\nStill missing information ({len(still_missing)}):")
+                report_lines.extend(f"{sid}\t{', '.join(fields)}" for sid, fields in still_missing)
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(report_lines) + "\n")
+
         msg = f"{os.path.basename(prmag_path)}: {n_updated} specimen(s) updated.\n"
         if unmatched:
-            shown = ", ".join(unmatched[:20])
-            more = f", ... ({len(unmatched) - 20} more)" if len(unmatched) > 20 else ""
-            msg += f"No table match ({len(unmatched)}): {shown}{more}\n"
+            msg += f"No table match ({len(unmatched)}) - see {report_path}\n"
+        if still_missing:
+            msg += f"Still missing information ({len(still_missing)}) - see {report_path}\n"
         self._afficher(msg)
         self._showinfo(
             "Completion done",
             f"{n_updated} specimen(s) updated in {prmag_path}\n"
             f"(backup: {prmag_path}.bak)"
             + (f"\n{len(unmatched)} specimen(s) had no match in the table." if unmatched else "")
+            + (f"\n{len(still_missing)} specimen(s) still have missing information (n.d) "
+               "after this completion." if still_missing else "")
+            + (f"\nFull list(s) written to {report_path}" if report_path else "")
             + "\n\nRe-open this file to see the changes (the currently loaded data is not refreshed automatically).",
         )
 
@@ -1249,7 +1322,7 @@ class StarmacApp:
         sites/samples/specimens/measurements dans un seul .txt) vers le
         nouveau format .r (voir convert_magic_to_r.py) - reconstruit un
         cod1/cod2 a la Rennes a partir de method_codes/treat_*, detecte
-        les protocoles hors perimetre Starmac (AMS, hysteresis, MPMS,
+        les protocoles hors perimetre STARpaleomag_Py (AMS, hysteresis, MPMS,
         susceptibilite vs champ/frequence/temperature) et les ecarte sans
         faire echouer la conversion, plutot que les demagnetiser/mesurer
         de paleointensite. Le rapport de fin de conversion (protocoles
@@ -1259,7 +1332,14 @@ class StarmacApp:
         Genere AUSSI le .pmagres compagnon (specimens.txt deja interprete
         + sites.txt deja calcule) - demande explicite utilisateur ("is
         the pmagres file also generated during the magic import") - voir
-        convert_magic_to_r._convert_magic_results pour le detail."""
+        convert_magic_to_r._convert_magic_results pour le detail.
+
+        Archive AUSSI, dans le .pmagani compagnon, les tenseurs
+        d'anisotropie DEJA calcules par la contribution (colonne
+        aniso_s de specimens.txt - A0/TRM, N0/AMS, AA/ARM) - demande
+        explicite utilisateur ("lors de l'importation des fichiers
+        Magic, archiver dans le fichier pmagani les donnees de tenseurs
+        d'anisotropie") - voir extract_magic.magic_anisotropy_rows."""
         path = filedialog.askopenfilename(
             title="Select the MagIC contribution file (.txt)",
             filetypes=[("Text", "*.txt"), ("All files", "*.*")],
@@ -1269,7 +1349,8 @@ class StarmacApp:
         base, _ext = os.path.splitext(path)
         output_path = base + ".prmag"
         try:
-            nb, report, nb_results, nb_means, nb_pint, redo_pint_path = convert_magic_file(path, output_path)
+            nb, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
+                path, output_path)
         except Exception as e:
             self._showerror("Error", f"Conversion failed:\n{e}")
             return
@@ -1283,7 +1364,11 @@ class StarmacApp:
             "(use View Paleoint Results... to replay them)\n"
             if redo_pint_path else ""
         )
-        msg = f"{report}\nConverted: {nb} specimen(s) -> {output_path}\n{results_msg}{pint_msg}"
+        aniso_msg = (
+            f"Converted: {nb_aniso} anisotropy tensor(s) -> {ani_path_for(output_path)}\n"
+            if nb_aniso else ""
+        )
+        msg = f"{report}\nConverted: {nb} specimen(s) -> {output_path}\n{results_msg}{pint_msg}{aniso_msg}"
         # Ouvre directement le .prmag converti - demande explicite
         # utilisateur ("ce serait bien d'ouvrir les fichiers convertis a
         # la fin des conversions"). AVANT self._afficher(msg), meme
@@ -1323,7 +1408,7 @@ class StarmacApp:
             defaultextension=".prmag",
             initialfile=default_name,
             initialdir=os.path.dirname(paths[0]),
-            filetypes=[("Starmac prmag", "*.prmag"), ("All files", "*.*")],
+            filetypes=[("STARpaleomag_Py prmag", "*.prmag"), ("All files", "*.*")],
         )
         if not output_path:
             return
@@ -1337,7 +1422,7 @@ class StarmacApp:
             f"Converted: {nb} specimen(s) from {len(paths)} file(s) -> {output_path}\n"
             f"Converted: {nb_results} interpretation(s) -> {results_path_for(output_path)}\n"
             f"\nSite = source .col file name: {sites}\n"
-            "Refine manually in Starmac if a file bundles more than one real site.\n"
+            "Refine manually in STARpaleomag_Py if a file bundles more than one real site.\n"
         )
         # Ouvre directement le .prmag converti - demande explicite
         # utilisateur ("ce serait bien d'ouvrir les fichiers convertis a
@@ -1361,7 +1446,7 @@ class StarmacApp:
         complement file that can be written later") et des sorties
         produites :
 
-        - un .prmag (format MODERNE Starmac_Py, mesures vides - un
+        - un .prmag (format MODERNE STARpaleomag_Py, mesures vides - un
           instrument n'a pas encore mesure ces specimens a ce stade) ;
         - UN SEUL .ged combinant tous les sites pour les instruments AGICO
           (meme comportement que le Fortran, `unfichierged` code en dur a
@@ -1534,15 +1619,17 @@ class StarmacApp:
 
     def ouvrir_export_magic_dialog(self):
         """Equivalent GUI de `export2magic` ("export Rennes to Magic",
-        fichiers_magic.f) - mode classique uniquement (sites/samples/
-        specimens/measurements.txt + locations.txt), sans paleointensite
-        ni magnetostratigraphie (voir magic_export.py pour le detail des
-        ecarts assumes par rapport au Fortran : tri explicite par site,
-        les 2 bugs Fortran reperes sont corriges, formatage numerique
-        simple). Les champs Site/Sample/Fm/Age/GC/SMT/Li/Loc utilises
-        viennent de la ligne « roche » decodee a l'ouverture du fichier
-        (testlect.decode_roche) - un echantillon sans site MagIC decode
-        n'aura simplement pas de ligne dans sites.txt."""
+        fichiers_magic.f) - mode classique (sites/samples/specimens/
+        measurements.txt + locations.txt) PLUS, si un .pmagint existe,
+        les resultats de paleointensite deja archives dedans (voir
+        magic_export.py pour le detail des ecarts assumes par rapport au
+        Fortran : tri explicite par site, les 2 bugs Fortran reperes sont
+        corriges, formatage numerique simple ; magnetostratigraphie
+        toujours HORS PERIMETRE). Les champs Site/Sample/Fm/Age/GC/SMT/
+        Li/Loc utilises viennent de la ligne « roche » decodee a
+        l'ouverture du fichier (testlect.decode_roche) - un echantillon
+        sans site MagIC decode n'aura simplement pas de ligne dans
+        sites.txt."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
@@ -1596,6 +1683,56 @@ class StarmacApp:
             anisotropy_kind_by_specimen[ech.id] = (
                 "irm" if kind_s.strip().lower().startswith("i") else "trm")
 
+        # Paleointensite (.pmagint, deja archivee via "Paleointensity
+        # interpretation"/"View batch of Paleoint Results...") - demande
+        # explicite utilisateur ("in export to Magic, it is not asking
+        # for Paleointensity") : ce dialogue ne proposait jusqu'ici que
+        # les donnees directionnelles/anisotropie, jamais les resultats
+        # de paleointensite deja calcules et sauvegardes. Ne demande que
+        # si un .pmagint existe ET couvre au moins un specimen de la
+        # selection courante - pas de prompt inutile sinon.
+        pmagint_rows = {}
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        if pmagint_path and os.path.exists(pmagint_path):
+            selected_ids = {ech.id for ech in self.selection}
+            matched = {sid: row for sid, row in read_pmagint(pmagint_path).items()
+                       if sid in selected_ids}
+            if matched:
+                include_pint = self._console_input(
+                    f"Include paleointensity results for {len(matched)} specimen(s) "
+                    f"(from {os.path.basename(pmagint_path)})? Y/n: ", "Y")
+                if include_pint is None:
+                    return
+                if include_pint.strip().lower() != "n":
+                    pmagint_rows = matched
+
+        # Anisotropie (.pmagani, tenseur 'A0' natif deja calcule) -
+        # demande explicite utilisateur ("il manque aussi les données
+        # d'anisotropie au niveau du fichier specimens (prendre les A0)")
+        # : specimens.txt n'avait jusqu'ici AUCUNE colonne aniso_* (les
+        # prompts anisotropy_kind_by_specimen/anisotropy_skip ci-dessus ne
+        # servent qu'a etiqueter les mesures BRUTES X/Y/Z de
+        # measurements.txt, pas le tenseur RESULTAT). Cherche le tenseur
+        # 'A0' de chaque specimen de la selection independamment des
+        # mesures X/Y/Z chargees (le .pmagani peut avoir ete alimente par
+        # une session/un import different) - ne demande que si au moins
+        # un tenseur est trouve.
+        aniso_tensors = {}
+        ani_path = self._find_ani_path()
+        if ani_path:
+            for ech in self.selection:
+                tensor = read_ani_tensor(ani_path, ech.id, "A0")
+                if tensor is not None:
+                    aniso_tensors[ech.id] = tensor
+            if aniso_tensors:
+                include_aniso = self._console_input(
+                    f"Include anisotropy tensor 'A0' for {len(aniso_tensors)} specimen(s) "
+                    f"(from {os.path.basename(ani_path)})? Y/n: ", "Y")
+                if include_aniso is None:
+                    return
+                if include_aniso.strip().lower() == "n":
+                    aniso_tensors = {}
+
         out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
         if not out_dir:
             return
@@ -1607,6 +1744,8 @@ class StarmacApp:
                 continent_ocean=continent, country=country, region=region,
                 anisotropy_kind_by_specimen=anisotropy_kind_by_specimen,
                 anisotropy_skip=anisotropy_skip,
+                pmagint_rows=pmagint_rows,
+                aniso_tensors=aniso_tensors,
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")
@@ -1693,11 +1832,21 @@ class StarmacApp:
         dataselect.f) : fichier texte unique avec, pour chaque échantillon
         sélectionné, un bloc de paramètres complet puis le tableau de
         mesures (Dsc/Isc, Dis/Iis, Dtc/Itc = dec/inc en repère échantillon/
-        in-situ/après pendage). Séparé de « export Latex » (le Fortran les
-        enchaîne automatiquement, ici ce sont deux menus indépendants).
+        in-situ/après pendage).
         La déclinaison IGRF n'est pas calculée (IGRF non porté) - affichée
         "n.d" comme le fait déjà le Fortran pour ses propres cas de
-        données manquantes."""
+        données manquantes.
+
+        Genere aussi automatiquement une copie PDF du meme texte (police
+        MONOSPACE, meme alignement garanti quel que soit l'ordinateur/
+        editeur de texte qui l'ouvre - voir export_detailed_txt) - demande
+        explicite utilisateur ("a PDF copy of the text export: do it
+        automatically with the export text"), qui remplace l'export Latex
+        desormais retire (necessitait une chaine LaTeX installee juste
+        pour obtenir un PDF, alors que STARpaleomag_Py lui-meme reste le
+        bon outil pour consulter les donnees - demande explicite
+        utilisateur : "a paleomagnetist who want to see the data can do
+        it through STARpaleomag_Py")."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
@@ -1708,49 +1857,33 @@ class StarmacApp:
         heights = self._prompt_magstrat_heights()
         if heights is None:
             return
+        # Nom/dossier par defaut derives du fichier de donnees charge
+        # (.prmag/.ren -> "..._listing.txt", et donc "..._listing.pdf"
+        # pour la copie PDF automatique - meme base, voir
+        # export_detailed_txt) plutot qu'un dialogue vide a chaque fois -
+        # demande explicite utilisateur ("can you save the text file by
+        # replacing .prmag by _listing.txt. and _listing.pdf"). Reste
+        # modifiable dans le dialogue, ce n'est qu'une valeur initiale.
+        initial_file, initial_dir = None, None
+        if self.data_file_path:
+            initial_file = os.path.splitext(os.path.basename(self.data_file_path))[0] + "_listing.txt"
+            initial_dir = os.path.dirname(self.data_file_path)
         out_path = filedialog.asksaveasfilename(
             title="Detailed .txt file", defaultextension=".txt",
+            initialfile=initial_file, initialdir=initial_dir,
             filetypes=[("Text", "*.txt"), ("All files", "*.*")],
         )
         if not out_path:
             return
+        source_file = os.path.basename(self.data_file_path) if self.data_file_path else None
         try:
-            export_detailed_txt(self.selection, location, out_path, heights=heights or None)
+            export_detailed_txt(
+                self.selection, location, out_path, heights=heights or None, source_file=source_file)
         except OSError as e:
             self._showerror("Error", f"Export failed:\n{e}")
             return
-        self._afficher(f"Detailed export written: {out_path}\n")
-
-    def ouvrir_export_latex_dialog(self):
-        """Equivalent GUI de `exporttolatex` (dataselect.f) : document
-        LaTeX (index de sites/échantillons hyperliés + mêmes blocs que
-        « export detailed Rennes », plus l'ajustement ChRM le cas échéant)
-        - séparé de « export detailed Rennes » (voir docstring de cette
-        dernière). L'inclusion des PDF Zijderveld par échantillon
-        (`includegraphics{zijder-<id>.pdf}` du Fortran, qui suppose ces
-        PDF déjà générés sur disque) n'est pas reproduite."""
-        if not self.selection:
-            self._showwarning("No selection", "Select some samples first.")
-            return
-        self.text_area.insert(tk.END, "\n--- export Latex (Escape to cancel) ---\n", "prompt")
-        location = self._console_input("Main study location (country, region): ", "")
-        if location is None:
-            return
-        heights = self._prompt_magstrat_heights()
-        if heights is None:
-            return
-        out_path = filedialog.asksaveasfilename(
-            title="LaTeX file", defaultextension=".tex",
-            filetypes=[("LaTeX", "*.tex"), ("All files", "*.*")],
-        )
-        if not out_path:
-            return
-        try:
-            export_latex(self.selection, location, out_path, results=self.results, heights=heights or None)
-        except OSError as e:
-            self._showerror("Error", f"Export failed:\n{e}")
-            return
-        self._afficher(f"LaTeX export written: {out_path}\n")
+        pdf_path = os.path.splitext(out_path)[0] + ".pdf"
+        self._afficher(f"Detailed export written: {out_path}\n  (and PDF copy: {pdf_path})\n")
 
     def ouvrir_export_stereo_dialog(self):
         """Equivalent GUI de `exportres` (fichiers.f:1203), adapte pour
@@ -1758,18 +1891,18 @@ class StarmacApp:
         reprendre tel quel le format texte du Fortran d'origine - demande
         explicite utilisateur ("is it possible to add the export results
         to Stereo_Py as in the original Fortran with in addition a
-        specific file for the poles", precisee ensuite : "I did not
-        explain that it was with a format compatible to the project in
-        Stereo_Py"). Deux fichiers, DEUX formats DIFFERENTS (voir
-        export_stereo.py) :
-        - le fichier "resultats" est au format "Project" de
-          StereoUtils_Py (menu Project > Load Project...) - directement
-          chargeable tel quel, groupe par site (recalcul de moyenne de
-          Fisher possible via "Fisher Project" dans StereoUtils_Py).
-        - le fichier "_poles" (moyennes de site "mean:" avec VGP + ovale
-          dp/dm) est au format "Data input" (colonnes dec/inc = VGP lon/
-          lat) attendu par "Plot VGPs on Map" - PAS le format "Project"
-          (un pole n'est pas une direction locale)."""
+        specific file for the poles"), affinee au fil de plusieurs
+        demandes explicites ulterieures jusqu'a l'actuel fichier UNIQUE a
+        3 blocs (voir export_stereo.export_stereo_project pour le detail
+        complet du format) : "individual directions" (lignes/plans de
+        specimen), "mean directions" (moyennes de site), "VGP" (poles,
+        quand la moyenne en porte un) - chacun avec son propre en-tete de
+        colonnes, une colonne `tilt_correction` (0/100, meme convention
+        MagIC que partout ailleurs dans ce projet) et une colonne `info`
+        VOLONTAIREMENT vide, reservee a l'utilisateur ("can you manage a
+        stereo project with three blocks... a column for the tilt
+        correction 0 to 100 and an information column to be filled
+        manually by the user")."""
         if not self.results:
             self._showwarning("No results", "Run one or more fits first.")
             return
@@ -1786,24 +1919,16 @@ class StarmacApp:
         )
         if not out_path:
             return
-        base, ext = os.path.splitext(out_path)
-        poles_path = f"{base}_poles{ext or '.txt'}"
 
-        n_results = export_results_to_stereo(self.results, out_path, orientation=orientation)
-        n_poles = export_poles_to_stereo(self.results, poles_path)
-
-        msg = (
-            f"{n_results} specimen/mean entrie(s) written to {out_path} "
-            f"(StereoUtils_Py: Project > Load Project...)\n"
+        counts = export_stereo_project(self.results, out_path, orientation=orientation)
+        if not any(counts.values()):
+            self._showinfo("Nothing to export", "No exportable line/plane/mean result found.")
+            return
+        self._afficher(
+            f"Stereo project written to {out_path} "
+            f"({counts['directions']} direction(s), {counts['means']} mean(s), "
+            f"{counts['vgp']} VGP(s)) - StereoUtils_Py: Project > Load Project...\n"
         )
-        if n_poles:
-            msg += (
-                f"{n_poles} site pole(s) (VGP) written to {poles_path} "
-                f"(StereoUtils_Py: Data input, then Pmag_Python > Plot VGPs on Map)\n"
-            )
-        else:
-            msg += "No site mean (\"mean:\") found - no poles file written.\n"
-        self._afficher(msg)
 
     # ------------------------------------------------------------------
     # Graphiques : Zijderveld (equivalent de `plotzijder`/`zijderplot`)
@@ -1857,6 +1982,26 @@ class StarmacApp:
             self._showerror("Error", f"SVG export failed:\n{e}")
             return
         self._showinfo("Export successful", f"Graphic exported:\n{path}")
+
+    def ouvrir_user_guide(self):
+        """Ouvre le guide utilisateur (STARpaleomag_Py Guide) dans le
+        navigateur systeme - demande explicite utilisateur ("quel serait
+        la possibilite de developper une aide en ligne par Claude pour
+        des futurs utilisateurs ?"). Option retenue apres discussion des
+        alternatives (une cle API partagee dans le code source serait
+        rapidement retrouvee et abusee ; une cle par utilisateur ajoute
+        de la friction pour un public qui n'est pas familier des API) :
+        un fichier HTML STATIQUE livre EN LOCAL avec l'appli (voir
+        _resource_path, help/STARpaleomag_Py_Guide.html - copie du guide
+        deja redige comme artifact Claude, sans ses scripts de plateforme)
+        plutot qu'une aide en direct necessitant reseau/cle/cout recurrent.
+        A resynchroniser manuellement avec l'artifact si celui-ci est mis
+        a jour par la suite (pas de lien automatique entre les deux)."""
+        guide_path = _resource_path("help", "STARpaleomag_Py_Guide.html")
+        if not os.path.exists(guide_path):
+            self._showerror("Error", f"User guide not found:\n{guide_path}")
+            return
+        webbrowser.open(f"file://{guide_path}")
 
     def afficher_zijderveld(self):
         """Equivalent GUI de la boucle `do i=1,nbech ... call zijder2(...)`
@@ -2302,12 +2447,26 @@ class StarmacApp:
         routine, contrairement a `afficher_arai`/`paleoin`) ; le taux de
         refroidissement optionnel (4e colonne) n'est qu'un multiplicateur
         final sur H (`rHfinal=H*corcool`), PAS la correction complete de
-        `vitref`/Cooling rate."""
+        `vitref`/Cooling rate.
+
+        5e colonne optionnelle (aniso_corr, `int_corr_aniso` MagIC - voir
+        extract_magic.magic_pint_results_to_redo_lines) : facteur
+        d'anisotropie DEJA calcule par le logiciel source de la
+        contribution MagIC importee - demande explicite utilisateur
+        ("while writing the redo file for paleointensity, add the
+        int_corr_cooling_rate, and int_corr_aniso in the redo file").
+        Applique UNIQUEMENT EN REPLI, si STARpaleomag_Py n'a PAS de tenseur
+        .pmagani natif pour ce specimen (voir _apply_anisotropy_correction
+        - `aniso_tensor is None` ET l'echantillon n'a pas deja ete
+        corrige vectoriellement) - demande explicite utilisateur, pour ne
+        jamais corriger deux fois le meme effet physique (tenseur natif
+        recalcule ET facteur MagIC deja applique par le logiciel
+        source)."""
         if not self.donnees:
             self._showwarning("No data", "Load a .ren file first.")
             return
         list_path = filedialog.askopenfilename(
-            title="List file (sample Tmin Tmax [cooling rate])",
+            title="List file (sample Tmin Tmax [cooling rate] [aniso factor])",
             filetypes=[("Text", "*.txt *.lst *.dat"), ("All files", "*.*")],
         )
         if not list_path:
@@ -2319,7 +2478,7 @@ class StarmacApp:
             self._showerror("Error", f"Could not read {list_path}:\n{e}")
             return
 
-        entries = []  # (sample_id, tmin, tmax, cooling)
+        entries = []  # (sample_id, tmin, tmax, cooling, aniso_corr)
         for line in lines:
             parts = line.split()
             if len(parts) < 3:
@@ -2328,9 +2487,10 @@ class StarmacApp:
                 sample_id = parts[0]
                 tmin, tmax = int(float(parts[1])), int(float(parts[2]))
                 cooling = float(parts[3]) if len(parts) > 3 else 0.0
+                aniso_corr = float(parts[4]) if len(parts) > 4 else 0.0
             except ValueError:
                 continue
-            entries.append((sample_id, tmin, tmax, cooling))
+            entries.append((sample_id, tmin, tmax, cooling, aniso_corr))
         if not entries:
             self._showwarning("Empty list", f"No usable entry found in {list_path}.")
             return
@@ -2379,7 +2539,7 @@ class StarmacApp:
                     continue
             last_iligne = iligne
 
-            sample_id, tmin, tmax, cooling = entries[iligne - 1]
+            sample_id, tmin, tmax, cooling, aniso_corr = entries[iligne - 1]
             matches = select_samples(
                 self.donnees, sample_id, step_min=0, step_max=2000,
                 demag1="*", demag2="*", verbose=False)
@@ -2448,6 +2608,24 @@ class StarmacApp:
 
             fcor, hcorani, aniso_note, aniso_tensor = self._apply_anisotropy_correction(
                 ech, ani_path, direction, fit.h)
+
+            # Repli sur le facteur d'anisotropie DEJA calcule par la
+            # contribution MagIC (int_corr_aniso, 5e colonne du fichier
+            # redo - voir extract_magic.magic_pint_results_to_redo_lines)
+            # UNIQUEMENT si STARpaleomag_Py n'a pas de tenseur .pmagani natif pour
+            # ce specimen (aniso_tensor is None) ET que l'echantillon n'a
+            # pas deja ete corrige vectoriellement (flaganiso) - demande
+            # explicite utilisateur, pour ne jamais corriger deux fois le
+            # meme effet physique (tenseur natif recalcule ET facteur
+            # MagIC deja applique par le logiciel source).
+            if aniso_tensor is None and aniso_corr and not getattr(ech, "flaganiso", False):
+                fcor = aniso_corr
+                hcorani = fit.h * aniso_corr
+                aniso_note = (
+                    f"Anisotropy: no native .pmagani tensor for {ech.id} - falling back to "
+                    f"the MagIC contribution's own int_corr_aniso: fcor={fcor:.3f}  "
+                    f"H (raw)={fit.h:.2f}µT -> Hcorani (corrected)={hcorani:.2f}µT\n"
+                )
 
             h_final = hcorani if hcorani is not None else fit.h
             if cooling:
@@ -2520,7 +2698,7 @@ class StarmacApp:
 
             self._afficher(res.getvalue())
 
-            # Second traitement, PARALLELE et INDEPENDANT du natif Starmac
+            # Second traitement, PARALLELE et INDEPENDANT du natif STARpaleomag_Py
             # ci-dessus : appelle le code PmagPy/MagIC reel (pmag.PintPars)
             # sur le MEME intervalle Tmin/Tmax - demande explicite
             # utilisateur ("a second parallel processing of paleointensity.
@@ -2555,15 +2733,38 @@ class StarmacApp:
                     tensor=aniso_tensor, f1=rf1, f2=rf2,
                 )
 
+            # Pause avant de reafficher la liste numerotee - demande
+            # explicite utilisateur ("could you put a pause before to
+            # print the list again in order to be able to read the
+            # listing") : sans elle, la liste + le prompt suivant
+            # s'affichaient IMMEDIATEMENT apres le detail MagIC/PmagPy
+            # (`format_magic_paleointensity`), poussant ce detail hors de
+            # la vue au prochain auto-scroll (`_afficher`/`see(tk.END)`)
+            # avant meme d'avoir pu le lire. Meme convention Echap que le
+            # reste de cette boucle (quitte entierement, voir `choice is
+            # None` plus haut).
+            pause = self._console_input(
+                "Press Return to continue (Escape to quit): ", "")
+            if pause is None:
+                return
+
     def afficher_visres(self):
         """Equivalent GUI de `visres` ("data+interpretation",
         plotorthog.f:8-149) : boucle sur CHAQUE résultat de self.results
-        INDIVIDUELLEMENT (pas regroupé par échantillon) - pour cat1=='L'
-        affiche le Zijderveld de l'échantillon avec CE seul ajustement (les
-        autres ajustements du même échantillon ne sont PAS superposés,
-        comme le Fortran qui réduit `tr` à un seul élément avant d'appeler
-        `zijder`) ; pour cat1 in ('P','f') affiche Stereo Results pour ce
-        seul résultat. Pour cat1=='F' (moyenne de site) - IGNORÉ par le
+        INDIVIDUELLEMENT (pas regroupé par échantillon) - pour cat1 in
+        ('L','P') affiche Zijderveld + Stereo Results côte à côte pour
+        CE seul ajustement (les autres ajustements du même échantillon ne
+        sont PAS superposés, comme le Fortran qui réduit `tr` à un seul
+        élément avant d'appeler `zijder`) : le panneau stereo montre un
+        point de direction pour une ligne, le grand cercle pour un plan -
+        MÊME plot "classique" pour les deux désormais (voir
+        build_zijderveld_stereo_results_figure) - demande explicite
+        utilisateur ("put the great circle on the stereo within the same
+        classic plot that has already zijderveld and stereo; when the
+        result is a line, the result goes to the zijderveld, when it is
+        a plane it is plotted on the stereo"). Pour cat1=='f' (direction
+        individuelle sans Zijderveld associé) affiche Stereo Results
+        seul. Pour cat1=='F' (moyenne de site) - IGNORÉ par le
         Fortran d'origine, désormais traité - affiche un Stereo Results
         combinant la moyenne (cône de confiance) ET ses composants
         individuels (voir calcul.mean_components, cross-référencés via
@@ -2642,21 +2843,24 @@ class StarmacApp:
             traite += 1
             self._clear_figure()
 
-            if r.cat1 == "L":
-                self.fig.set_size_inches(5.5, 8.5, forward=True)
-                build_zijderveld_figure(ech, orientation=self.orientation.get(), fits=[r], fig=self.fig)
-                self._fit_figure_to_data()
-                self._redraw_canvas()
-            elif r.cat1 == "P":
-                # Zijderveld + Stereo Results (grand cercle) cote a cote -
-                # demande explicite utilisateur ("in data+interpretation,
-                # when there is a plane, keep the plot zijderveld+stereo
-                # and plot the great circle on the stereo") - le Fortran
-                # d'origine n'affiche que sterres pour un plan (verifie
-                # contre le source), extension deliberee au-dela de ca.
-                # figure a 2 panneaux : bypass _fit_figure_to_data (memes
-                # raisons que paleoint_review/xygraph/susceptibility/irm -
-                # elle ne sait dimensionner qu'un seul panneau).
+            if r.cat1 in ("L", "P"):
+                # Zijderveld + Stereo Results cote a cote, MEME plot
+                # "classique" desormais pour une ligne ET pour un plan -
+                # demande explicite utilisateur ("put the great circle on
+                # the stereo within the same classic plot that has
+                # already zijderveld and stereo; when the result is a
+                # line, the result goes to the zijderveld, when it is a
+                # plane it is plotted on the stereo"). Une ligne
+                # utilisait auparavant le Zijderveld SEUL (avec son petit
+                # encart stereo integre montrant seulement les points
+                # bruts, PAS le fit) ; build_zijderveld_stereo_results_
+                # figure gere deja les deux cas correctement sur son
+                # panneau stereo (draw_stereo_results : point pour L/f,
+                # grand cercle pour P - voir sa docstring), il suffit de
+                # l'utiliser aussi pour 'L'. Figure a 2 panneaux : bypass
+                # _fit_figure_to_data (memes raisons que paleoint_review/
+                # xygraph/susceptibility/irm - elle ne sait dimensionner
+                # qu'un seul panneau).
                 self.fig.set_size_inches(11.0, 6.0, forward=True)
                 build_zijderveld_stereo_results_figure(
                     ech, r, orientation=self.orientation.get(), fig=self.fig)
@@ -2716,7 +2920,7 @@ class StarmacApp:
             return
         ech = self.selection[0]
         steps_text = "  ".join(
-            f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+            f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
         self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
         etape_s = self._console_input("Step (temperature/field) to remove: ", "")
         if etape_s is None:
@@ -2962,8 +3166,8 @@ class StarmacApp:
             # quand meme reste possible, mais ne doit plus se faire
             # silencieusement.
             confirm = self._console_input(
-                f"[{ech.id}] anisotropy NOT significant (not satisfactory) - "
-                f"inverse anisotropy correction anyway? y/N: ", "N")
+                f"[{ech.id}] anisotropy NOT significant (not satisfactory).\n"
+                f"Inverse anisotropy correction anyway? y/N: ", "N")
             if confirm is None or confirm.strip().lower() != "y":
                 return None, None, (
                     "Anisotropy: NOT applied (Hext F-test not satisfactory, declined) - "
@@ -3080,22 +3284,21 @@ class StarmacApp:
         return code[0], code[1]
 
     def _read_step_range(self, demag1, default_min="0", default_max="9999"):
-        """Demande Step min/Step max, avec un libelle et une conversion
-        d'unite adaptes a `demag1` (deja connu - l'appelant doit demander
-        le code demag AVANT d'appeler cette methode, pas apres comme
-        c'etait le cas ici auparavant) : mT pour un pas AF (A/F, converti
-        en interne vers l'echelle Oersted-equivalent - mT*10 - de
-        Measurement.etape), degC pour un pas thermique (D/S/T/K), step
-        brut sinon (code inconnu ou '*', ambigu - une selection melant
-        AF et thermique ne peut de toute facon pas partager une seule
-        conversion correcte, laisse donc inchange comme avant) - demande
-        explicite utilisateur ("remove the historical background in
-        oersted and now work only the AF in mT... accepter mT
-        directement... l'utilisateur tape 15 pour 15 mT, comme
-        l'affichage"). Retourne (step_min, step_max) ou None si annule/
-        invalide (message d'erreur deja affiche dans ce cas)."""
+        """Demande Step min/Step max, avec un libelle adapte a `demag1`
+        (deja connu - l'appelant doit demander le code demag AVANT
+        d'appeler cette methode) : mT pour un pas AF (A/F), degC pour un
+        pas thermique (D/S/T/K, et R/V/P - paleointensite Thellier/IZZI,
+        demande explicite utilisateur "when the cod1 is R, V, P, the unit
+        is also °C"), step brut sinon (code inconnu ou '*', ambigu).
+        `Measurement.etape` est desormais directement la valeur physique
+        reelle (plus d'echelle Oersted-equivalente a compenser ici -
+        demande explicite utilisateur "convert all step integer to
+        float") : ce que l'utilisateur tape est compare tel quel a
+        `etape`, le libelle sert seulement a clarifier l'unite attendue.
+        Retourne (step_min, step_max) ou None si annule/invalide (message
+        d'erreur deja affiche dans ce cas)."""
         is_af = demag1 in ("A", "F")
-        is_thermal = demag1 in ("D", "S", "T", "K")
+        is_thermal = demag1 in ("D", "S", "T", "K", "R", "V", "P")
         unit_label = "mT" if is_af else ("degC" if is_thermal else "step")
         step_min_s = self._console_input(f"Step min ({unit_label}): ", default_min)
         if step_min_s is None:
@@ -3109,8 +3312,7 @@ class StarmacApp:
         except ValueError:
             self._showerror("Error", "Step min / Step max must be numbers.")
             return None
-        scale = 10.0 if is_af else 1.0
-        return int(round(step_min_val * scale)), int(round(step_max_val * scale))
+        return step_min_val, step_max_val
 
     def _console_input(self, prompt, default=""):
         """Lit une ligne tapee au clavier DANS la fenetre texte, comme une
@@ -3522,7 +3724,7 @@ class StarmacApp:
             self._refresh_current_graphic()
 
             steps_text = "  ".join(
-                f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+                f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
             self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
 
             while True:  # boucle "refaire" (r)
@@ -3612,16 +3814,48 @@ class StarmacApp:
         AUCUNE suggestion n'est archivee automatiquement (limite assumee
         et documentee dans auto_interpretation.py : fiable sur une
         decroissance a composante unique, faillible sur des composantes
-        qui se chevauchent - chaque suggestion reste a valider)."""
+        qui se chevauchent - chaque suggestion reste a valider).
+
+        Regroupe d'abord par site MagIC (`magic_site`) avant d'appeler
+        propose_components_for_site - demande explicite utilisateur
+        ("you miss the point at a site level. if some samples have a
+        well defined secondary magnetization in a wide temperature
+        range... it is likely that this behavior is the same for all
+        samples"). N'echange JAMAIS automatiquement primary/secondary
+        (voir auto_interpretation.py, docstring de
+        propose_components_for_site, pour deux contre-exemples reels -
+        14NQ04 puis 14NQ0403B - qui ont ecarte cette idee) : se contente
+        d'ajouter une note des deux cotes quand le "primary" isole d'un
+        specimen s'ecarte du palier typique des autres specimens du site,
+        pour que l'utilisateur compare lui-meme les deux directions sur
+        le Zijderveld avant de choisir.
+        Les specimens sans site decode (magic_site vide) restent traites
+        individuellement - un site vide melangerait des specimens sans
+        rapport dans un meme "consensus"."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
 
+        viable = [ech for ech in self.selection if len(ech.mesures) >= 2]
+
+        by_site = {}
+        no_site = []
+        for ech in viable:
+            site = (ech.magic_site or "").strip()
+            if site:
+                by_site.setdefault(site, []).append(ech)
+            else:
+                no_site.append(ech)
+
+        suggestions_by_id = {}
+        for echs in by_site.values():
+            suggestions_by_id.update(propose_components_for_site(echs))
+        for ech in no_site:
+            suggestions_by_id[ech.id] = propose_components(ech)
+
         self.text_area.insert(tk.END, "\n--- Auto-interpretation (suggestions, Escape to stop) ---\n", "prompt")
-        for ech in self.selection:
-            if len(ech.mesures) < 2:
-                continue
-            suggestions = propose_components(ech)
+        for ech in viable:
+            suggestions = suggestions_by_id[ech.id]
             if not suggestions:
                 self._afficher(format_suggestions(ech.id, suggestions))
                 continue
@@ -3650,8 +3884,24 @@ class StarmacApp:
                 continue
 
             self.results.extend(candidates.values())
-            self._current_graphic = ("zijderveld", ech.id)
-            self._refresh_current_graphic()
+            # Zijderveld + Stereo Results cote a cote (grand cercle trace
+            # pour toute suggestion de PLAN) plutot que le Zijderveld seul
+            # (self._current_graphic=("zijderveld", ...), qui n'a jamais
+            # qu'un encart stereo limite aux points bruts - JAMAIS de
+            # grand cercle, voir build_zijderveld_stereo_results_figure)
+            # - demande explicite utilisateur ("in data + interpretation,
+            # the original plot is lost... I was asking to plot the plane
+            # on the stereo with the data when a result was a plane and
+            # keep the zijderveld"). Contourne _current_graphic/
+            # _refresh_current_graphic (meme motif que afficher_visres,
+            # qui dessine aussi directement sur self.fig) : ce mode
+            # combine n'est pas un des "kind" qu'il connait.
+            self._current_graphic = None
+            self._clear_figure()
+            self.fig.set_size_inches(11.0, 6.0, forward=True)
+            build_zijderveld_stereo_results_figure(
+                ech, list(candidates.values()), orientation=self.orientation.get(), fig=self.fig)
+            self._redraw_canvas()
 
             choice = self._console_input(
                 "Save which (p=primary, s=secondary, b=both, Enter=discard all): ", "")
@@ -3696,7 +3946,7 @@ class StarmacApp:
             self._refresh_current_graphic()
 
             steps_text = "  ".join(
-                f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+                f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
             self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
 
             while True:  # boucle "refaire"
@@ -3791,7 +4041,7 @@ class StarmacApp:
                 continue
 
             steps_text = "  ".join(
-                f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+                f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
             self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
 
             while True:
@@ -4004,7 +4254,7 @@ class StarmacApp:
             return
         ech = self.selection[0]
         steps_text = "  ".join(
-            f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+            f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
         self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
         row_s = self._console_input("Line number to subtract: ", "")
         if row_s is None:
@@ -4037,7 +4287,7 @@ class StarmacApp:
             return
         ech = self.selection[0]
         steps_text = "  ".join(
-            f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+            f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
         self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
         idx_s = self._console_input("Line numbers x+ x- y+ y- z+ z-: ", "")
         if idx_s is None:
@@ -4118,8 +4368,20 @@ class StarmacApp:
                 if ech.norme == "m" else
                 "Remanent magnetization list (A/m)"
             )
+            # orientation=1 (echantillon) FORCE, pas self.orientation.get()
+            # - meme raison que ouvrir_openfilepint_dialog (calcul.f/
+            # anisot-anisoauto n'appelle jamais corfor/corpen sur les
+            # mesures : le tenseur et les diagnostics par position sont
+            # TOUJOURS calcules en coordonnees echantillon, quel que soit
+            # le reglage d'orientation courant de l'appli - demande
+            # explicite utilisateur ("force the orient to sample
+            # coordinates at the beginning of the anisotropy routine").
+            # Sans ce forçage, cette liste de mesures pouvait s'afficher
+            # dans une orientation differente (In situ/Tilt cor.) de
+            # celle, TOUJOURS echantillon, des diagnostics affiches juste
+            # apres - une incoherence au sein du meme dialogue.
             buffer = io.StringIO()
-            list_measurements([ech], orientation=self.orientation.get(), out=buffer)
+            list_measurements([ech], orientation=1, out=buffer)
             lines.append(buffer.getvalue().rstrip("\n"))
             self._afficher("\n".join(lines) + "\n")
             lines = []
@@ -4130,9 +4392,22 @@ class StarmacApp:
                 # pas de substitution R/V->Z+/Z- dans cette branche du
                 # Fortran (zplus/zminus n'y sont jamais lus), seulement les
                 # codes litteraux X+/X-/Y+/Y-/Z+/Z-.
+                # Return (pas de numeros saisis) = passer CE specimen et
+                # continuer la boucle ; Escape = sortir de TOUTE la boucle
+                # batch (les specimens deja traites restent acquis,
+                # resume affiche quand meme) - demande explicite
+                # utilisateur ("can you add return to skip, escape to go
+                # out of the loop") : avant ce changement, Escape ne
+                # sautait qu'UN specimen (comme Return, qui en plus
+                # affichait une erreur "6 valid line numbers are
+                # required" avant de sauter) - aucun moyen d'interrompre
+                # le lot entier depuis ce prompt.
                 idx_s = self._console_input(
-                    f"[{ech.id}] Line numbers x+ x- y+ y- z+ z- (Escape to skip): ", "")
+                    f"[{ech.id}] Line numbers x+ x- y+ y- z+ z- "
+                    f"(Return to skip, Escape to stop): ", "")
                 if idx_s is None:
+                    break
+                if not idx_s.strip():
                     skipped.append(ech.id)
                     continue
                 try:
@@ -4158,37 +4433,106 @@ class StarmacApp:
                 self._afficher("\n".join(lines) + "\n")
                 continue
 
-            if result.holder_used:
-                bg = self._arm_holder_background
-                lines.append("Holder ARM background subtracted (X+,X-,Y+,Y-,Z+,Z-):")
-                lines.extend(
-                    f"  {i + 1}: {bg.x[i]:.3E}  {bg.y[i]:.3E}  {bg.z[i]:.3E}" for i in range(6)
-                )
-
-            if result.swapped_axes:
-                lines.extend(
-                    f"!! inversion {ax}+ and {ax}- for sample: {ech.id}" for ax in result.swapped_axes
-                )
-
             unit = "Am2/kg" if ech.norme == "m" else "A/m"
-            lines.append(
-                f"Mean NRM (residual, subtracted below): "
-                f"x={result.nrm_mean[0]:.3E}  y={result.nrm_mean[1]:.3E}  z={result.nrm_mean[2]:.3E}"
-            )
-            lines.append("Mean NRM subtracted - TRM values:")
-            lines.extend(
-                f"  {d.key}: {d.measurement.etape}{d.measurement.cod1}{d.measurement.cod2}  "
-                f"{d.intensity:10.3E} {unit}  dec={d.dec:6.1f}  inc={d.inc:6.1f}"
-                for d in result.position_diags
-            )
-            lines.append(f"Deviation (pair asymmetry / mean TRM intensity): {result.deviation_pct:5.1f} %")
 
-            if result.trm_evolution_pct is not None:
-                lines.append(f"ZB check found - TRM evolution: {result.trm_evolution_pct:5.1f} %")
-                if result.zb_used:
-                    lines.append("  -> evolution exceeds 5%: Z+ replaced by the ZB control measurement.")
-            else:
-                lines.append("No ZB control measurement found (no pTRM-check available).")
+            def _position_diag_lines(res):
+                out = []
+                if res.holder_used:
+                    bg = self._arm_holder_background
+                    out.append("Holder ARM background subtracted (X+,X-,Y+,Y-,Z+,Z-):")
+                    out.extend(
+                        f"  {i + 1}: {bg.x[i]:.3E}  {bg.y[i]:.3E}  {bg.z[i]:.3E}" for i in range(6)
+                    )
+                if res.swapped_axes:
+                    out.extend(
+                        f"!! inversion {ax}+ and {ax}- for sample: {ech.id}" for ax in res.swapped_axes
+                    )
+                out.append("NRM residual estimated from each pair (before averaging the 3):")
+                out.extend(
+                    f"  {p.key}: {p.intensity:10.3E} {unit}  dec={p.dec:6.1f}  inc={p.inc:6.1f}"
+                    for p in res.pair_nrm
+                )
+                m = res.nrm_mean_diag
+                out.append(
+                    f"Mean NRM (residual, subtracted below): "
+                    f"{m.intensity:10.3E} {unit}  dec={m.dec:6.1f}  inc={m.inc:6.1f}"
+                )
+                out.append("Mean NRM subtracted - TRM values:")
+                out.extend(
+                    f"  {d.key}: {_step_token(d.measurement)}  "
+                    f"{d.intensity:10.3E} {unit}  dec={d.dec:6.1f}  inc={d.inc:6.1f}"
+                    for d in res.position_diags
+                )
+                out.append(f"Deviation (pair asymmetry / mean TRM intensity): {res.deviation_pct:5.1f} %")
+                if res.trm_evolution_pct is not None:
+                    out.append(f"ZB check found - TRM evolution: {res.trm_evolution_pct:5.1f} %")
+                    if res.zb_used:
+                        out.append("  -> evolution exceeds 5%: Z+ replaced by the ZB control measurement.")
+                else:
+                    out.append("No ZB control measurement found (no pTRM-check available).")
+                return out
+
+            self._afficher("\n".join(lines + _position_diag_lines(result)) + "\n")
+            lines = []
+
+            # Equivalent GUI de la question DESACTIVEE dans le Fortran
+            # d'origine ("voulez-vous supprimer une des 6 mesures ?
+            # laquelle:", calcul.f:4481-4552 - commentee "c", jamais
+            # active dans la version livree, MAIS le bloc de
+            # reconstruction qui la suit est bien present, complet, en
+            # dur) - demande explicite utilisateur : "in the original
+            # Fortran code... after [listing the NRM/TRM values] I was
+            # asking if I wanted to replace a step" puis, precision
+            # ulterieure avec un exemple reel du Fortran a l'appui,
+            # "when we remove one line, it is replaced by the
+            # antiparallel... also easier to write the number of the
+            # line from 1 to 6" : PAS une nouvelle mesure a choisir
+            # (contrairement a un essai precedent de ce port) - le
+            # numero 1-6 correspond exactement a l'ordre deja affiche
+            # dans "Mean NRM subtracted - TRM values" ci-dessus (memes
+            # positions que _ANI_POSITION_KEYS). Voir
+            # calcul.replace_position_by_symmetry pour la formule exacte
+            # portee depuis ce bloc Fortran. Le tenseur est RECALCULE en
+            # entier (positions/NRM moyenne/inversion X-Y/ZB re-evaluees)
+            # apres chaque remplacement, pas juste la position changee,
+            # puisque tout en depend.
+            position_order = ("X+", "X-", "Y+", "Y-", "Z+", "Z-")
+            while True:
+                replace_s = self._console_input(
+                    f"[{ech.id}] Do you want to remove one of the 6 measurements?\n"
+                    "Which one (1-6, N to skip): ", "N")
+                if replace_s is None:
+                    # Escape == "N" ici (le prompt le dit deja : "N to
+                    # skip") - PAS un `return` (bug signale par
+                    # l'utilisateur, "now it skip the process here" :
+                    # `return` sortait de TOUTE la methode en silence,
+                    # sans le resume final done/skipped/declined ni les
+                    # specimens suivants du lot batch - une simple
+                    # decision "ne pas retirer de mesure" ne doit annuler
+                    # ni le specimen courant ni le reste du lot).
+                    break
+                replace_s = replace_s.strip()
+                if replace_s.lower() in ("", "n"):
+                    break
+                try:
+                    line_no = int(replace_s)
+                    if not (1 <= line_no <= 6):
+                        raise ValueError
+                except ValueError:
+                    self._showerror("Error", "Must be a number from 1 to 6 (or N).")
+                    continue
+                pos_key = position_order[line_no - 1]
+                new_positions = replace_position_by_symmetry(
+                    result.positions, self._arm_holder_background, pos_key)
+                result = compute_anisotropy_tensor(
+                    ech, holder=self._arm_holder_background, use_zb_on_evolution=use_zb,
+                    positions=new_positions,
+                )
+                self._afficher(
+                    f"{pos_key} reconstructed from its pair partner and the other two "
+                    "pairs' mean NRM (not a new measurement line).\n"
+                    + "\n".join(_position_diag_lines(result)) + "\n"
+                )
 
             lines.append("-------- Tensor (raw, before symmetrization) --------")
             lines.extend(f"  {r[0]:10.3E}  {r[1]:10.3E}  {r[2]:10.3E}" for r in result.raw)
@@ -4207,9 +4551,14 @@ class StarmacApp:
             # l'ecriture .pmagani - demande explicite utilisateur
             # ("ajouter le calcul de PmagPy et les erreurs dans pmagani,
             # ainsi que l'estimation dans le comment satisfactory or not
-            # satisfactory").
+            # satisfactory"). `nrm_mean=result.nrm_mean` : BUG REEL corrige
+            # (voir docstring compute_aarm_pmagpy) - sans elle, la moindre
+            # NRM residuelle (TRM/ARM partielle) contamine le moindres-
+            # carres pmagpy et fait chuter le F-test vers "not significant"
+            # meme pour une vraie anisotropie moderee a forte.
             pmagpy_result = compute_aarm_pmagpy(
-                result.positions, holder=self._arm_holder_background, n_pos=6)
+                result.positions, holder=self._arm_holder_background, n_pos=6,
+                nrm_mean=result.nrm_mean)
             a0_tensor = result.all_tensors[0]
             a0_tensor.n_positions = 6
             a0_tensor.sigma = pmagpy_result.sigma
@@ -4218,37 +4567,45 @@ class StarmacApp:
             a0_tensor.ftest23 = pmagpy_result.f23_test
             a0_tensor.f_crit = pmagpy_result.f_crit
             a0_tensor.quality = pmagpy_result.quality
-            if pmagpy_result.quality == "g":
-                lines.append(
-                    f"PmagPy Hext F-test: F={pmagpy_result.f_test:.2f} "
-                    f"(critical F={pmagpy_result.f_crit:.4f}) -> significant anisotropy (satisfactory)"
-                )
-            elif pmagpy_result.quality == "b":
-                lines.append(
-                    f"PmagPy Hext F-test: F={pmagpy_result.f_test:.2f} "
-                    f"(critical F={pmagpy_result.f_crit:.4f}) -> NOT significant (not satisfactory)"
-                )
-            else:
-                lines.append("PmagPy Hext F-test: not computable (exactly-zero residual)")
+            # Detail complet (sigma/F/F12/F23/axes propres/s trace-
+            # normalise), pas juste F/critical F - demande explicite
+            # utilisateur ("can you list the PmagPy details") : MEME
+            # fonction que le menu separe "Anisotropy PmagPy" (voir
+            # format_aarm_pmagpy), pour ne pas avoir deux formats de
+            # resume differents pour le meme calcul.
+            lines.append(format_aarm_pmagpy(ech.id, pmagpy_result))
 
             self._afficher("\n".join(lines) + "\n")
             lines = []
 
+            # Pause TOUJOURS ici, quelle que soit `quality` - demande
+            # explicite utilisateur ("is it possible to still pause at the
+            # save to pmagani waiting for the validation by a return. The
+            # user should pay attention at the output even if the
+            # anisotropy is satisfactory") : avant ce changement, un
+            # tenseur 'g' (satisfactory) s'ecrivait sans pause des que le
+            # F-test passait, laissant filer le detail PmagPy (sigma/F/F12/
+            # F23/axes) sans que l'utilisateur ait eu l'occasion de le
+            # regarder - desormais CHAQUE specimen s'arrete sur Entree,
+            # 'g' comme 'b', seul le texte du prompt change. Defaut Y
+            # (Entree = sauvegarder) dans les deux cas - demande explicite
+            # anterieure ("reverse the y/N to Y/n by default") : la reponse
+            # est presque toujours "garder", la pause sert a FAIRE LIRE le
+            # resultat, pas a decourager de sauvegarder.
             if pmagpy_result.quality == "b":
-                # demande explicite utilisateur ("if (not satisfactory) is
-                # found, ask the user if he still wants to continue") : le
-                # test F de Hext indique que l'anisotropie n'est pas
-                # distinguable du bruit de mesure - saisir la sauvegarde
-                # quand meme reste possible (l'utilisateur peut avoir de
-                # bonnes raisons, ex. comparaison entre specimens d'un
-                # meme site), mais ne doit plus se faire silencieusement.
-                confirm = self._console_input(
-                    f"[{ech.id}] anisotropy NOT significant (not satisfactory) - "
-                    f"save to .pmagani anyway? y/N: ", "N")
-                if confirm is None or confirm.strip().lower() != "y":
-                    declined.append(ech.id)
-                    self._afficher(f"{ech.id}: not saved (anisotropy not satisfactory).\n")
-                    continue
+                prompt = (
+                    f"[{ech.id}] anisotropy NOT significant (not satisfactory).\n"
+                    f"Save to .pmagani anyway? Y/n: "
+                )
+            elif pmagpy_result.quality == "g":
+                prompt = f"[{ech.id}] anisotropy significant (satisfactory). Save to .pmagani? Y/n: "
+            else:
+                prompt = f"[{ech.id}] Hext F-test not computable. Save to .pmagani? Y/n: "
+            confirm = self._console_input(prompt, "Y")
+            if confirm is None or confirm.strip().lower() == "n":
+                declined.append(ech.id)
+                self._afficher(f"{ech.id}: not saved (declined).\n")
+                continue
 
             write_ani_tensors(
                 ani_path, ech, result.all_tensors, positions=result.positions,
@@ -4277,14 +4634,14 @@ class StarmacApp:
         anisotropy_magic.py pour le detail de ce qui a ete trouve dans le
         source pmagpy - `ipmag.get_matrix`/`ipmag.calculate_aniso_
         parameters`, moindres carres a la Hext 1963 + test de
-        significativite F, absent du calcul natif Starmac).
+        significativite F, absent du calcul natif STARpaleomag_Py).
 
         Detection des 6 positions IDENTIQUE a "Anisotropy" (detect_six_
         positions, meme substitution R/V->Z+/Z- si necessaire), avec la
         MEME ligne de base porte-echantillon optionnelle - affiche le
         tenseur trace-normalise de pmagpy (`aniso_s`), ses axes
         principaux (v1/v2/v3), le degre d'anisotropie P et le test F de
-        Hext, cote a cote avec le tenseur natif 'A0' de Starmac pour
+        Hext, cote a cote avec le tenseur natif 'A0' de STARpaleomag_Py pour
         montrer qu'ils calculent la MEME chose (verifie sur donnees
         synthetiques - voir anisotropy_magic.py) - pmagpy apportant en
         plus le test de significativite statistique."""
@@ -4306,20 +4663,26 @@ class StarmacApp:
 
             starmac = compute_anisotropy_tensor(
                 ech, holder=self._arm_holder_background, positions=positions)
+            # nrm_mean=starmac.nrm_mean : meme correction que dans
+            # ouvrir_anisotropy_dialog (voir docstring compute_aarm_pmagpy)
+            # - sans elle, cette comparaison cote-a-cote afficherait un F-
+            # test pmagpy contamine par la NRM residuelle alors que le
+            # tenseur natif 'A0' juste au-dessus en est deja immunise.
             pmagpy_result = compute_aarm_pmagpy(
-                positions, holder=self._arm_holder_background, n_pos=6)
+                positions, holder=self._arm_holder_background, n_pos=6,
+                nrm_mean=starmac.nrm_mean if starmac is not None else None)
 
             lines = [f"\n--- {ech.id} ---"]
             if starmac is not None:
                 t = starmac.tensor
                 trace = t.k11 + t.k22 + t.k33
                 lines.append(
-                    f"Starmac 'A0' (raw, physical units): k11={t.k11:.3E}  k22={t.k22:.3E}  "
+                    f"STARpaleomag_Py 'A0' (raw, physical units): k11={t.k11:.3E}  k22={t.k22:.3E}  "
                     f"k33={t.k33:.3E}  k12={t.k12:.3E}  k23={t.k23:.3E}  k13={t.k13:.3E}"
                 )
                 if trace:
                     lines.append(
-                        f"Starmac 'A0' (trace-normalized, for comparison with pmagpy's s "
+                        f"STARpaleomag_Py 'A0' (trace-normalized, for comparison with pmagpy's s "
                         f"below): s1={t.k11/trace:.5f}  s2={t.k22/trace:.5f}  "
                         f"s3={t.k33/trace:.5f}  s4(s12)={t.k12/trace:.5f}  "
                         f"s5(s23)={t.k23/trace:.5f}  s6(s13)={t.k13/trace:.5f}"
@@ -4352,14 +4715,15 @@ class StarmacApp:
             return
         ani_path = self._find_ani_path() or ani_path_for(self.results_path)
         choice = self._console_input(
-            "Correction with 1: TRM tensor (A0)  2: ARM tensor (F0)  3: susceptibility (N0): ", "1")
+            "Correction with 1: TRM tensor (A0)  2: ARM tensor (F0)  3: susceptibility (N0)  "
+            "4: ARM tensor imported from MagIC (AA): ", "1")
         if choice is None:
             return
         try:
             ichoice = int(choice)
         except ValueError:
             ichoice = 1
-        if ichoice not in (1, 2, 3):
+        if ichoice not in _ANI_CODE2:
             ichoice = 1
         code2 = _ANI_CODE2[ichoice]
 
@@ -4397,7 +4761,7 @@ class StarmacApp:
             rows = detect_cooling_rate_rows(ech) if auto else None
             if rows is None:
                 steps_text = "  ".join(
-                    f"{i + 1}:{m.etape}{m.cod1}{m.cod2}" for i, m in enumerate(ech.mesures))
+                    f"{i + 1}:{_step_token(m)}" for i, m in enumerate(ech.mesures))
                 self._afficher(f"{ech.id} - available steps:\n{steps_text}\n")
                 if auto:
                     self._afficher(f"{ech.id}: L/Q + R/V pattern not found automatically.\n")
@@ -4785,5 +5149,5 @@ class StarmacApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = StarmacApp(root)
+    app = STARpaleomagApp(root)
     root.mainloop()

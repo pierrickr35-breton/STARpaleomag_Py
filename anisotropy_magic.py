@@ -15,29 +15,29 @@ Trouve dans pmagpy (verifie en lisant le source live, pmagpy 4.5.2) :
   position, puis appelle...
 - `ipmag.get_matrix(n_pos)` : matrice de design A (moindres carres, Hext
   1963) pour n_pos in (6, 9, 15) - PAS un ajustement position-par-position
-  comme le fait Starmac (A0), mais une inversion lineaire generale sur
+  comme le fait STARpaleomag_Py (A0), mais une inversion lineaire generale sur
   TOUTES les positions a la fois (surdeterminee des que n_pos>6),
   B = (AtA)^-1 At.
 - `ipmag.calculate_aniso_parameters(K, n_pos)` : applique B au vecteur K
   (moments des n_pos positions, 3*n_pos valeurs), normalise par la TRACE
   (convention Jelinek : s1+s2+s3=1, CONTRAIREMENT au tenseur brut 'A0' de
-  Starmac, en unites physiques), diagonalise (valeurs propres t1>=t2>=t3,
+  STARpaleomag_Py, en unites physiques), diagonalise (valeurs propres t1>=t2>=t3,
   vecteurs propres v1/v2/v3 = axes principaux), calcule `aniso_p` (degre
   d'anisotropie t1/t3), et - l'apport reel au-dela de ce que fait deja
-  Starmac - le TEST F DE HEXT (`pmag.dohext`, Hext 1963) : compare le
+  STARpaleomag_Py - le TEST F DE HEXT (`pmag.dohext`, Hext 1963) : compare le
   residu de l'ajustement moindres carres a une hypothese nulle
   d'isotropie, donnant F/F12/F23 + un indicateur qualite 'g'/'b' selon
   que F depasse le F critique - AUCUN equivalent dans le calcul natif
-  Starmac (qui produit des variantes A0/A+/A-/A1-A6/B1-B6 a comparer a
+  STARpaleomag_Py (qui produit des variantes A0/A+/A-/A1-A6/B1-B6 a comparer a
   l'oeil, mais pas de test de significativite statistique formel).
 
-VERIFIE : pour n_pos=6 (le seul mode que Starmac sait detecter via
+VERIFIE : pour n_pos=6 (le seul mode que STARpaleomag_Py sait detecter via
 detect_six_positions), l'ordre des positions de get_matrix(6) est EXACTEMENT
 +X,+Y,+Z,-X,-Y,-Z (verifie via dir2cart sur les 6 directions codees en dur)
 - correspond terme a terme a l'ordre X+,Y+,Z+,X-,Y-,Z- deja utilise par
 calcul.compute_anisotropy_tensor. Sur un tenseur synthetique connu (bruit
 realiste ajoute), le tenseur trace-normalise de pmagpy (`aniso_s`) est
-identique (5 decimales) au tenseur 'A0' de Starmac normalise par sa propre
+identique (5 decimales) au tenseur 'A0' de STARpaleomag_Py normalise par sa propre
 trace - confirme que les deux methodes calculent la MEME chose pour n_pos=6
 (la moindre-carres se reduit a la demi-difference simple des lors qu'il y a
 exactement autant de positions que d'inconnues), pmagpy ajoutant seulement
@@ -91,6 +91,7 @@ def compute_aarm_pmagpy(
     positions: Dict[str, Measurement],
     holder: Optional[object] = None,
     n_pos: int = 6,
+    nrm_mean: Optional[Tuple[float, float, float]] = None,
 ) -> PmagpyAnisotropyResult:
     """Construit `K` (vecteur des moments des n_pos positions, ordre
     _POSITION_ORDER pour n_pos=6) a partir de `positions` (voir
@@ -99,13 +100,35 @@ def compute_aarm_pmagpy(
     soustraite en amont si `holder` est fourni), puis appelle le vrai
     pmagpy (ipmag.calculate_aniso_parameters) - PAS une reimplementation.
 
-    Seul n_pos=6 est cable cote Starmac (aucune detection 9/15 positions
-    n'existe - voir detect_six_positions), mais la fonction accepte le
-    parametre pour rester alignee avec l'API pmagpy elle-meme si une
-    detection 9/15 positions est ajoutee plus tard."""
+    `nrm_mean` (x,y,z, MEME convention que calcul._nrm_mean_and_diag/
+    AnisotropyComputation.nrm_mean - a passer par l'appelant, ex.
+    `result.nrm_mean`) : BUG REEL corrige ici (demande explicite
+    utilisateur "if the Ftest from PmagPy implemented correctly. All
+    tensors are not significant and some are not that bad") - CONFIRME
+    par simulation Monte-Carlo (tenseur synthetique connu + bruit
+    realiste + contamination NRM constante sur les 6 positions) : la
+    formule de Hext elle-meme (pmag.dohext/fcalc) est correcte et
+    sensible (taux de detection proche de 100% pour un vrai signal
+    anisotrope avec bruit realiste), MAIS le calcul natif 'A0'
+    (compute_anisotropy_tensor) elimine la NRM residuelle (TRM/ARM
+    PARTIELLE, cf. calcul._nrm_mean_and_diag) PAR CONSTRUCTION via la
+    difference de paire (X+-X-)/2 (le terme NRM commun aux deux moities
+    de la paire s'annule algebriquement, quelle que soit son ampleur) -
+    alors que le moindres-carres de pmagpy (design lineaire sur les 6
+    positions BRUTES, sans terme de decalage constant libre) n'a AUCUN
+    moyen equivalent de l'ignorer : une contamination NRM constante,
+    meme faible (10% du signal anisotrope suffit dans la simulation),
+    fait chuter le taux de detection observe de ~100% a ~0%, sans
+    rapport avec la force reelle de l'anisotropie - exactement le
+    symptome signale ("tous les tenseurs 'not significant', certains pas
+    si mauvais"). Corrige en soustrayant `nrm_mean` de chaque position
+    AVANT de construire K, pour que le moindres-carres pmagpy voie la
+    MEME quantite (deja immunisee contre la NRM residuelle) que le
+    tenseur natif 'A0'. None (par defaut, retro-compatible) reproduit
+    l'ancien comportement CONTAMINE - a eviter pour tout nouvel appel."""
     if n_pos != 6:
         raise NotImplementedError(
-            "only n_pos=6 is wired to Starmac's own position detection "
+            "only n_pos=6 is wired to STARpaleomag_Py's own position detection "
             "(detect_six_positions) for now")
 
     # reimport local pour eviter une dependance circulaire avec calcul.py
@@ -117,6 +140,8 @@ def compute_aarm_pmagpy(
     K: List[float] = []
     for key in _POSITION_ORDER:
         x, y, z = _position_vector(positions, key, idx_of[key], holder)
+        if nrm_mean is not None:
+            x, y, z = x - nrm_mean[0], y - nrm_mean[1], z - nrm_mean[2]
         K.extend([x, y, z])
     K_arr = np.array(K, dtype="f")
 

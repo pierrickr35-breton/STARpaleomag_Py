@@ -65,7 +65,7 @@ simple pour EX02) sans code_site explicite devant, une fois complete par
 l'utilisateur avec le code_site en tete de ligne.
 
 Sortie :
-- Un fichier .prmag (FORMAT MODERNE Starmac_Py - `_sample_header_block`,
+- Un fichier .prmag (FORMAT MODERNE STARpaleomag_Py - `_sample_header_block`,
   directement rechargeable via read_prmag_file, PAS le texte brut "Id:/L:/
   Site:" du Fortran d'origine, obsolete/non relisible par cette
   application) - mesures VIDES (aucun instrument n'a encore mesure quoi
@@ -78,7 +78,7 @@ Sortie :
   commentee). Revenu sur un choix initial de ce port (fichiers separes par
   site) a la demande explicite de l'utilisateur : "It is much more simple
   to handle a single .ged file but all samples need to share the same
-  orientation scheme as in prmag. My own software (Starmac_Py) handle the
+  orientation scheme as in prmag. My own software (STARpaleomag_Py) handle the
   pmag or AMS data" - un seul schema d'orientation (12_0_3_90) s'applique
   deja uniformement a tous les specimens quel que soit leur site, rendant
   la separation par site inutile pour l'usage reel. Ligne d'entete

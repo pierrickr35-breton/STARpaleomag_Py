@@ -9,6 +9,12 @@ from PyInstaller.utils.hooks import collect_data_files
 # were added after the previous build (2026-08-22), so this was never
 # exercised in a packaged app before.
 datas = collect_data_files('pmagpy')
+# Guide utilisateur statique (Help > User Guide, voir app._resource_path/
+# ouvrir_user_guide) - demande explicite utilisateur ("aide en ligne...
+# OK pour la 3", l'option sans cle API ni cout recurrent). Doit etre
+# EXTRAIT sous le meme nom de dossier ('help/') pour que _resource_path
+# (sys._MEIPASS + 'help' + nom de fichier) le retrouve une fois empaquete.
+datas += [('help', 'help')]
 
 a = Analysis(
     ['app.py'],
@@ -30,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Starmac_Py',
+    name='STARpaleomag_Py',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -49,11 +55,11 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Starmac_Py',
+    name='STARpaleomag_Py',
 )
 app = BUNDLE(
     coll,
-    name='Starmac_Py.app',
-    icon=None,
+    name='STARpaleomag_Py.app',
+    icon='resources/AppIcon.icns',
     bundle_identifier=None,
 )

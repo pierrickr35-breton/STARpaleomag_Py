@@ -8,13 +8,13 @@ import re
 import sys
 import tkinter as tk
 from tkinter import filedialog
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
-# Protocoles MagIC reels mais HORS PERIMETRE Starmac (rock-magnetisme, pas
+# Protocoles MagIC reels mais HORS PERIMETRE STARpaleomag_Py (rock-magnetisme, pas
 # demagnetisation/paleointensite) - demande explicite utilisateur ("Magic
 # file also contain Anisotropy of magnetic susceptibility and other
-# magnetic experiments that are not processed by Starmac"). Definie ICI
+# magnetic experiments that are not processed by STARpaleomag_Py"). Definie ICI
 # (pas dans convert_magic_to_r.py, qui l'utilisait a l'origine) pour eviter
 # un import circulaire : convert_magic_to_r.py importe aussi depuis ce
 # module (magic_results_to_redo_lines/magic_site_means, voir plus bas) -
@@ -27,7 +27,7 @@ _OUT_OF_SCOPE_PROTOCOLS = {
     # LP-BCR (coercivity of remanence/backfield) et LP-IRM (courbe
     # d'acquisition IRM) NE SONT PAS hors perimetre - demande explicite
     # utilisateur ("LP-BCR, LP-IRM are measurements that can be processed
-    # by Starmac") : leurs pas utilisent le meme code de traitement
+    # by STARpaleomag_Py") : leurs pas utilisent le meme code de traitement
     # LT-IRM deja gere (cod1='I') que le controle IRM ponctuel d'une
     # experience de paleointensite - aucun mapping supplementaire requis,
     # juste ne plus les ecarter en amont.
@@ -507,21 +507,23 @@ def format_custom_output(
 
 # ---------------------------------------------------------------------------
 # Import des résultats déjà interprétés (specimens.txt) vers un fichier
-# "redo" (voir calcul.fit_from_redo_file) - permet de rejouer dans Starmac
+# "redo" (voir calcul.fit_from_redo_file) - permet de rejouer dans STARpaleomag_Py
 # les meilleurs ajustements (lignes/plans) déjà calculés par pmagpy/demag_gui.
 # ---------------------------------------------------------------------------
 
 def _convert_step_range(row):
-    """Convertit meas_step_min/max vers la convention d'étape Starmac selon
-    meas_step_unit : 'T'/'Tesla' -> mT*10 (etape F, ex. 0.018T -> 180),
-    'K'/'Kelvin' -> degC (etape D, ex. 573K -> 300). Le K->degC est fait par
-    SOUSTRACTION de 273 (comme `ttemp_c = ttemp_raw - 273.0` déjà utilisé
-    plus haut dans ce fichier pour la même conversion sur les mesures elles-
-    mêmes) - pas par addition. `meas_step_unit` est un champ texte LIBRE du
-    data model 3 (pas de vocabulaire controle) : comparaison par PREFIXE
-    (startswith "K"/"T") plutot qu'egalite stricte - bug reel corrige, une
-    vraie contribution MagIC (magic_contribution_19491.txt) ecrit "Kelvin"
-    en toutes lettres, jamais reconnu par l'egalite stricte a "K"
+    """Convertit meas_step_min/max vers la convention d'étape STARpaleomag_Py selon
+    meas_step_unit : 'T'/'Tesla' -> mT (etape F, ex. 0.018T -> 18.0 mT -
+    valeur physique reelle directement, plus d'echelle Oersted-equivalente
+    depuis "convert all step integer to float"), 'K'/'Kelvin' -> degC
+    (etape D, ex. 573K -> 300). Le K->degC est fait par SOUSTRACTION de
+    273 (comme `ttemp_c = ttemp_raw - 273.0` déjà utilisé plus haut dans
+    ce fichier pour la même conversion sur les mesures elles-mêmes) - pas
+    par addition. `meas_step_unit` est un champ texte LIBRE du data model
+    3 (pas de vocabulaire controle) : comparaison par PREFIXE (startswith
+    "K"/"T") plutot qu'egalite stricte - bug reel corrige, une vraie
+    contribution MagIC (magic_contribution_19491.txt) ecrit "Kelvin" en
+    toutes lettres, jamais reconnu par l'egalite stricte a "K"
     (magic_results_to_redo_lines retournait silencieusement une liste vide
     sur ce fichier). Retourne (None, None) si non convertible."""
     unit = clean_str(row.get("meas_step_unit", "")).upper()
@@ -530,10 +532,10 @@ def _convert_step_range(row):
     if smin is None or smax is None:
         return None, None
     if unit.startswith("T"):
-        return int(round(smin * 10000.0)), int(round(smax * 10000.0))
+        return smin * 1000.0, smax * 1000.0
     if unit.startswith("K"):
-        return int(round(smin - 273.0)), int(round(smax - 273.0))
-    return int(round(smin)), int(round(smax))
+        return smin - 273.0, smax - 273.0
+    return smin, smax
 
 
 def _classify_fit(method_codes):
@@ -603,7 +605,7 @@ def magic_results_to_redo_lines(specimens_source, combined=False) -> list:
 # method-codes.json) qui ne sont PAS un protocole Thellier/IZZI
 # thermique classique - AF, micro-ondes, multi-specimen, ou un proxy
 # alternatif (ARM/IRM/susceptibilite) au lieu d'une vraie sequence
-# TRM/four - jamais rejouables par le natif Starmac (afficher_arai
+# TRM/four - jamais rejouables par le natif STARpaleomag_Py (afficher_arai
 # attend des paliers thermiques R/V/P) meme si la ligne porte aussi le
 # tag generique "LP-PI" - voir magic_pint_results_to_redo_lines.
 _PI_NON_TRM_CODES = {
@@ -624,11 +626,27 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
     and step2 found in specimens.txt file. This redo file can be used in
     view Paleointensity data").
 
-    Format de sortie : "specimen tmin tmax" (une ligne par specimen), le
-    format attendu par `ouvrir_openfilepint_dialog`/`openfilepint`
-    (visi_Paleoint.f) - PAS le format ligne/plan de
+    Format de sortie : "specimen tmin tmax cooling aniso_corr" (une ligne
+    par specimen), le format attendu par `ouvrir_openfilepint_dialog`/
+    `openfilepint` (visi_Paleoint.f) - PAS le format ligne/plan de
     `magic_results_to_redo_lines` (colonnes bestfit/ancr/comp n'ont pas de
-    sens pour une interpretation de paleointensite).
+    sens pour une interpretation de paleointensite). `cooling`/
+    `aniso_corr` (colonnes MagIC `int_corr_cooling_rate`/`int_corr_aniso`
+    - facteurs multiplicatifs SANS dimension deja calcules par le
+    logiciel source de la contribution, cf. le modele de donnees MagIC :
+    "Cooling Rate/Anisotropy Correction Factor for intensity") - demande
+    explicite utilisateur ("while writing the redo file for
+    paleointensity, add the int_corr_cooling_rate, and int_corr_aniso in
+    the redo file") - `0` (sentinelle "absent", jamais une vraie valeur
+    physique pour un facteur multiplicatif sur une intensite) quand la
+    colonne MagIC est vide/absente, comme le fait deja le lecteur
+    existant pour son 4e champ optionnel de taux de refroidissement.
+    `ouvrir_openfilepint_dialog` applique `cooling` inconditionnellement
+    (comme avant) mais `aniso_corr` UNIQUEMENT en repli, si STARpaleomag_Py n'a
+    PAS de tenseur .pmagani natif pour ce specimen - demande explicite
+    utilisateur, pour eviter de corriger deux fois le meme effet
+    (tenseur natif ET facteur MagIC deja applique par le logiciel
+    source).
 
     Selection des lignes : method_codes contient "LP-PI-TRM" (protocole
     Thellier/IZZI thermique explicite) OU le tag generique "LP-PI" seul
@@ -646,7 +664,7 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
     presence de "LP-PI-ALT-PTRM" (pTRM check, un concept qui n'existe que
     pour un protocole TRM/thermique - voir vocabulaire MagIC) confirme
     qu'un "LP-PI" nu designe ici bien un Thellier/IZZI thermique classique,
-    rejouable par le natif Starmac (paleointensity.py/afficher_arai) au
+    rejouable par le natif STARpaleomag_Py (paleointensity.py/afficher_arai) au
     meme titre qu'un "LP-PI-TRM" explicite. Exclut toujours les variantes
     clairement NON rejouables de cette facon (`_PI_NON_TRM_CODES`
     ci-dessous - AF/micro-ondes/multi-specimen/proxy alternatif) meme si
@@ -669,6 +687,34 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
         print("❌ Specimens table not found or empty.")
         return None
 
+    # Les facteurs de correction ne sont PAS forcement portes par la MEME
+    # ligne specimens.txt que celle qui fournit smin/smax - BUG REEL
+    # corrige (signale par l'utilisateur : "did not read the two
+    # parameters in the file and wrote 0.0"), confirme sur une vraie
+    # contribution (Miriam_Magic/magic_contribution_20536.txt, specimen
+    # 15ZA0701B) : la ligne "g"/"LP-NO:LP-PI:LP-PI-ALT-PTRM:DE-BFL-A" (le
+    # fit de direction, qui fournit smin/smax) a int_corr_cooling_rate/
+    # int_corr_aniso VIDES, alors qu'une ligne SOEUR du MEME specimen
+    # (`int_corr`='c', method_codes SANS le tag de fit "DE-BFL-A",
+    # result_quality VIDE - donc jamais selectionnee par le filtre
+    # quality=='g' ci-dessous) porte les valeurs reelles (0.893/0.836).
+    # Repere ici INDEPENDAMMENT du filtre quality/method_codes utilise
+    # pour smin/smax, sur TOUTE ligne du specimen qui porte l'une des
+    # deux valeurs - 138/138 specimens de ce fichier reel n'ont jamais
+    # plus d'une telle ligne (verifie).
+    corr_by_specimen: Dict[str, Tuple[float, float]] = {}
+    for _, row_series in df.iterrows():
+        row = row_series.to_dict()
+        cool_raw = clean_str(row.get("int_corr_cooling_rate", ""))
+        ani_raw = clean_str(row.get("int_corr_aniso", ""))
+        if not cool_raw and not ani_raw:
+            continue
+        specimen = clean_str(row.get("specimen", ""))[:12]
+        if not specimen:
+            continue
+        corr_by_specimen[specimen] = (
+            parse_float_val(cool_raw, 0.0), parse_float_val(ani_raw, 0.0))
+
     seen = set()
     lines = []
     for _, row_series in df.iterrows():
@@ -687,7 +733,8 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
         if not specimen or specimen in seen:
             continue
         seen.add(specimen)
-        lines.append(f"{specimen} {smin} {smax}")
+        cooling, aniso_corr = corr_by_specimen.get(specimen, (0.0, 0.0))
+        lines.append(f"{specimen} {smin} {smax} {cooling} {aniso_corr}")
     return lines
 
 
@@ -711,6 +758,109 @@ def import_specimens_results_to_redo(specimens_source, output_path, combined=Fal
     return output_path
 
 
+# Protocole d'anisotropie (method_codes) -> code2 .pmagani - demande
+# explicite utilisateur ("lors de l'importation des fichiers Magic,
+# archiver dans le fichier pmagani les donnees de tenseurs d'anisotropie
+# avec le code A0 si c'est un tenseur de TRM, N0 pour l'AMS, AA pour
+# l'ARM"). 'AA' est DELIBEREMENT distinct du 'F0' utilise par le calcul
+# natif STARpaleomag_Py/l'export AMS_Py pour un tenseur d'ARM - choix confirme
+# par l'utilisateur (question posee : un tenseur ARM deja calcule par une
+# contribution MagIC externe, potentiellement par un tout autre logiciel/
+# laboratoire, reste distingable d'un F0 recalcule nativement a partir
+# des 6 mesures ; Inverse_ANI_correction... est etendu avec ce meme code
+# 'AA' comme option supplementaire - voir calcul._ANI_CODE2).
+_ANISO_METHOD_TO_CODE2 = {
+    "LP-AN-TRM": "A0",
+    "LP-AN-ARM": "AA",
+    "LP-AN-MS": "N0",
+}
+
+
+def magic_anisotropy_rows(specimens_source, combined=False) -> List[dict]:
+    """Lit specimens.txt (ou la table "specimens" d'une contribution
+    combinee si `combined=True`) et retourne un tenseur d'anisotropie
+    DEJA CALCULE par cette contribution (colonne `aniso_s`, convention
+    MagIC trace-normalisee "s1:s2:s3:s4:s5:s6" = k11:k22:k33:k12:k23:k13,
+    memes conventions que celles utilisees par AMS_Py pour l'export
+    inverse - .pmagani -> MagIC) pour chaque ligne qui en porte une -
+    demande explicite utilisateur ("lors de l'importation des fichiers
+    Magic, archiver dans le fichier pmagani les donnees de tenseurs
+    d'anisotropie").
+
+    Beaucoup de lignes specimens.txt ne portent PAS d'`aniso_s` du tout
+    (resultats de direction/paleointensite plutot que d'anisotropie) -
+    ecartees silencieusement, ce n'est pas une anomalie. `code2` est
+    assigne depuis `method_codes` (voir _ANISO_METHOD_TO_CODE2) plutot
+    que depuis `aniso_type` (present dans certaines contributions mais
+    pas garanti par le modele de donnees) - une ligne dont le protocole
+    d'anisotropie n'est pas reconnu (aucun des trois codes method_codes
+    ci-dessus) est ECARTEE plutot que devinee.
+
+    Chaque element retourne est un dict avec les cles: specimen, code2,
+    k11, k22, k33, k12, k23, k13 (floats, trace-normalises - PAS en
+    unites physiques absolues, comme le sont deja les 15 variantes du
+    calcul natif STARpaleomag_Py : la correction d'inversion ne se sert que des
+    RATIOS entre composantes, l'echelle absolue n'entre pas en jeu),
+    n_positions, sigma, ftest, ftest12, ftest23 (float ou None si la
+    colonne MagIC correspondante est absente/vide) et quality ('g'/'b'
+    ou None). Retourne [] si specimens.txt est introuvable/vide ou ne
+    contient aucune ligne d'anisotropie exploitable."""
+    if combined:
+        tables = split_combined_magic_file(specimens_source)
+        df = tables.get("specimens")
+    else:
+        df = read_magic_file(specimens_source)
+    if df is None or df.empty:
+        return []
+
+    rows: List[dict] = []
+    for _, row_series in df.iterrows():
+        row = row_series.to_dict()
+        aniso_s = clean_str(row.get("aniso_s", ""))
+        if not aniso_s:
+            continue
+        parts = aniso_s.split(":")
+        if len(parts) != 6:
+            continue
+        try:
+            k11, k22, k33, k12, k23, k13 = (float(p) for p in parts)
+        except ValueError:
+            continue
+
+        codes = {c.strip() for c in clean_str(row.get("method_codes", "")).split(":") if c.strip()}
+        code2 = next((v for k, v in _ANISO_METHOD_TO_CODE2.items() if k in codes), None)
+        if code2 is None:
+            continue
+
+        specimen = clean_str(row.get("specimen", ""))[:12]
+        if not specimen:
+            continue
+
+        n_positions = None
+        raw_n = clean_str(row.get("aniso_n_pos", ""))
+        if raw_n:
+            try:
+                n_positions = int(float(raw_n))
+            except ValueError:
+                n_positions = None
+
+        quality = clean_str(row.get("aniso_ftest_quality", "")).lower() or None
+        if quality not in ("g", "b"):
+            quality = None
+
+        rows.append({
+            "specimen": specimen, "code2": code2,
+            "k11": k11, "k22": k22, "k33": k33, "k12": k12, "k23": k23, "k13": k13,
+            "n_positions": n_positions,
+            "sigma": parse_float_val(row.get("aniso_s_sigma", ""), None) if row.get("aniso_s_sigma") else None,
+            "ftest": parse_float_val(row.get("aniso_ftest", ""), None) if row.get("aniso_ftest") else None,
+            "ftest12": parse_float_val(row.get("aniso_ftest12", ""), None) if row.get("aniso_ftest12") else None,
+            "ftest23": parse_float_val(row.get("aniso_ftest23", ""), None) if row.get("aniso_ftest23") else None,
+            "quality": quality,
+        })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Moyennes de site DEJA calculees (sites.txt, colonnes dir_*) -> "mean:"
 # dans .pmagres - demande explicite utilisateur ("in Magic file site.txt,
@@ -721,7 +871,7 @@ def import_specimens_results_to_redo(specimens_source, output_path, combined=Fal
 # Convention MagIC dir_tilt_correction (data_model3, "Percentage tilt
 # correction applied... geographic (0%) [to] stratigraphic (100%)",
 # heritee de pmag_sites.site_tilt_correction en DM2.5 - -1 y designait le
-# repere specimen/echantillon, non corrige) -> code d'orientation Starmac
+# repere specimen/echantillon, non corrige) -> code d'orientation STARpaleomag_Py
 # (par3_mean, meme convention que self.orientation : 1=echantillon,
 # 2=in-situ, 3=apres pendage).
 #
@@ -740,7 +890,7 @@ _TILT_CORRECTION_TO_ORIENTATION = {"0": 2.0, "100": 3.0}
 
 
 def _resolve_tilt_orientation(tilt: str) -> Optional[float]:
-    """Resout dir_tilt_correction en code d'orientation Starmac par
+    """Resout dir_tilt_correction en code d'orientation STARpaleomag_Py par
     comparaison NUMERIQUE contre _TILT_CORRECTION_TO_ORIENTATION, pas par
     correspondance de chaine exacte - le format varie d'une contribution a
     l'autre ("0"/"100" dans certaines, "0.0"/"100.0" dans d'autres, ex.

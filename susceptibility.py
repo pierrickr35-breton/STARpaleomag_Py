@@ -14,7 +14,13 @@ from matplotlib import colormaps
 
 from selection import SelectedSample
 
-_UNITS = {"A": "mT", "F": "mT", "D": "°C", "S": "°C", "C": "hr"}
+# R/V/P (paleointensite Thellier/IZZI) INCLUS en degC - demande explicite
+# utilisateur ("when the cod1 is R, V, P, the unit is also °C") : cette
+# fonction trace TOUTE la selection sans filtrage AF/thermique
+# (contrairement a xygraph.py, ou un specimen R/V/P est deja ecarte en
+# amont par experiment_kind - ici rien n'exclut ces mesures, donc sans
+# elles le premier code rencontre pouvait rester sans unite affichee).
+_UNITS = {"A": "mT", "F": "mT", "D": "°C", "S": "°C", "R": "°C", "V": "°C", "P": "°C", "C": "hr"}
 _COLOR_CYCLE = colormaps["tab10"].colors
 
 

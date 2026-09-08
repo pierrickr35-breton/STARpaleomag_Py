@@ -1,10 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-class StarmacApp:
+class STARpaleomagApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Starmac_AWE_4.0 - Paléomagnétisme")
+        self.root.title("STARpaleomag_Py - Paléomagnétisme")
         self.root.geometry("1100x700")
 
         # 1. Barre de menus supérieure
@@ -136,5 +136,5 @@ class StarmacApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = StarmacApp(root)
+    app = STARpaleomagApp(root)
     root.mainloop()

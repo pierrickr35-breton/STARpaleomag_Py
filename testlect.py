@@ -17,8 +17,22 @@ import csv
 
 @dataclass
 class Measurement:
-    """Equivalent d'une ligne de mesure (etape, cod1, cod2, x, y, z, q, ins, s)"""
-    etape: int
+    """Equivalent d'une ligne de mesure (etape, cod1, cod2, x, y, z, q, ins, s).
+
+    `etape` est maintenant un FLOAT representant directement la valeur
+    physique du pas (mT pour A/F, degC pour D/S/T/K...) - demande
+    explicite utilisateur ("on importing legacy files from Rennes, we
+    can divide by 10 from oersted to mT and in the software convert all
+    step integer to float"), qui REVIENT sur une decision anterieure
+    ("modify the whole starmac" avait ete rejete au profit du seul champ
+    `step_value` cible - voir git history). Avant ce changement, `etape`
+    restait un ENTIER portant, pour un pas AF (A/F), l'equivalent
+    Oersted historique (mT*10, 1 Oe = 0.1 mT) plutot que le mT reel -
+    .prmag lui-meme a toujours stocke le vrai mT dans sa colonne "step"
+    (voir convert_ren_to_r.py/convert_magic_to_r.py), seule la
+    representation EN MEMOIRE gardait cette echelle heritee. `etape`
+    remplace desormais aussi `step_value` (supprime, redondant)."""
+    etape: float
     cod1: str
     cod2: str
     x: float
@@ -37,18 +51,6 @@ class Measurement:
     # demande explicite utilisateur ("extract the field value from
     # treat_dc_field").
     treat_dc_field: Optional[float] = None
-    # valeur PRECISE du pas (mT/degC), telle qu'ecrite dans la colonne
-    # `step` du .prmag - `etape` (entier) reste la representation
-    # historique compatible avec TOUT le reste de l'application (formats
-    # ":4d", filtres step_min/step_max, etc. - des dizaines de sites dans
-    # calcul.py/selection.py/app.py) ; `step_value` est un champ optionnel
-    # AJOUTE, pas un remplacement, pour les rares endroits (paleointensite)
-    # ou la precision reelle du pas importe plus que la compatibilite
-    # d'affichage - demande explicite utilisateur ("modify the whole
-    # starmac" rejete au profit d'un champ cible, "I think that it is in
-    # the paleointensity routine that the value of the step is often
-    # really needed").
-    step_value: Optional[float] = None
     # 'g'/'b' (good/bad) - colonne "quality" du .prmag, jusque-la jamais
     # lue (seule "error" -> `q` l'etait) - demande explicite utilisateur
     # ("je voudrais utiliser le critere de qualite b/g dans les donnees
@@ -264,13 +266,26 @@ def parse_L_line(p: Pmag, line: str) -> None:
             p.roche = trailing
 
 
+# cod1 pour lesquels un fichier .ren HERITE encode le pas AF en Oersted
+# (entier brut, ex. "1300F+" = 1300 Oe) - convertis en mT reel (/10, 1 Oe
+# = 0.1 mT) DES LA LECTURE par parse_measure_line, pour que Measurement.
+# etape soit uniformement la valeur physique reelle partout dans
+# l'application, plus seulement dans le fichier .prmag sur disque -
+# demande explicite utilisateur ("on importing legacy files from Rennes,
+# we can divide by 10 from oersted to mT... convert all step integer to
+# float").
+_LEGACY_AF_CODES = {"A", "F"}
+
+
 def parse_measure_line(line: str) -> Optional[Measurement]:
     """
     Parse une ligne de mesure, ex :
     '    0N0  6.918E-07  2.046E-08 -1.014E-06   0 C1  213.0'
     ou (format long avec xech,yech,zech,heuremes) :
     '  1300F+  9.406E-08 -1.638E-08 -8.055E-08   0 C1    0.0  1.2E-05 3.4E-05 5.6E-05  2019/01/13 12:00:00'
-    Equivalent aux formats Fortran 201 et 2011.
+    Equivalent aux formats Fortran 201 et 2011. Le pas AF (A/F) est
+    stocke en Oersted dans ce format herite - converti en mT reel (/10)
+    ici, voir _LEGACY_AF_CODES.
     """
     parts = line.split()
     if len(parts) < 7:
@@ -281,9 +296,9 @@ def parse_measure_line(line: str) -> Optional[Measurement]:
     if not m:
         return None
 
-    etape = int(m.group(1))
     cod1 = m.group(2)
     cod2 = m.group(3)
+    etape = int(m.group(1)) / 10.0 if cod1 in _LEGACY_AF_CODES else float(m.group(1))
 
     try:
         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
@@ -312,7 +327,37 @@ def parse_measure_line(line: str) -> Optional[Measurement]:
 # Lecture du fichier complet
 # ---------------------------------------------------------------------------
 
-def read_ren_file(filepath: str, encoding: str = "latin-1") -> List[Pmag]:
+def _read_text_auto(filepath: str, encoding: Optional[str]) -> str:
+    """Lit le contenu texte d'un fichier .ren en devinant l'encodage si
+    non precise explicitement (`encoding=None`) : tente UTF-8 d'abord
+    (convention des .ren modernes, ecrits par convert_legacy_ren.py/
+    convert_ren_to_r.py, et de plus en plus frequente aussi pour un
+    fichier edite aujourd'hui), puis latin-1 en repli (convention des
+    vieux fichiers Rennes pre-Unicode) - demande explicite utilisateur
+    ("when importing the ren files the ± is not well decoded") : un
+    caractere UTF-8 valide (ex. ± = octets 0xC2 0xB1) relu a tort en
+    latin-1 (l'ancien defaut INCONDITIONNEL de read_ren_file) se
+    retrouvait mal-decode en deux caracteres "Â±", et ENCORE une fois si
+    ce texte deja corrompu repassait par la meme lecture erronee plus
+    loin dans le pipeline (chaine complete "Import Starmac legacy
+    files..." : convert_legacy_ren.py ecrit TOUJOURS son .ren
+    intermediaire en UTF-8, jamais relu comme tel jusqu'ici). Un octet
+    latin-1 isole hors ASCII (ex. 0xE9 pour 'é') n'est quasiment jamais
+    une sequence UTF-8 valide a lui seul, ce qui rend cette detection
+    fiable en pratique - un `encoding` explicite (ancien comportement)
+    reste bien sur prioritaire et jamais devine."""
+    if encoding is not None:
+        with open(filepath, "r", encoding=encoding) as f:
+            return f.read()
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        with open(filepath, "r", encoding="latin-1") as f:
+            return f.read()
+
+
+def read_ren_file(filepath: str, encoding: Optional[str] = None) -> List[Pmag]:
     """
     Lit un fichier .ren.txt et retourne la liste des échantillons (Pmag),
     équivalent au tableau pmag(1:nb_ech) rempli par importtexte().
@@ -325,68 +370,66 @@ def read_ren_file(filepath: str, encoding: str = "latin-1") -> List[Pmag]:
     echantillon donne (vieux fichiers, edition manuelle) sans faire perdre
     la premiere mesure qui suivrait immediatement 'Id:' - demande explicite
     de l'utilisateur, sur le modele deja tolerant de `decode_roche` pour la
-    ligne 3 (n'importe quel sous-ensemble/ordre des cles est accepte)."""
+    ligne 3 (n'importe quel sous-ensemble/ordre des cles est accepte).
+
+    `encoding` : None (par defaut) devine UTF-8/latin-1 - voir
+    _read_text_auto ; passer une valeur explicite pour forcer un
+    encodage precis (comportement inchange pour les appelants qui le
+    faisaient deja)."""
     pmag_list: List[Pmag] = []
     current: Optional[Pmag] = None
 
     # attendu : "L" = ligne coordonnees, "roche" = ligne site/roche, "mesures"
     expect = "L"
 
-    with open(filepath, "r", encoding=encoding) as f:
-        for raw_line in f:
-            line = raw_line.rstrip("\n")
+    content = _read_text_auto(filepath, encoding)
+    for raw_line in content.splitlines():
+        line = raw_line.rstrip("\n")
 
-            if line.strip() == "":
-                continue
+        if line.strip() == "":
+            continue
 
-            if line.lstrip().startswith("Id:"):
-                if current is not None:
-                    pmag_list.append(current)
-                current = parse_id_line(line)
-                expect = "L"
-                continue
+        if line.lstrip().startswith("Id:"):
+            if current is not None:
+                pmag_list.append(current)
+            current = parse_id_line(line)
+            expect = "L"
+            continue
 
-            if current is None:
-                continue
+        if current is None:
+            continue
 
-            if expect in ("L", "roche") and parse_measure_line(line) is not None:
-                # ligne 'L:' et/ou roche absente(s) pour cet echantillon :
-                # ce qui suit 'Id:' est deja une mesure - ne pas la perdre.
-                expect = "mesures"
+        if expect in ("L", "roche") and parse_measure_line(line) is not None:
+            # ligne 'L:' et/ou roche absente(s) pour cet echantillon :
+            # ce qui suit 'Id:' est deja une mesure - ne pas la perdre.
+            expect = "mesures"
 
-            if expect == "L":
-                parse_L_line(current, line)
-                if current.roche:
-                    # roche deja decodee depuis la fin de cette meme ligne
-                    # (ancien format Corbieres) - pas de ligne separee a
-                    # attendre en plus.
-                    decode_roche(current)
-                    expect = "mesures"
-                else:
-                    expect = "roche"
-                continue
-
-            if expect == "roche":
-                current.roche = line.strip()
+        if expect == "L":
+            parse_L_line(current, line)
+            if current.roche:
+                # roche deja decodee depuis la fin de cette meme ligne
+                # (ancien format Corbieres) - pas de ligne separee a
+                # attendre en plus.
                 decode_roche(current)
                 expect = "mesures"
-                continue
+            else:
+                expect = "roche"
+            continue
 
-            meas = parse_measure_line(line)
-            if meas is not None:
-                current.mesures.append(meas)
+        if expect == "roche":
+            current.roche = line.strip()
+            decode_roche(current)
+            expect = "mesures"
+            continue
 
-        if current is not None:
-            pmag_list.append(current)
+        meas = parse_measure_line(line)
+        if meas is not None:
+            current.mesures.append(meas)
+
+    if current is not None:
+        pmag_list.append(current)
 
     return pmag_list
-
-
-# cod1 pour lesquels `step` (nouveau format .prmag) est le pas Oersted/10
-# (voir convert_ren_to_r.py) - a multiplier par 10 pour retrouver `etape`
-# (entier, unite Fortran d'origine). Pour les autres cod1, `step` EST
-# `etape` (deja en degC/mT reel, jamais divise a l'ecriture).
-_PRMAG_OERSTED_CODES = {"A", "F"}
 
 
 def _prmag_nd(txt: Optional[str], default: float = 0.0) -> float:
@@ -508,17 +551,19 @@ def read_prmag_file(filepath: str, encoding: str = "utf-8") -> List[Pmag]:
 
             cod1 = col("cod1") or "?"
             cod2 = col("cod2") or "0"
-            step_val = _prmag_nd(col("step"))
-            etape = round(step_val * 10.0) if cod1 in _PRMAG_OERSTED_CODES else round(step_val)
+            # `step` du .prmag est DEJA la valeur physique reelle (mT/degC -
+            # voir convert_ren_to_r.py/convert_magic_to_r.py, qui l'ecrivent
+            # ainsi pour TOUS les cod1, AF inclus) : plus de mise a l'echelle
+            # Oersted (*10) a la lecture, `etape` = cette valeur directement.
+            etape = _prmag_nd(col("step"))
 
             meas = Measurement(
-                etape=int(etape), cod1=cod1, cod2=cod2,
+                etape=etape, cod1=cod1, cod2=cod2,
                 x=_prmag_nd(col("x")), y=_prmag_nd(col("y")), z=_prmag_nd(col("z")),
                 q=int(round(_prmag_nd(col("error")))),
                 ins=_prmag_text(col("instrument")),
                 s=_prmag_nd(col("s")),
                 treat_dc_field=_prmag_nd_opt(col("treat_dc_lowfield")),
-                step_value=step_val,
                 quality=_prmag_text(col("quality")) or "g",
             )
             p.mesures.append(meas)

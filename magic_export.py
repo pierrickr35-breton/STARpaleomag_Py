@@ -1,11 +1,14 @@
 """
 Port de `export2magic` ("export Rennes to Magic", fichiers_magic.f) - mode
-"classique" uniquement (ichoixexport==1) : sites.txt, samples.txt,
-specimens.txt, measurements.txt, locations.txt. Paleointensite
-(ichoixexport==2) et magnetostratigraphie (ichoixexport==3) HORS PERIMETRE
-pour l'instant (a ajouter plus tard si besoin). L'export AMS (ichoixexport
-4/5) est du code mort dans le Fortran (un `return` le rend inatteignable)
-et n'est pas porte.
+"classique" (ichoixexport==1) : sites.txt, samples.txt, specimens.txt,
+measurements.txt, locations.txt - PLUS les resultats de paleointensite deja
+archives dans .pmagint (ichoixexport==2 cote Fortran, `export_int_2_magic` -
+fusionnes ici dans le MEME specimens.txt plutot qu'un mode/fichier separe,
+voir export_to_magic - demande explicite utilisateur "in export to Magic,
+it is not asking for Paleointensity"). Magnetostratigraphie
+(ichoixexport==3) reste HORS PERIMETRE (a ajouter plus tard si besoin).
+L'export AMS (ichoixexport 4/5) est du code mort dans le Fortran (un
+`return` le rend inatteignable) et n'est pas porte.
 
 Ecarts deliberes par rapport au Fortran (tous discutes et valides) :
 - Regroupement site/echantillon par TRI EXPLICITE sur magic_site/
@@ -39,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from selection import SelectedSample, Measurement, polere, corfor, corpen
-from calcul import FitResult
+from calcul import FitResult, AniTensor
 
 # ---------------------------------------------------------------------------
 # Age : equivalent de `checkage` (fichiers_magic.f:2225), etendu pour
@@ -336,7 +339,128 @@ _SPECIMENS_HEADER = [
     "dir_tilt_correction", "result_quality", "dir_nrm_origin",
     "meas_step_min", "meas_step_max", "meas_step_unit", "dir_comp",
     "dir_dec", "dir_inc", "dir_n_measurements", "dir_mad_anc", "dir_mad_free",
+    "int_abs", "int_abs_sigma", "int_corr", "int_treat_dc_field",
+    "int_n_measurements", "int_f", "int_g", "int_q", "int_mad_free",
+    "int_dang", "int_b", "int_b_sigma", "int_b_beta", "int_k", "int_k_sse",
+    "int_fvds", "int_frac", "int_gmax", "int_n_ptrm", "int_gamma",
+    "int_corr_aniso", "int_corr_cooling_rate",
+    "aniso_type", "aniso_s", "aniso_tilt_correction",
+    "aniso_s_n_measurements", "aniso_s_sigma",
+    "aniso_ftest", "aniso_ftest12", "aniso_ftest23", "aniso_ftest_quality",
+    "description",
 ]
+
+# code2 ('A0' seul demande explicitement - "prendre les A0") -> (aniso_type,
+# method_codes) MagIC - MEME convention que AMS_Py._ANI_MAGIC_INFO (A0=TRM).
+_ANISO_MAGIC_INFO = {"A0": ("ATRM", "LP-AN-TRM")}
+
+
+# aniso_s/aniso_tilt_correction/aniso_ftest* pour specimens.txt, depuis un
+# AniTensor DEJA calcule (.pmagani, code2='A0') - demande explicite
+# utilisateur ("il manque aussi les données d'anisotropie au niveau du
+# fichier specimens (prendre les A0)"), MEME manque que celui deja corrige
+# cote AMS_Py.exporter_magic_dialog (voir son docstring pour le detail des
+# colonnes verifiees contre le data model reel) - ici pour le tenseur natif
+# 'A0' de STARpaleomag_Py (calcul.AniTensor), pas le format AMS_Py.
+# aniso_tilt_correction="-1" (coordonnees specimen) : aniso_s est exporte
+# BRUT, sans reorientation - meme raisonnement/meme valeur que cote AMS_Py
+# (deja l'hypothese par defaut de pmagpy.ipmag quand la colonne est
+# absente).
+def anisotropy_specimen_magic_fields(tensor: AniTensor) -> Dict[str, str]:
+    trace = tensor.k11 + tensor.k22 + tensor.k33
+    if not trace:
+        return {}
+    aniso_type, _method_codes = _ANISO_MAGIC_INFO.get(tensor.code2, ("AMS", "LP-X"))
+    s1, s2, s3 = tensor.k11 / trace, tensor.k22 / trace, tensor.k33 / trace
+    s4, s5, s6 = tensor.k12 / trace, tensor.k23 / trace, tensor.k13 / trace
+    out = {
+        "aniso_type": aniso_type,
+        "aniso_s": f"{s1:.6f}:{s2:.6f}:{s3:.6f}:{s4:.6f}:{s5:.6f}:{s6:.6f}",
+        "aniso_tilt_correction": "-1",
+    }
+    if tensor.n_positions is not None:
+        out["aniso_s_n_measurements"] = str(tensor.n_positions)
+    if tensor.sigma is not None:
+        out["aniso_s_sigma"] = f"{tensor.sigma:.6g}"
+    if tensor.ftest is not None:
+        out["aniso_ftest"] = f"{tensor.ftest:.6g}"
+    if tensor.ftest12 is not None:
+        out["aniso_ftest12"] = f"{tensor.ftest12:.6g}"
+    if tensor.ftest23 is not None:
+        out["aniso_ftest23"] = f"{tensor.ftest23:.6g}"
+    if tensor.quality in ("g", "b"):
+        out["aniso_ftest_quality"] = tensor.quality
+    return out
+
+# Colonnes MagIC v3 (table "specimens", groupe paleointensite) construites
+# depuis UNE ligne .pmagint (voir paleointensity.read_pmagint) - demande
+# explicite utilisateur ("in export to Magic, it is not asking for
+# Paleointensity") : export_to_magic ignorait entierement .pmagint jusqu'ici
+# (voir le docstring de module - "Paleointensite... HORS PERIMETRE pour
+# l'instant (a ajouter plus tard si besoin)"). Chaque colonne VERIFIEE
+# contre le data model reel (data_model.json, table "specimens") plutot que
+# devinee - notamment : int_abs/int_abs_sigma/int_treat_dc_field sont en
+# TESLA (T) alors que .pmagint est en microteslas (Hlab/H/Hcorani/HcorCool)
+# - conversion *1e-6 ici ; int_mad_free VERIFIE venir de pars["int_mad_free"]
+# (voir paleointensity_magic.MagicPintResult.mad) - PAS une supposition ;
+# int_gmax VERIFIE etre le nom reel de la colonne "gap_max" (grep direct du
+# source pmagpy.pmag, gmax_key = 'int_gmax').
+#
+# int_abs (le resultat final) : precedence HcorCool > Hcorani > H, MEME
+# ordre que `h_final` cote app.ouvrir_openfilepint_dialog (cooling puis
+# anisotropie puis brut) - PAS Hcorani seul, qui ignorerait une correction
+# de refroidissement deja appliquee.
+#
+# `ccr` (correlation Arai) n'est PAS mappe vers int_r2_corr : la colonne
+# reelle est un COEFFICIENT DE DETERMINATION (r au carre, "r2"), alors que
+# rien ne confirme si `ccr` cote STARpaleomag_Py est deja au carre ou non -
+# risque de mismatch d'unite/definition pour un champ secondaire, laisse de
+# cote plutot que devine.
+def paleointensity_magic_fields(row: Dict[str, str]) -> Dict[str, str]:
+    def f(key: str) -> Optional[float]:
+        v = row.get(key, "n.d")
+        if v in ("n.d", ""):
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    h_final = f("HcorCool")
+    if h_final is None:
+        h_final = f("Hcorani")
+    if h_final is None:
+        h_final = f("H")
+    hlab = f("Hlab")
+    b, sb = f("b"), f("sb")
+    fcor, fcor_cool = f("fcor"), f("fcorCool")
+
+    out: Dict[str, str] = {}
+    if h_final is not None:
+        out["int_abs"] = _num_sci(h_final * 1.0e-6)
+    if hlab is not None and b is not None and sb is not None:
+        out["int_abs_sigma"] = _num_sci(abs(sb * hlab) * 1.0e-6)
+    if hlab is not None:
+        out["int_treat_dc_field"] = _num_sci(hlab * 1.0e-6)
+    out["int_corr"] = "c" if (fcor is not None or fcor_cool is not None) else "u"
+    if fcor is not None:
+        out["int_corr_aniso"] = _num(fcor, 3)
+    if fcor_cool is not None:
+        out["int_corr_cooling_rate"] = _num(fcor_cool, 3)
+
+    simple_map = [
+        ("N", "int_n_measurements", 0), ("f", "int_f", 3), ("g", "int_g", 3),
+        ("q", "int_q", 1), ("mad", "int_mad_free", 1), ("dang", "int_dang", 1),
+        ("b", "int_b", 4), ("sb", "int_b_sigma", 4), ("sb_over_b", "int_b_beta", 4),
+        ("k", "int_k", 4), ("k_sse", "int_k_sse", 5),
+        ("fvds", "int_fvds", 3), ("frac", "int_frac", 3), ("gap_max", "int_gmax", 3),
+        ("n_ptrm", "int_n_ptrm", 0), ("gamma", "int_gamma", 1),
+    ]
+    for src_key, dst_key, decimals in simple_map:
+        v = f(src_key)
+        if v is not None:
+            out[dst_key] = str(int(v)) if decimals == 0 else _num(v, decimals)
+    return out
 
 _METHOD_CODE_BASE = {
     "A": "LT-AF-I", "I": "LT-IRM", "F": "LT-AF-Z", "N": "LT-NO",
@@ -438,7 +562,24 @@ def _dir_rows_for_specimen(ech: SelectedSample, results: List[FitResult]) -> Lis
     return rows
 
 
-def build_specimens_rows(samples: List[SelectedSample], results: List[FitResult]) -> List[List[str]]:
+def build_specimens_rows(
+    samples: List[SelectedSample], results: List[FitResult],
+    pmagint_rows: Optional[Dict[str, Dict[str, str]]] = None,
+    aniso_tensors: Optional[Dict[str, AniTensor]] = None,
+) -> List[List[str]]:
+    """`pmagint_rows` (specimen -> ligne .pmagint brute, voir
+    paleointensity.read_pmagint) et `aniso_tensors` (specimen -> AniTensor
+    'A0' deja calcule, voir calcul.read_ani_tensor) : quand presents pour
+    un specimen, leurs champs (paleointensity_magic_fields/
+    anisotropy_specimen_magic_fields) sont fusionnes sur la PREMIERE ligne
+    de ce specimen SEULEMENT (bare row si aucun resultat directionnel,
+    sinon la 1ere ligne directionnelle - coordonnees echantillon) - PAS
+    repete sur les lignes IS/tectonique du meme specimen (ni le resultat
+    de paleointensite ni le tenseur d'anisotropie ne dependent de l'etat
+    de correction d'orientation directionnelle, le dupliquer serait juste
+    du bruit) - demande explicite utilisateur ("in export to Magic, it is
+    not asking for Paleointensity" puis "il manque aussi les données
+    d'anisotropie au niveau du fichier specimens (prendre les A0)")."""
     rows = []
     for ech in samples:
         azimuth = ech.caz - 90.0
@@ -459,16 +600,39 @@ def build_specimens_rows(samples: List[SelectedSample], results: List[FitResult]
             "dip": _num(-ech.cin, 1), "volume": volume, "weight": weight,
         }
 
+        extra_fields = {}
+        extra_codes = []
+        pint_row = (pmagint_rows or {}).get(ech.id)
+        if pint_row is not None:
+            extra_fields.update(paleointensity_magic_fields(pint_row))
+            extra_codes.append("LP-PI-TRM")
+        tensor = (aniso_tensors or {}).get(ech.id)
+        if tensor is not None:
+            aniso_fields = anisotropy_specimen_magic_fields(tensor)
+            if aniso_fields:
+                extra_fields.update(aniso_fields)
+                _aniso_type, aniso_method = _ANISO_MAGIC_INFO.get(tensor.code2, ("AMS", "LP-X"))
+                extra_codes.append(aniso_method)
+
         dir_rows = _dir_rows_for_specimen(ech, results)
         if not dir_rows:
-            row = dict(base, method_codes=base_method_codes)
+            method_codes = base_method_codes
+            for code in extra_codes:
+                if code not in method_codes.split(":"):
+                    method_codes += f":{code}"
+            row = dict(base, method_codes=method_codes, **extra_fields)
             rows.append([row.get(col, "") for col in _SPECIMENS_HEADER])
             continue
 
-        for dr in dir_rows:
+        for i, dr in enumerate(dir_rows):
             extra = dr.pop("_method_codes_extra", "")
             method_codes = base_method_codes + (f":{extra}" if extra else "")
-            row = dict(base, method_codes=method_codes, **dr)
+            row_fields = extra_fields if i == 0 else {}
+            if row_fields:
+                for code in extra_codes:
+                    if code not in method_codes.split(":"):
+                        method_codes += f":{code}"
+            row = dict(base, method_codes=method_codes, **dr, **row_fields)
             rows.append([row.get(col, "") for col in _SPECIMENS_HEADER])
     return rows
 
@@ -587,7 +751,11 @@ def _measurement_treatment(
     etape = m.etape
 
     if m.cod1 == "A":
-        af_field = etape * 0.0001
+        # `etape` = mT REEL directement (plus l'equivalent Oersted mT*10
+        # d'avant - demande explicite utilisateur "convert all step
+        # integer to float") : *0.001 (mT -> Tesla) plutot que l'ancien
+        # *0.0001 qui compensait cette echelle *10 disparue.
+        af_field = etape * 0.001
         dc_field = ifield * 1.0e-6
         codes = "LT-AF-I"
     elif m.cod1 == "I":
@@ -623,7 +791,9 @@ def _measurement_treatment(
         #    (LT-AF-Z-XZY) - la tres large majorite des pas AF au C1 (cod2
         #    '+'/'-', ~4750 sur ~4780) portent donc CETTE information,
         #    X/Y/Z (un seul axe) restant l'exception rare.
-        af_field = etape * 0.0001
+        # etape = mT reel directement, voir commentaire du cas cod1=='A'
+        # ci-dessus (*0.001 mT->Tesla, plus l'ancien *0.0001 Oersted-scale).
+        af_field = etape * 0.001
         ins = (m.ins or "").strip().upper()
         if etape == 0:
             codes = "LT-NO"
@@ -891,8 +1061,23 @@ def export_to_magic(
     continent_ocean: str = "", country: str = "", region: str = "",
     anisotropy_kind_by_specimen: Optional[Dict[str, str]] = None,
     anisotropy_skip: Optional[set] = None,
+    pmagint_rows: Optional[Dict[str, Dict[str, str]]] = None,
+    aniso_tensors: Optional[Dict[str, AniTensor]] = None,
 ) -> MagicExportResult:
-    """Equivalent (mode classique, ichoixexport==1) de `export2magic`.
+    """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
+    les resultats de paleointensite deja archives dans .pmagint
+    (`pmagint_rows`, voir build_specimens_rows/paleointensity_magic_fields)
+    - le Fortran d'origine traitait ca dans un mode SEPARE (ichoixexport==2,
+    export_int_2_magic), hors perimetre ici jusqu'a cette demande explicite
+    utilisateur ("in export to Magic, it is not asking for Paleointensity") ;
+    fusionne desormais dans le MEME specimens.txt plutot qu'un fichier a
+    part, coherent avec la convention MagIC v3 (une ligne specimen peut
+    porter a la fois dir_*/int_*/aniso_* quand ils viennent de la meme
+    sequence Thellier/IZZI). `aniso_tensors` (specimen -> AniTensor 'A0'
+    deja calcule, voir calcul.read_ani_tensor) : meme principe, colonnes
+    aniso_s/aniso_ftest* - demande explicite utilisateur ("il manque aussi
+    les données d'anisotropie au niveau du fichier specimens (prendre les
+    A0)").
     `samples` est trie par (magic_site, magic_sample, id) avant traitement
     - voir l'ecart documente en tete de module."""
     ordered = sorted(
@@ -905,7 +1090,8 @@ def export_to_magic(
     sites_rows = build_sites_rows(ordered, results)
     locations_rows = build_locations_rows(ordered, continent_ocean, country, region)
     samples_rows = build_samples_rows(ordered)
-    specimens_rows = build_specimens_rows(ordered, results)
+    specimens_rows = build_specimens_rows(
+        ordered, results, pmagint_rows=pmagint_rows, aniso_tensors=aniso_tensors)
     measurements_rows = build_measurements_rows(
         ordered, lab_analysts, anisotropy_kind_by_specimen, anisotropy_skip)
 
