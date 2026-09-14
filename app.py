@@ -27,6 +27,7 @@ from selection import (
     list_measurements_vrm,
     list_measurements_depth,
     sample_info,
+    _build_selected_sample,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
 from auto_interpretation import propose_components, propose_components_for_site, format_suggestions
@@ -42,12 +43,19 @@ from calcul import (
     fisher_from_results,
     build_site_mean_result,
     site_lat_lon_from_donnees,
+    site_of_result,
+    import_published_means,
     _LINE_LIKE_CAT1,
     list_results,
     init_results,
     results_path_for,
     ani_path_for,
     pmagint_path_for,
+    _iter_result_lines,
+    find_duplicate_measurements,
+    find_duplicate_results,
+    find_duplicate_pmagint_rows,
+    find_duplicate_ani_tensors,
     archivres,
     load_results,
     recompute_fit_geometry,
@@ -68,6 +76,9 @@ from calcul import (
     compute_cooling_rate,
     format_cooling_rate,
     read_ani_tensor,
+    read_ani_mean_tensor,
+    read_all_ani_tensors,
+    find_orphan_ani_specimens,
     apply_inverse_anisotropy,
     compute_anisotropy_tensor,
     replace_position_by_symmetry,
@@ -78,7 +89,7 @@ from calcul import (
     _correct_dec_inc,
     mean_components,
 )
-from zijderveld import build_zijderveld_figure, draw_zijderveld, build_zijderveld_stereo_results_figure
+from zijderveld import build_zijderveld_figure, draw_zijderveld
 from stereo import build_stereo_figure, build_stereo_results_figure
 from xygraph import build_xygraph_figure, has_mixed_demag
 from susceptibility import build_susceptibility_figure
@@ -111,7 +122,7 @@ from datatools import (
     export_thellier_tdt,
     detect_grm,
 )
-from magic_export import export_to_magic, classify_anisotropy_experiment
+from magic_export import export_to_magic, classify_anisotropy_experiment, load_site_metadata_table
 from anisotropy_magic import compute_aarm_pmagpy, format_aarm_pmagpy
 from export_stereo import export_stereo_project
 from detailed_export import export_detailed_txt
@@ -292,6 +303,7 @@ class STARpaleomagApp:
         self.results_path = None  # equivalent filr - fichier .r, fixe au chargement des donnees
         self.data_file_path = None  # chemin du .ren/.prmag/.txt charge - voir _load_data_file
         self._archived_ids = None  # cache des `c` deja utilises dans results_path (voir _save_result)
+        self._results_path_mtime = None  # date de derniere lecture de results_path - voir ouvrir_selres_dialog
         self._arm_holder_background = None  # equivalent xholarm/yholarm/zholarm (holderarm), pour Anisotropy
         self.entete = ""  # Préfixe de sélection (equivalent selentete)
         self.orientation = tk.IntVar(value=2)  # equivalent iorient (SC/IS/TC) - defaut In situ
@@ -439,6 +451,8 @@ class STARpaleomagApp:
         file_menu.add_command(label="Complete sample information...", command=self.ouvrir_complete_sample_info_dialog)
         file_menu.add_command(label="Archive new laboratory measurements", command=self.ouvrir_archive_new_data_dialog)
         file_menu.add_separator()
+        file_menu.add_command(label="Check files for duplicate entries...", command=self.ouvrir_check_duplicates_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="export to Magic database", command=self.ouvrir_export_magic_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="export pmag content as a text file", command=self.ouvrir_export_detailed_dialog)
@@ -495,6 +509,8 @@ class STARpaleomagApp:
         results_menu.add_command(label=self._labeled("Init results", "initres"),
                                   command=self.reinitialiser_resultats)
         results_menu.add_command(label="Delete results...", command=self.ouvrir_delete_results_dialog)
+        results_menu.add_command(label="Import published site means...",
+                                  command=self.ouvrir_import_published_means_dialog)
         results_menu.add_separator()
         results_menu.add_command(label=self._labeled("best lines...", "ajuslig"),
                                   command=self.ouvrir_ajuslig_dialog)
@@ -793,6 +809,10 @@ class STARpaleomagApp:
             self._afficher(f"[Zijderveld] step {_step_token(m)}\n")
         elif kind == "stereo_specimen":
             self._afficher(f"[Stereo Results] {item}\n")
+        elif kind == "xygraph_specimen":
+            self._afficher(f"[XY graph] {item}\n")
+        elif kind == "irm_specimen":
+            self._afficher(f"[IRM] {item}\n")
 
     def _redraw_canvas(self):
         """Agrandit le CONTENANT (volet gauche du PanedWindow + fenetre)
@@ -955,6 +975,29 @@ class STARpaleomagApp:
                     tk.END,
                     f"ID: {sample.id} | Measurements: {sample.nbmes} | Inc: {sample.cin} | Az: {sample.caz}\n"
                 )
+
+            # Controle de coherence .pmagani <-> .prmag DES L'OUVERTURE
+            # (pas seulement au moment d'un export MagIC) - demande
+            # explicite utilisateur ("important pas seulement pour
+            # l'export dans Magic mais il faut un controle lors de
+            # l'ouverture du fichier pour verifier la compatibilite
+            # pmagani <-> prmag") : un .pmagani compagnon (meme nom de
+            # base, voir ani_path_for) portant un specimen absent du
+            # .prmag qu'on vient de charger signale un vrai desaccord
+            # entre les deux fichiers - averti tout de suite plutot que
+            # decouvert seulement en export.
+            ani_path = ani_path_for(fichier_path)
+            if os.path.exists(ani_path):
+                orphans = find_orphan_ani_specimens(self.donnees, ani_path)
+                if orphans:
+                    shown = ", ".join(orphans[:20])
+                    more = f", ... ({len(orphans) - 20} more)" if len(orphans) > 20 else ""
+                    self.text_area.insert(
+                        tk.END,
+                        f"\nWARNING: {len(orphans)} specimen(s) in {os.path.basename(ani_path)} "
+                        f"have NO counterpart in this .prmag - mismatched files? "
+                        f"{shown}{more}\n"
+                    )
 
             if announce:
                 self._showinfo(
@@ -1147,7 +1190,11 @@ class STARpaleomagApp:
         detail exact des trois modes et le format de table attendu).
         Mode 'h' (sample/height) ajoute a la demande explicite utilisateur
         ("add a specific case for stratigraphic_height filled from sample
-        and height as all specimens have the same height").
+        and height as all specimens have the same height"). Mode 's'
+        accepte aussi une table separee par des virgules et une seconde
+        colonne 'site' pour RENOMMER le site (ancien nom -> nouveau nom)
+        - demande explicite utilisateur ("i cannot select site and
+        replace it by an other site"), voir complete_sample_info.py.
         Patche le .prmag EN PLACE (une sauvegarde .bak est ecrite avant
         toute modification, une seule fois). Rapporte aussi, en plus des
         specimens sans correspondance dans la table, ceux qui ont encore
@@ -1162,7 +1209,7 @@ class STARpaleomagApp:
         a long line")."""
         self.text_area.insert(tk.END, "\n--- Complete sample information (Escape to cancel) ---\n", "prompt")
         mode = self._console_input(
-            "Table indexed by site (assumes specimen/sample/site already correct) (s) "
+            "Table indexed by site, repeat 'site' header twice to rename (s) "
             "/ by specimen (also fills sample/site) (p) "
             "/ by sample, stratigraphic_height only (h): ", "s")
         if mode is None:
@@ -1229,6 +1276,68 @@ class STARpaleomagApp:
             + (f"\nFull list(s) written to {report_path}" if report_path else "")
             + "\n\nRe-open this file to see the changes (the currently loaded data is not refreshed automatically).",
         )
+
+    def ouvrir_check_duplicates_dialog(self):
+        """Evalue le .prmag charge et ses compagnons .pmagres/.pmagint/
+        .pmagani (memes noms de base, voir results_path_for/pmagint_
+        path_for/_find_ani_path) pour des entrees en double (meme
+        etape/mêmes codes - voir calcul.find_duplicate_measurements/
+        find_duplicate_results/find_duplicate_pmagint_rows/
+        find_duplicate_ani_tensors pour la notion exacte de "doublon"
+        propre a chaque fichier) - demande explicite utilisateur ("add a
+        menu for a routine to evaluate the files prmag, pmagres, pmagint
+        and pmagani to check for measurements with the same step and
+        codes, just a warning to help the user clean the files"). Chaque
+        fichier compagnon absent est simplement saute (pas une erreur) ;
+        SIMPLE LISTE D'AVERTISSEMENTS, aucune correction automatique -
+        le nettoyage reste a la charge de l'utilisateur."""
+        if not self.donnees:
+            self._showwarning("No data", "Load a .ren/.prmag file first.")
+            return
+
+        self.text_area.insert(tk.END, "\n--- Check files for duplicate entries ---\n", "prompt")
+        report = []
+
+        dup_mesures = find_duplicate_measurements(self.donnees)
+        report.append(f"[.prmag] {len(dup_mesures)} duplicate measurement(s):" if dup_mesures
+                       else "[.prmag] no duplicate measurement found.")
+        report.extend(f"  {w}" for w in dup_mesures)
+
+        if self.results_path and os.path.exists(self.results_path):
+            file_results = list(_iter_result_lines(self.results_path))
+            dup_results = find_duplicate_results(file_results)
+            report.append(
+                f"[.pmagres] {len(dup_results)} duplicate result(s) in "
+                f"{os.path.basename(self.results_path)}:" if dup_results
+                else f"[.pmagres] no duplicate result found in {os.path.basename(self.results_path)}."
+            )
+            report.extend(f"  {w}" for w in dup_results)
+        else:
+            report.append("[.pmagres] no results file found - skipped.")
+
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        if pmagint_path and os.path.exists(pmagint_path):
+            dup_pmagint = find_duplicate_pmagint_rows(pmagint_path)
+            report.append(
+                f"[.pmagint] {len(dup_pmagint)} duplicate interpretation(s):" if dup_pmagint
+                else "[.pmagint] no duplicate interpretation found."
+            )
+            report.extend(f"  {w}" for w in dup_pmagint)
+        else:
+            report.append("[.pmagint] no paleointensity file found - skipped.")
+
+        ani_path = self._find_ani_path()
+        if ani_path:
+            dup_ani = find_duplicate_ani_tensors(ani_path)
+            report.append(
+                f"[.pmagani] {len(dup_ani)} duplicate tensor(s):" if dup_ani
+                else "[.pmagani] no duplicate tensor found."
+            )
+            report.extend(f"  {w}" for w in dup_ani)
+        else:
+            report.append("[.pmagani] no anisotropy file found - skipped.")
+
+        self._afficher("\n".join(report) + "\n")
 
     def ouvrir_archive_new_data_dialog(self):
         """Archive de nouvelles mesures (acquises APRES la creation du
@@ -1706,32 +1815,180 @@ class STARpaleomagApp:
                 if include_pint.strip().lower() != "n":
                     pmagint_rows = matched
 
-        # Anisotropie (.pmagani, tenseur 'A0' natif deja calcule) -
-        # demande explicite utilisateur ("il manque aussi les données
+        # Anisotropie (.pmagani, tenseur natif deja calcule) - demande
+        # explicite utilisateur ("il manque aussi les données
         # d'anisotropie au niveau du fichier specimens (prendre les A0)")
         # : specimens.txt n'avait jusqu'ici AUCUNE colonne aniso_* (les
         # prompts anisotropy_kind_by_specimen/anisotropy_skip ci-dessus ne
         # servent qu'a etiqueter les mesures BRUTES X/Y/Z de
-        # measurements.txt, pas le tenseur RESULTAT). Cherche le tenseur
-        # 'A0' de chaque specimen de la selection independamment des
-        # mesures X/Y/Z chargees (le .pmagani peut avoir ete alimente par
-        # une session/un import different) - ne demande que si au moins
-        # un tenseur est trouve.
+        # measurements.txt, pas le tenseur RESULTAT). Cherche, PAR ORDRE
+        # DE PRIORITE, un tenseur A0 (ATRM) puis F0 (AARM) puis N0 (AMS
+        # basse frequence) - PAS seulement 'A0' comme le premier essai :
+        # un .pmagani importe depuis AMS_Py/un ASC Agico (ex.
+        # rn01_15_converted.pmagani reel) est presque toujours code2='N0'
+        # (susceptibilite), jamais 'A0' - demande explicite utilisateur
+        # en verifiant "how to join the two exports from prmag & pmagres
+        # with the Anisotropy" sur un vrai fichier ("oui dans le dossier
+        # Concon_creixell"). Independant des mesures X/Y/Z chargees (le
+        # .pmagani peut avoir ete alimente par une session/un import
+        # different) - ne demande que si au moins un tenseur est trouve.
+        _ANISO_CODE_PRIORITY = ("A0", "F0", "N0")
         aniso_tensors = {}
+        aniso_code2_used = None
         ani_path = self._find_ani_path()
+
+        # Specimens connus SEULEMENT via leur tenseur AMS (.pmagani), pas
+        # dans self.selection (jamais dans le .prmag, ou juste filtres
+        # par la selection courante) - demande explicite utilisateur
+        # ("attention: l'exportation concerne seulement les
+        # spécimens/samples avec des données prmag par contre il peut y
+        # avoir des specimens dans pmagani qui n'ont pas de mesures dans
+        # prmag ... mais il faut aussi les exporter"). `export_samples`
+        # (self.selection + ces extras) remplace self.selection pour
+        # TOUT le reste de cette methode (recherche des tenseurs, des
+        # sites, et l'appel final a export_to_magic) - self.selection
+        # lui-meme reste inchange. Cherche DIRECTEMENT dans self.donnees
+        # par id exact (PAS via select_samples : verifie sur donnees
+        # reelles - des specimens AMS-only d'un vrai .pmagani sont bien
+        # dans le .prmag mais SANS aucune mesure de demag, un cas que
+        # select_samples exclut TOUJOURS sauf id vide, voir sa docstring
+        # - "AMS sans jamais de vraie mesure NRM" est le meme genre de
+        # cas que "site sans specimen", ici au niveau specimen) - vraies
+        # metadonnees site/geologie alors recuperees via
+        # _build_selected_sample.
+        #
+        # Un specimen du .pmagani INTROUVABLE dans self.donnees (aucune
+        # trace, meme sans mesure) est REJETE, pas fabrique - demande
+        # explicite utilisateur ("en theorie pmagani est lie a prmag. Il
+        # faut interdire dans pmagani les specimens qui ne sont pas
+        # présents dans prmag") : un .pmagani est cense decrire des
+        # specimens du .prmag compagnon ; un id absent du .prmag signale
+        # un vrai probleme (fichiers desassortis, faute de frappe,
+        # .pmagani d'un autre jeu de donnees) que fabriquer une ligne
+        # specimens.txt minimaliste masquerait plutot que resoudre -
+        # SIGNALE et EXCLU de l'export, jamais silencieusement invente.
+        export_samples = list(self.selection)
         if ani_path:
-            for ech in self.selection:
-                tensor = read_ani_tensor(ani_path, ech.id, "A0")
-                if tensor is not None:
-                    aniso_tensors[ech.id] = tensor
+            known_ids = {e.id.strip().upper() for e in export_samples}
+            # `t.export == "N"` (voir calcul.AniTensor.export, colonne
+            # ajoutee cote AMS_Py par "Mark selection for MagIC
+            # export...") exclut ce tenseur - un specimen connu
+            # SEULEMENT via un tel tenseur n'a donc plus aucune raison
+            # d'etre ajoute ici (demande explicite utilisateur "only
+            # these selected data will be taken into account in the
+            # main export from Starpaleomag").
+            extra_ids = sorted({
+                t.id.strip() for t in read_all_ani_tensors(ani_path)
+                if t.id.strip() and t.id.strip().upper() not in known_ids
+                and t.export != "N"
+            })
+            donnees_by_id = {p.id.strip().upper(): p for p in self.donnees}
+            n_from_prmag = 0
+            orphan_ids = []
+            for extra_id in extra_ids:
+                p = donnees_by_id.get(extra_id.upper())
+                if p is not None:
+                    export_samples.append(_build_selected_sample(p, p.mesures))
+                    n_from_prmag += 1
+                else:
+                    orphan_ids.append(extra_id)
+            if n_from_prmag:
+                self._afficher(
+                    f"[Export to MagIC] {n_from_prmag} specimen(s) with AMS data only "
+                    f"(no measurement in the current selection) added for export.\n"
+                )
+            if orphan_ids:
+                shown = ", ".join(orphan_ids[:20])
+                more = f", ... ({len(orphan_ids) - 20} more)" if len(orphan_ids) > 20 else ""
+                self._afficher(
+                    f"WARNING: {len(orphan_ids)} specimen(s) in {os.path.basename(ani_path)} "
+                    f"have NO counterpart in the loaded .prmag - excluded from export "
+                    f"(check for mismatched files or a typo): {shown}{more}\n"
+                )
+
+        if ani_path:
+            for ech in export_samples:
+                for code2 in _ANISO_CODE_PRIORITY:
+                    tensor = read_ani_tensor(ani_path, ech.id, code2)
+                    # export == "N" : specimen explicitement ECARTE de
+                    # l'export MagIC via "Mark selection for MagIC
+                    # export..." cote AMS_Py - continue vers le code2
+                    # suivant plutot que de considerer qu'il n'y a
+                    # simplement aucun tenseur A0/F0/N0 (un autre code2
+                    # du meme specimen peut, lui, etre marque export=Y).
+                    if tensor is not None and tensor.export == "N":
+                        continue
+                    if tensor is not None:
+                        aniso_tensors[ech.id] = tensor
+                        aniso_code2_used = aniso_code2_used or code2
+                        break
             if aniso_tensors:
                 include_aniso = self._console_input(
-                    f"Include anisotropy tensor 'A0' for {len(aniso_tensors)} specimen(s) "
-                    f"(from {os.path.basename(ani_path)})? Y/n: ", "Y")
+                    f"Include anisotropy tensor '{aniso_code2_used}' for {len(aniso_tensors)} "
+                    f"specimen(s) (from {os.path.basename(ani_path)})? Y/n: ", "Y")
                 if include_aniso is None:
                     return
                 if include_aniso.strip().lower() == "n":
                     aniso_tensors = {}
+
+        # Anisotropie de SITE (.pmagani, section "#site mean tensor
+        # results", moyenne deja calculee - voir calcul.AniMeanTensor/
+        # read_ani_mean_tensor) - demande explicite utilisateur ("je
+        # voudrais ajouter l'exportation de l'AMS (niveau specimen et
+        # sites). Les données d'AMS vont aussi dans les fichiers
+        # sites.txt et specimens.txt") : meme principe que le bloc
+        # specimen ci-dessus (meme ordre de priorite A0/F0/N0, meme
+        # raison reelle - le .pmagani reel teste est en 'N0'), une ligne
+        # PAR SITE distinct de la selection plutot que par specimen.
+        aniso_mean_tensors = {}
+        aniso_mean_code2_used = None
+        if ani_path:
+            for site in {ech.magic_site.strip() for ech in export_samples if ech.magic_site.strip()}:
+                for code2 in _ANISO_CODE_PRIORITY:
+                    mean_tensor = read_ani_mean_tensor(ani_path, site, code2)
+                    # Meme filtre export=="N" que pour les tenseurs
+                    # specimen ci-dessus (voir calcul.AniMeanTensor.export).
+                    if mean_tensor is not None and mean_tensor.export == "N":
+                        continue
+                    if mean_tensor is not None:
+                        aniso_mean_tensors[site] = mean_tensor
+                        aniso_mean_code2_used = aniso_mean_code2_used or code2
+                        break
+            if aniso_mean_tensors:
+                include_site_aniso = self._console_input(
+                    f"Include site-mean anisotropy tensor '{aniso_mean_code2_used}' for "
+                    f"{len(aniso_mean_tensors)} site(s) (from {os.path.basename(ani_path)})? Y/n: ", "Y")
+                if include_site_aniso is None:
+                    return
+                if include_site_aniso.strip().lower() == "n":
+                    aniso_mean_tensors = {}
+
+        # Metadonnees de site (formation/lithologies/geologic_classes/
+        # geologic_types/age) depuis une table externe - demande
+        # explicite utilisateur ("can we also let the site-only path
+        # pull from a complement table... so those fields aren't just
+        # blank") : ne COMBLE que les champs encore vides (voir
+        # magic_export._apply_site_metadata) - utile en particulier pour
+        # un site archive uniquement via sa moyenne (aucun specimen
+        # charge, voir build_sites_rows), mais s'applique aussi aux
+        # sites avec specimens dont un champ n'a jamais ete renseigne.
+        site_metadata = None
+        add_meta = self._console_input(
+            "Fill in missing site formation/lithology/age from a complement table "
+            "(e.g. Complement_tect.txt)? y/N: ", "n")
+        if add_meta is None:
+            return
+        if add_meta.strip().lower() == "y":
+            meta_path = filedialog.askopenfilename(
+                title="Select the site metadata table",
+                filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+            )
+            if meta_path:
+                try:
+                    site_metadata = load_site_metadata_table(meta_path)
+                except Exception as e:
+                    self._showerror("Error", f"Could not load site metadata table:\n{e}")
+                    return
 
         out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
         if not out_dir:
@@ -1739,13 +1996,15 @@ class STARpaleomagApp:
 
         try:
             result = export_to_magic(
-                self.selection, self.results, out_dir,
+                export_samples, self.results, out_dir,
                 lab_analysts=lab_analysts,
                 continent_ocean=continent, country=country, region=region,
                 anisotropy_kind_by_specimen=anisotropy_kind_by_specimen,
                 anisotropy_skip=anisotropy_skip,
                 pmagint_rows=pmagint_rows,
                 aniso_tensors=aniso_tensors,
+                aniso_mean_tensors=aniso_mean_tensors,
+                site_metadata=site_metadata,
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")
@@ -2021,7 +2280,23 @@ class STARpaleomagApp:
 
         for i, ech in enumerate(samples):
             self._current_graphic = ("zijderveld", ech.id)
-            self._refresh_current_graphic()
+            try:
+                self._refresh_current_graphic()
+            except Exception as e:
+                # Un echantillon ne devrait normalement plus faire planter
+                # draw_zijderveld (voir le garde-fou "no NRM data" ajoute
+                # dans zijderveld.py), mais si un cas imprevu se presente
+                # quand meme, on ne veut pas interrompre la sequence pour
+                # les autres echantillons selectionnes - demande explicite
+                # utilisateur : "it seems that the zijderveld cannot be
+                # plotted and the app jump out... can you just skip the
+                # sample". On log et on passe au suivant plutot que de
+                # laisser l'exception remonter jusqu'au callback Tkinter.
+                self._afficher(f"[Zijderveld] {ech.id}: skipped ({e})\n")
+                self._current_graphic = None
+                if i == len(samples) - 1:
+                    break
+                continue
             if i == len(samples) - 1:
                 break
             reste = len(samples) - i - 1
@@ -2752,17 +3027,23 @@ class STARpaleomagApp:
         """Equivalent GUI de `visres` ("data+interpretation",
         plotorthog.f:8-149) : boucle sur CHAQUE résultat de self.results
         INDIVIDUELLEMENT (pas regroupé par échantillon) - pour cat1 in
-        ('L','P') affiche Zijderveld + Stereo Results côte à côte pour
-        CE seul ajustement (les autres ajustements du même échantillon ne
-        sont PAS superposés, comme le Fortran qui réduit `tr` à un seul
-        élément avant d'appeler `zijder`) : le panneau stereo montre un
-        point de direction pour une ligne, le grand cercle pour un plan -
-        MÊME plot "classique" pour les deux désormais (voir
-        build_zijderveld_stereo_results_figure) - demande explicite
+        ('L','P') affiche le Zijderveld de CET échantillon (les autres
+        ajustements du même échantillon ne sont PAS superposés, comme le
+        Fortran qui réduit `tr` à un seul élément avant d'appeler
+        `zijder`), panneau UNIQUE avec son mini-stereo intégré (voir
+        build_zijderveld_figure/draw_zijderveld) qui montre maintenant
+        AUSSI le résultat par-dessus les données brutes : un point de
+        direction pour une ligne, le grand cercle pour un plan - MÊME
+        plot "classique" pour les deux désormais - demande explicite
         utilisateur ("put the great circle on the stereo within the same
         classic plot that has already zijderveld and stereo; when the
         result is a line, the result goes to the zijderveld, when it is
-        a plane it is plotted on the stereo"). Pour cat1=='f' (direction
+        a plane it is plotted on the stereo", puis "I do not understand
+        why the stereo is still on the right. The routine with the
+        zijder and stereo above the zijder already exist" - le panneau
+        séparé "Stereo Results" à côté forçait une figure large à 2
+        panneaux, donc une fenêtre plus large que partout ailleurs dans
+        l'appli). Pour cat1=='f' (direction
         individuelle sans Zijderveld associé) affiche Stereo Results
         seul. Pour cat1=='F' (moyenne de site) - IGNORÉ par le
         Fortran d'origine, désormais traité - affiche un Stereo Results
@@ -2803,6 +3084,18 @@ class STARpaleomagApp:
                 continue
 
             if r.cat1 == "F":
+                # N'affiche QUE les moyennes archivees dans l'orientation
+                # COURANTE - demande explicite utilisateur ("If you are
+                # in in situ, you select only the mean that are in in
+                # situ... only the means in IS are plotted if you are in
+                # IS") : self.results peut contenir un melange de
+                # moyennes IS/TC (accumulees via plusieurs "Select
+                # results..." a des orientations differentes) - une
+                # moyenne qui ne correspond pas est ignoree ici (pas
+                # meme tentee, plutot que de tracer un stereo vide -
+                # voir aussi le meme filtre dans draw_stereo_results).
+                if r.par3_mean != float(self.orientation.get()):
+                    continue
                 # Moyenne de site : plus de specimen unique a chercher dans
                 # self.donnees (r.id = "mean: <site>", pas un id specimen) -
                 # trace la moyenne (cone de confiance) ET ses composants
@@ -2844,26 +3137,24 @@ class STARpaleomagApp:
             self._clear_figure()
 
             if r.cat1 in ("L", "P"):
-                # Zijderveld + Stereo Results cote a cote, MEME plot
-                # "classique" desormais pour une ligne ET pour un plan -
-                # demande explicite utilisateur ("put the great circle on
-                # the stereo within the same classic plot that has
-                # already zijderveld and stereo; when the result is a
-                # line, the result goes to the zijderveld, when it is a
-                # plane it is plotted on the stereo"). Une ligne
-                # utilisait auparavant le Zijderveld SEUL (avec son petit
-                # encart stereo integre montrant seulement les points
-                # bruts, PAS le fit) ; build_zijderveld_stereo_results_
-                # figure gere deja les deux cas correctement sur son
-                # panneau stereo (draw_stereo_results : point pour L/f,
-                # grand cercle pour P - voir sa docstring), il suffit de
-                # l'utiliser aussi pour 'L'. Figure a 2 panneaux : bypass
-                # _fit_figure_to_data (memes raisons que paleoint_review/
-                # xygraph/susceptibility/irm - elle ne sait dimensionner
-                # qu'un seul panneau).
-                self.fig.set_size_inches(11.0, 6.0, forward=True)
-                build_zijderveld_stereo_results_figure(
-                    ech, r, orientation=self.orientation.get(), fig=self.fig)
+                # Zijderveld SEUL (panneau unique), avec son mini-stereo
+                # INTEGRE au-dessus qui montre desormais aussi le resultat
+                # (point pour une ligne, grand cercle pour un plan - voir
+                # draw_zijderveld/show_stereo) - demande explicite
+                # utilisateur ("I do not understand why the stereo is
+                # still on the right. The routine with the zijder and
+                # stereo above the zijder already exist") : le panneau
+                # separe "Stereo Results" a cote (build_zijderveld_
+                # stereo_results_figure) forcait une figure large a 2
+                # panneaux et, avec elle, une fenetre plus large que les
+                # autres vues - remplace par EXACTEMENT le meme layout a
+                # panneau unique que la vue "Zijderveld" normale
+                # (_refresh_current_graphic, kind=='zijderveld'), donc le
+                # meme comportement de redimensionnement de fenetre
+                # partout dans l'appli.
+                self.fig.set_size_inches(5.5, 8.5, forward=True)
+                build_zijderveld_figure(ech, orientation=self.orientation.get(), fits=[r], fig=self.fig)
+                self._fit_figure_to_data()
                 self._redraw_canvas()
             else:
                 self.fig.set_size_inches(5.5, 5.5, forward=True)
@@ -3212,6 +3503,12 @@ class STARpaleomagApp:
             return
         try:
             _, self._archived_ids = archivres(fit, self.results_path, self._archived_ids)
+            # Met a jour la date connue APRES notre propre ecriture - sinon
+            # le prochain "Select results..." croirait le fichier modifie
+            # PAR L'UTILISATEUR (voir ouvrir_selres_dialog) et viderait
+            # self.results a tort, alors que ce changement vient de
+            # l'appli elle-meme.
+            self._results_path_mtime = os.path.getmtime(self.results_path)
         except OSError as e:
             self._showwarning(
                 "Archiving failed",
@@ -3285,18 +3582,21 @@ class STARpaleomagApp:
 
     def _read_step_range(self, demag1, default_min="0", default_max="9999"):
         """Demande Step min/Step max, avec un libelle adapte a `demag1`
-        (deja connu - l'appelant doit demander le code demag AVANT
-        d'appeler cette methode) : mT pour un pas AF (A/F), degC pour un
+        quand il est deja connu : mT pour un pas AF (A/F), degC pour un
         pas thermique (D/S/T/K, et R/V/P - paleointensite Thellier/IZZI,
         demande explicite utilisateur "when the cod1 is R, V, P, the unit
-        is also °C"), step brut sinon (code inconnu ou '*', ambigu).
-        `Measurement.etape` est desormais directement la valeur physique
-        reelle (plus d'echelle Oersted-equivalente a compenser ici -
-        demande explicite utilisateur "convert all step integer to
-        float") : ce que l'utilisateur tape est compare tel quel a
-        `etape`, le libelle sert seulement a clarifier l'unite attendue.
-        Retourne (step_min, step_max) ou None si annule/invalide (message
-        d'erreur deja affiche dans ce cas)."""
+        is also °C"), step brut sinon (code inconnu, '*', ou `demag1=None`
+        - l'appelant demande alors le code demag APRES le step range,
+        comme les anciennes applis, voir ouvrir_selection_dialog :
+        demande explicite utilisateur "can you ask for the steps before
+        the demag code. (as done in the old apps; I get confused
+        otherwise)"). `Measurement.etape` est desormais directement la
+        valeur physique reelle (plus d'echelle Oersted-equivalente a
+        compenser ici - demande explicite utilisateur "convert all step
+        integer to float") : ce que l'utilisateur tape est compare tel
+        quel a `etape`, le libelle sert seulement a clarifier l'unite
+        attendue. Retourne (step_min, step_max) ou None si annule/invalide
+        (message d'erreur deja affiche dans ce cas)."""
         is_af = demag1 in ("A", "F")
         is_thermal = demag1 in ("D", "S", "T", "K", "R", "V", "P")
         unit_label = "mT" if is_af else ("degC" if is_thermal else "step")
@@ -3402,14 +3702,21 @@ class STARpaleomagApp:
         pattern = self._read_prefixed_pattern("Sample number (* = all, ? = wildcard): ")
         if pattern is None:
             return
+        # Step avant Demag code (ordre des anciennes applis - demande
+        # explicite utilisateur, "I get confused otherwise") : le libelle
+        # ne peut alors plus s'adapter a l'unite (mT/degC), demag1 pas
+        # encore connu a ce point - `_read_step_range(None)` retombe sur
+        # le libelle generique "step" (voir sa docstring), comme le fait
+        # deja `select_samples_interactive` (selection.py, equivalent CLI
+        # de selmes) avec son " Step min value:" generique.
+        step_range = self._read_step_range(None)
+        if step_range is None:
+            return
+        step_min, step_max = step_range
         demag_s = self._console_input("Demag code (e.g. N0, T, AF, * = all): ", "*")
         if demag_s is None:
             return
         demag1, demag2 = self._parse_demag(demag_s)
-        step_range = self._read_step_range(demag1)
-        if step_range is None:
-            return
-        step_min, step_max = step_range
         new_matches = select_samples(
             self.donnees,
             pattern=pattern or "*",
@@ -3498,14 +3805,15 @@ class STARpaleomagApp:
         site = self._pick_from_list("Select site", sites)
         if site is None:
             return
+        # Step avant Demag code - voir ouvrir_selection_dialog.
+        step_range = self._read_step_range(None)
+        if step_range is None:
+            return
+        step_min, step_max = step_range
         demag_s = self._console_input("Demag code (e.g. N0, T, AF, * = all): ", "*")
         if demag_s is None:
             return
         demag1, demag2 = self._parse_demag(demag_s)
-        step_range = self._read_step_range(demag1)
-        if step_range is None:
-            return
-        step_min, step_max = step_range
         new_matches = select_samples_by_site(
             self.donnees, site=site or "*", step_min=step_min, step_max=step_max,
             demag1=demag1, demag2=demag2, verbose=False,
@@ -3561,14 +3869,15 @@ class STARpaleomagApp:
         pattern = self._console_input("Sample to erase (* = all): ", "*")
         if pattern is None:
             return
+        # Step avant Demag code - voir ouvrir_selection_dialog.
+        step_range = self._read_step_range(None, default_max="9000")
+        if step_range is None:
+            return
+        step_min, step_max = step_range
         demag_s = self._console_input("Demag code (* = all): ", "*")
         if demag_s is None:
             return
         demag1, demag2 = self._parse_demag(demag_s)
-        step_range = self._read_step_range(demag1, default_max="9000")
-        if step_range is None:
-            return
-        step_min, step_max = step_range
         occurrence = self._console_input(
             "Occurrence to delete (* = all matches, 1 = first only, 2 = second only...): ", "*")
         if occurrence is None:
@@ -3746,27 +4055,28 @@ class STARpaleomagApp:
                 ancr_s = self._console_input("Anchored to origin (Y/n): ", "Y")
                 if ancr_s is None:
                     return
-                numcomp_s = self._console_input("Component number (1-9): ", "1")
-                if numcomp_s is None:
+                component = self._console_input(
+                    "Magnetization component (A/B/C...): ", "A")
+                if component is None:
                     return
                 try:
                     jfin = int(jfin_s)
-                    numcomp = int(numcomp_s or 1)
                 except ValueError:
-                    self._showerror("Error", "Last step and component number must be integers.")
+                    self._showerror("Error", "Last step must be an integer.")
                     continue
                 if not (1 <= jdeb <= jfin <= len(ech.mesures)):
                     self._showerror("Error", "Invalid step range.")
                     continue
                 anchored = ancr_s.strip().lower() != "n"
 
-                fit = fit_line(ech, jdeb, jfin, anchored=anchored, numcomp=numcomp)
+                fit = fit_line(ech, jdeb, jfin, anchored=anchored)
                 if fit is None:
                     self._showwarning(
                         "Fit rejected",
                         "MAD > 15° or non-linear trend (linearity test failed).",
                     )
                     continue
+                fit.component = component.strip().upper() or "A"
 
                 dec, inc = _correct_dec_inc(fit, self.orientation.get())
                 self._afficher(
@@ -3884,23 +4194,29 @@ class STARpaleomagApp:
                 continue
 
             self.results.extend(candidates.values())
-            # Zijderveld + Stereo Results cote a cote (grand cercle trace
-            # pour toute suggestion de PLAN) plutot que le Zijderveld seul
-            # (self._current_graphic=("zijderveld", ...), qui n'a jamais
-            # qu'un encart stereo limite aux points bruts - JAMAIS de
-            # grand cercle, voir build_zijderveld_stereo_results_figure)
-            # - demande explicite utilisateur ("in data + interpretation,
-            # the original plot is lost... I was asking to plot the plane
-            # on the stereo with the data when a result was a plane and
-            # keep the zijderveld"). Contourne _current_graphic/
-            # _refresh_current_graphic (meme motif que afficher_visres,
-            # qui dessine aussi directement sur self.fig) : ce mode
-            # combine n'est pas un des "kind" qu'il connait.
+            # Zijderveld SEUL (panneau unique) - le mini-stereo INTEGRE
+            # (au-dessus, voir draw_zijderveld/show_stereo) trace
+            # desormais lui-meme un grand cercle pour toute suggestion de
+            # PLAN, en plus des points bruts - demande explicite
+            # utilisateur ("in data + interpretation, the original plot
+            # is lost... I was asking to plot the plane on the stereo
+            # with the data" puis "I do not understand why the stereo is
+            # still on the right. The routine with the zijder and stereo
+            # above the zijder already exist") : le panneau separe
+            # "Stereo Results" a cote (build_zijderveld_stereo_results_
+            # figure) n'est plus necessaire pour ca, et forcait une
+            # figure large a 2 panneaux (donc une fenetre plus large que
+            # partout ailleurs dans l'appli). Contourne _current_graphic/
+            # _refresh_current_graphic (meme motif qu'avant, ce mode
+            # combine n'est pas un des "kind" qu'il connait) mais utilise
+            # EXACTEMENT le meme layout/redimensionnement a panneau
+            # unique que la vue "Zijderveld" normale.
             self._current_graphic = None
             self._clear_figure()
-            self.fig.set_size_inches(11.0, 6.0, forward=True)
-            build_zijderveld_stereo_results_figure(
-                ech, list(candidates.values()), orientation=self.orientation.get(), fig=self.fig)
+            self.fig.set_size_inches(5.5, 8.5, forward=True)
+            build_zijderveld_figure(
+                ech, orientation=self.orientation.get(), fits=list(candidates.values()), fig=self.fig)
+            self._fit_figure_to_data()
             self._redraw_canvas()
 
             choice = self._console_input(
@@ -3979,19 +4295,16 @@ class STARpaleomagApp:
                     return
                 normalize = norm_s.strip().lower() != "n"
 
-                numcomp_s = self._console_input("Component number (1-9): ", "1")
-                if numcomp_s is None:
+                component = self._console_input(
+                    "Magnetization component (A/B/C...): ", "A")
+                if component is None:
                     return
-                try:
-                    numcomp = int(numcomp_s or 1)
-                except ValueError:
-                    self._showerror("Error", "Must be an integer.")
-                    continue
 
-                fit = fit_plane(ech, jdeb, jfin, normalize=normalize, numcomp=numcomp)
+                fit = fit_plane(ech, jdeb, jfin, normalize=normalize)
                 if fit is None:
                     self._showwarning("Fit rejected", "MAD > 25° (poorly defined plane).")
                     continue
+                fit.component = component.strip().upper() or "A"
 
                 dec, inc = _correct_dec_inc(fit, self.orientation.get())
                 self._afficher(
@@ -4071,26 +4384,23 @@ class STARpaleomagApp:
                     self._showerror("Error", "Invalid step range.")
                     continue
 
-                numcomp_s = self._console_input("Component number (1-9): ", "1")
-                if numcomp_s is None:
+                component = self._console_input(
+                    "Magnetization component (A/B/C...): ", "A")
+                if component is None:
                     return
-                try:
-                    numcomp = int(numcomp_s or 1)
-                except ValueError:
-                    self._showerror("Error", "Must be an integer.")
-                    continue
 
                 if jfin == jdeb:
                     fit = fit_single_direction(ech, index=jdeb - 1)
                     dec, inc = _correct_dec_inc(fit, self.orientation.get())
                     self._afficher(f"{ech.id}: single direction dec={dec:.1f}  inc={inc:.1f}\n")
                 else:
-                    fit = fit_fisher_direction(ech, jdeb, jfin, numcomp=numcomp)
+                    fit = fit_fisher_direction(ech, jdeb, jfin)
                     dec, inc = _correct_dec_inc(fit, self.orientation.get())
                     self._afficher(
                         f"{ech.id} : dec={dec:.1f}  inc={inc:.1f}  a95={fit.mad:.1f}  "
                         f"k={fit.tx[0]:.1f}  nb={fit.nb}\n"
                     )
+                fit.component = component.strip().upper() or "A"
 
                 decision = self._console_input(
                     "Save (Y) / redo (r) / next sample (n): ", "Y")
@@ -4446,6 +4756,21 @@ class STARpaleomagApp:
                 if res.swapped_axes:
                     out.extend(
                         f"!! inversion {ax}+ and {ax}- for sample: {ech.id}" for ax in res.swapped_axes
+                    )
+                if res.misoriented_positions:
+                    # Deviation angulaire par rapport a l'axe theorique de
+                    # la position (voir calcul._find_misoriented_
+                    # positions) - PAS deja corrige (contrairement a
+                    # swapped_axes ci-dessus, un simple echange de signe
+                    # ne "repare" pas une deviation > 45 deg) - demande
+                    # explicite utilisateur ("mettre un warning lorsque le
+                    # code ne correspond pas à la vraie direction
+                    # enregistrée par l'échantillon... jamais à + de 45°").
+                    out.extend(
+                        f"!! WARNING {key} direction is {dev:.0f}° from the expected axis "
+                        f"for sample {ech.id} - likely mis-oriented in the oven (anisotropy alone "
+                        f"should never deviate a TRM by more than 45°)"
+                        for key, dev in res.misoriented_positions
                     )
                 out.append("NRM residual estimated from each pair (before averaging the 3):")
                 out.extend(
@@ -4891,7 +5216,15 @@ class STARpaleomagApp:
         # uniquement 'L') - demande explicite utilisateur ("when lines and
         # planes are selected for a fisher result, use the combined L & P").
         contributing = [r for r in self.results if r.cat1 in _LINE_LIKE_CAT1 or r.cat1 == "P"]
-        sites = sorted({r.id[:6] for r in contributing})
+        # site_of_result (magic_site du specimen correspondant, PAS les 6
+        # premiers caracteres de l'id) - demande explicite utilisateur,
+        # apres renommage de site ("in the calculation of a mean for a
+        # site, it does not use the information from the site") : un site
+        # renomme via "Complete sample information" (mode site, colonne
+        # 'site' repetee) garde son id de specimen INCHANGE (voir
+        # complete_sample_info.py) - grouper par id[:6] retombait donc sur
+        # l'ancien nom de campagne, jamais sur le nom renomme.
+        sites = sorted({site_of_result(r, self.donnees) for r in contributing})
         if len(sites) == 1:
             # un seul site dans les resultats combines -> pas d'ambiguite,
             # nom attribue automatiquement sans demander confirmation -
@@ -5041,6 +5374,56 @@ class STARpaleomagApp:
             f"already archived, is unaffected) - {len(self.results)} remaining.\n"
         )
 
+    def ouvrir_import_published_means_dialog(self):
+        """Archive des moyennes de site PUBLIEES (table externe) comme
+        resultats "mean:", SANS aucun specimen/mesure requis - demande
+        explicite utilisateur ("how do we fill the prmag in that case",
+        suite a "can we have a site in prmag without data?" pour un
+        fichier legacy dont les mesures brutes sont perdues) : le SEUL
+        moyen d'obtenir un resultat "mean:" exploitable jusqu'ici etait de
+        calculer une moyenne depuis des specimens reellement charges
+        ("best dir Fisher..." + archivage), un import MagIC deja publie,
+        ou un script ad hoc - voir calcul.import_published_means pour le
+        format de table exact et le detail complet."""
+        table_path = filedialog.askopenfilename(
+            title="Select the published site means table "
+                  "(site, orientation [IS/TC], dec, inc, a95, k, n, ...)",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+        )
+        if not table_path:
+            return
+
+        pmagres_path = self.results_path
+        if not pmagres_path:
+            self._showwarning(
+                "No results file",
+                "No .r/.pmagres file for the loaded data (load a .ren/.prmag file first, "
+                "so there is somewhere to archive these means to).",
+            )
+            return
+
+        try:
+            n_imported, errors = import_published_means(pmagres_path, table_path)
+        except Exception as e:
+            self._showerror("Error", f"Import failed:\n{e}")
+            return
+
+        self._afficher(
+            f"{n_imported} published site mean(s) archived to {pmagres_path}.\n"
+        )
+        if errors:
+            self._afficher(f"{len(errors)} row(s) skipped:\n" + "\n".join(errors) + "\n")
+        # self.results n'est PAS mis a jour automatiquement (les moyennes
+        # sont ecrites sur disque, pas chargees en memoire) - meme
+        # convention que l'archivage normal (_save_result les ajoute a
+        # self.results EN PLUS d'ecrire sur disque, mais ici il n'y a pas
+        # d'equivalent "resultat courant" a ajouter un par un) : utiliser
+        # "Select results..." (mode m/s) pour les recharger si besoin de
+        # les voir/tracer immediatement dans cette session.
+        self._afficher(
+            "(use \"Select results...\" mode 'm' or 's' to load them into this session)\n"
+        )
+
     def ouvrir_selres_dialog(self):
         """Equivalent GUI de `selres` (dataselect.f) : charge des resultats
         DEPUIS le fichier .r (equivalent filr) dans self.results. Trois
@@ -5073,6 +5456,30 @@ class STARpaleomagApp:
                 f"{self.results_path} does not exist yet (no result archived).",
             )
             return
+
+        # Si results_path a change sur le disque depuis la derniere lecture
+        # (mtime) - typiquement une edition manuelle/externe du .pmagres,
+        # ex. un dedoublonnage ou une correction faite hors de l'appli -
+        # self.results et self._archived_ids sont vides/recalcules avant
+        # de charger, plutot que d'accumuler par-dessus un etat perime
+        # (des resultats deja retires du fichier resteraient sinon
+        # visibles en memoire) - demande explicite utilisateur ("is it
+        # possible to reload the file before any selection of results:
+        # this file is usually edited by the user"). Comportement
+        # d'accumulation NORMAL (selres, "the selection of results should
+        # not initialize the previous list") inchange tant que le fichier
+        # n'a pas change entre deux "Select results..." consecutifs.
+        current_mtime = os.path.getmtime(self.results_path)
+        if self._results_path_mtime is not None and current_mtime != self._results_path_mtime:
+            if self.results:
+                self._afficher(
+                    f"({self.results_path} was modified on disk since it was last read - "
+                    f"reloading from disk, {len(self.results)} previously loaded result(s) "
+                    "discarded)\n"
+                )
+            self.results = []
+            self._archived_ids = None
+        self._results_path_mtime = current_mtime
 
         self.text_area.insert(tk.END, "\n--- Select results (Escape to cancel) ---\n", "prompt")
         carselect = self._console_input(
@@ -5111,22 +5518,12 @@ class STARpaleomagApp:
             cat1 = self._console_input("Type (L/P/f/s, * = all): ", "*")
             if cat1 is None:
                 return
-            numcomp_s = self._console_input("Component number (empty = all): ", "")
-            if numcomp_s is None:
-                return
-            numcomp = None
-            if numcomp_s.strip():
-                try:
-                    numcomp = int(numcomp_s)
-                except ValueError:
-                    self._showerror("Error", "The component number must be an integer.")
-                    return
             component = self._console_input(
                 "Magnetization component (A/B/C..., * = all): ", "A")
             if component is None:
                 return
             loaded = load_results(self.results_path, pattern=pattern or "*",
-                                   carselect="d", cat1=cat1 or "*", numcomp=numcomp,
+                                   carselect="d", cat1=cat1 or "*", numcomp=None,
                                    component=component or "A")
 
         # tx/ty/tz (segment ajuste, pour le trace sur un Zijderveld) ne sont

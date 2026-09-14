@@ -696,7 +696,7 @@
       <h3 class="group" id="pmagfile-export">Export</h3>
       <div class="item">
         <div class="label">export to Magic database</div>
-        <div class="desc">Generates the MagIC tables (<code>sites</code>, <code>samples</code>, <code>specimens</code>, <code>measurements</code>, <code>locations</code>) from the current selection and saved results.</div>
+        <div class="desc">Generates the MagIC tables (<code>sites</code>, <code>samples</code>, <code>specimens</code>, <code>measurements</code>, <code>locations</code>) from the current selection and saved results. Each <code>sites</code> row gets one line per archived mean (in situ <em>and</em> tilt-corrected, if both were saved), and its <code>specimens</code> column lists the real specimen names contributing to that mean — see <a href="#results-manage">Select results…</a> for how that list is resolved, and why <em>site</em> mode is the more exact choice on a legacy file.</div>
       </div>
       <div class="item">
         <div class="label">export pmag content as a text file</div>
@@ -793,6 +793,9 @@
         <div class="label">Select results… <span class="shortcut">Cmd+Ctrl+R</span></div>
         <div class="desc">Loads results <strong>from the <code>.r</code> file</strong> (not the in-memory selection) in three modes: <em>Data</em> (individual results), <em>mean</em> (site means) or <em>site</em> (mean + its components). The <em>mean</em>/<em>site</em> mode requires the current orientation to match the one under which the mean was saved — otherwise an explicit message is shown.</div>
       </div>
+      <p style="color:var(--ink-soft); font-size:0.95rem; max-width:70ch; margin-top:-0.4rem;">
+        <strong style="color:var(--ink);">Mean vs. site mode, and why it matters for export.</strong> On a well-organized file, prefer <em>site</em> mode over <em>mean</em> mode: it loads the mean <em>together with</em> the individual line/plane results actually combined into it, so what you see (and what gets exported) is exactly the set of lines/planes the mean was computed from — nothing assumed. <em>Mean</em> mode alone still works, including for the <code>specimens</code> list on MagIC export: each combined result is tracked by an internal per-specimen anti-collision code (e.g. <code>96CC0301B_a</code>), and the specimen name is recovered from that code's own naming convention even when the individual results aren't loaded. That fallback is reliable for a well-organized file, but on an old legacy file — renamed sites, specimens split or merged across campaigns, a <code>.pmagres</code> assembled from more than one source — it's worth the extra step of loading <em>site</em> mode when you can, so the composition of the mean is never left to inference.
+      </p>
       <div class="item">
         <div class="label">List results <span class="shortcut">Cmd+Ctrl+L</span></div>
         <div class="desc">Table of saved fits, with dec/inc <strong>recomputed in the current orientation</strong> on every display (never frozen in the specimen frame).</div>

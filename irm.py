@@ -95,6 +95,18 @@ def _smooth_and_derive(
     return field_mt.tolist(), deriv.tolist()
 
 
+def _pick_points(ax, steps, norm, specimen_id: str) -> None:
+    """Un point interactif INVISIBLE par mesure tracee (meme mecanisme que
+    plotlib.PlotContext.pick_point, mais directement sur `ax` - ce module
+    reste hors PlotContext, comme xygraph.py) - clic-pour-info cote
+    app.py (`_on_plot_pick`), demande explicite utilisateur ("in XY plots
+    and IRM plots, can we click on a point to get the sample number")."""
+    for x, y in zip(steps, norm):
+        artist = ax.scatter([x], [y], s=250, alpha=0, picker=True, zorder=1000)
+        artist._starmac_pick_kind = "irm_specimen"
+        artist._starmac_pick_data = specimen_id
+
+
 def build_irm_figure(
     selected: List[SelectedSample],
     fig: Optional[Figure] = None,
@@ -124,11 +136,13 @@ def build_irm_figure(
         norm_f = [v / mmax for v in fvals]
         ax_acq.plot(fsteps, norm_f, "o-", color=color, markerfacecolor=color,
                     markersize=4, linewidth=1, label=ech.id)
+        _pick_points(ax_acq, fsteps, norm_f, ech.id)
 
         if bsteps:
             norm_b = [v / mmax for v in bvals]
             ax_acq.plot(bsteps, norm_b, "s--", color=color, markerfacecolor="none",
                         markersize=4, linewidth=1)
+            _pick_points(ax_acq, bsteps, norm_b, ech.id)
 
         field_mt, deriv = _smooth_and_derive(fsteps, norm_f)
         if deriv:

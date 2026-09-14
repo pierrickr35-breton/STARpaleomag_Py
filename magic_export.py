@@ -42,7 +42,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from selection import SelectedSample, Measurement, polere, corfor, corpen
-from calcul import FitResult, AniTensor
+from calcul import FitResult, AniTensor, AniMeanTensor
+from complete_sample_info import _read_table_rows
 
 # ---------------------------------------------------------------------------
 # Age : equivalent de `checkage` (fichiers_magic.f:2225), etendu pour
@@ -150,9 +151,15 @@ _SITES_HEADER = [
     "age", "age_sigma", "age_low", "age_high", "age_unit",
     "samples", "specimens", "result_quality", "dir_comp_name",
     "dir_tilt_correction", "dir_dec", "dir_inc", "dir_alpha95", "dir_r",
-    "dir_k", "dir_n_samples", "dir_n_specimens_lines",
+    "dir_k", "dir_n_specimens", "dir_n_specimens_lines",
     "dir_n_specimens_planes", "dir_polarity", "dir_nrm_origin",
     "vgp_lat", "vgp_lon", "vgp_dp", "vgp_dm",
+    # AMS de site (moyenne DEJA calculee, voir anisotropy_site_magic_fields)
+    # - demande explicite utilisateur ("l'exportation de l'AMS (niveau
+    # specimen et sites)... vont aussi dans les fichiers sites.txt").
+    "aniso_type", "aniso_tilt_correction", "aniso_v1", "aniso_v2", "aniso_v3",
+    "aniso_p", "aniso_pp", "aniso_t", "aniso_l", "aniso_f",
+    "aniso_perc", "aniso_total", "aniso_ll", "aniso_ff", "aniso_vg", "aniso_fl",
 ]
 
 _LOCATIONS_HEADER = [
@@ -162,26 +169,182 @@ _LOCATIONS_HEADER = [
     "location_type", "region",
 ]
 
-_COMP_NAMES = {0: "Comp_A", 1: "Comp_A", 2: "Comp_B", 3: "Comp_C"}
+def _comp_name(component: str) -> str:
+    """"Comp_A"/"Comp_B"/"Comp_C"... a partir de FitResult.component (A/B/C,
+    etiquette de composante de magnetisation - voir son docstring) - PAS de
+    `numcomp` (numero d'ajustement PCA 1-9, un concept different, deja
+    signale a eviter ici : "I think it is best not to use the numcomp of
+    individual samples for the mean"). Demande explicite utilisateur
+    ("now that we also have component A or B, instead of Chrm_1 write
+    Comp_A") : uniformise dir_comp/dir_comp_name (specimens.txt ET
+    sites.txt) sur cette meme etiquette, plutot que Chrm_<numcomp>."""
+    return f"Comp_{(component or 'A').strip().upper()}"
 
 
-def _site_mean_row(site: str, results: List[FitResult]) -> Optional[Dict[str, str]]:
-    """Equivalent de `magicmeanres` : cherche une moyenne de site
-    (cat1=='F' via id "mean: <site>") correspondant a `site` (magic_site,
-    ou son equivalent tronque a 6 caracteres comme le convention interne
-    des id "mean: XXXXXX")."""
+def load_site_metadata_table(path: str, encoding: str = "utf-8") -> Dict[str, Dict[str, str]]:
+    """Table de metadonnees de site (formation/age/geologic_classes/
+    geologic_types/lithologies/location), keyee par nom de site - demande
+    explicite utilisateur ("can we also let the site-only path pull from
+    a complement table... so those fields aren't just blank") : comble
+    formation/lithologies/geologic_classes/geologic_types/age pour un
+    site publie sur MagIC SANS specimen charge (voir build_sites_rows),
+    qui n'a sinon aucune source pour ces champs (contrairement a un site
+    avec specimens, qui les lit sur `ech.magic_fm`/etc.).
+
+    Meme lecteur que complete_sample_info._read_table_rows (delimiteur
+    tabulation OU virgule auto-detecte, colonnes normalisees espace->
+    underscore) - accepte donc directement un fichier au format
+    Complement_tect.txt (colonne 'site' REPETEE : ancien nom -> nouveau
+    nom -> keyee ici par le DERNIER 'site' - le nouveau nom, celui sous
+    lequel un site sans specimen est archive/nomme, voir build_site_mean_
+    result) aussi bien qu'un fichier a une seule colonne 'site' (ex.
+    site_locality_complement.txt). age_low/age_high/age_unit sont lus
+    TELS QUELS s'ils sont presents (evite l'aller-retour par parse_age -
+    inutile ici, sites.txt de MagIC a deja des colonnes age_low/age_high/
+    age_unit separees)."""
+    header, rows = _read_table_rows(path, encoding=encoding)
+    if "site" not in header:
+        raise ValueError("Table file must have a 'site' column header.")
+    site_indices = [i for i, h in enumerate(header) if h == "site"]
+    key_idx = site_indices[-1]
+    table: Dict[str, Dict[str, str]] = {}
+    for row in rows:
+        if key_idx >= len(row):
+            continue
+        site = row[key_idx].strip()
+        if not site:
+            continue
+        record = {
+            col: row[i].strip()
+            for i, col in enumerate(header)
+            if i not in site_indices and i < len(row)
+        }
+        table[site] = record
+    return table
+
+
+def _apply_site_metadata(row: Dict[str, str], meta: Optional[Dict[str, str]]) -> None:
+    """Comble UNIQUEMENT les champs encore vides de `row` (jamais n'ecrase
+    une valeur deja connue, qu'elle vienne d'un specimen ou de `mean`) -
+    voir load_site_metadata_table. `age` (chaine combinee) reconstruite
+    depuis age_low/age_high/age_unit si fournis separement et qu'aucune
+    colonne 'age' directe n'existe - meme convention que complete_sample_
+    info._normalize_age, dans l'AUTRE sens (ici sites.txt veut le detail,
+    pas la chaine combinee, donc age_low/age_high/age_unit priment)."""
+    if not meta:
+        return
+    for field in ("formation", "lithologies", "geologic_classes", "geologic_types",
+                  "location", "age_low", "age_high", "age_unit"):
+        if not row.get(field) and meta.get(field):
+            row[field] = meta[field]
+    if not row.get("age_low") and not row.get("age_high") and meta.get("age") and not row.get("age"):
+        row["age"] = meta["age"]
+    # lat/lon - demande implicite (site sans specimen dont le VGP archive
+    # est lui-meme a 0.0/0.0, voir build_sites_rows) : `_num()` valide
+    # que la table fournit bien un nombre avant de l'utiliser, plutot que
+    # de propager une valeur texte invalide dans sites.txt.
+    if not row.get("lat") and meta.get("lat"):
+        try:
+            row["lat"] = _num(float(meta["lat"]))
+        except ValueError:
+            pass
+    if not row.get("lon") and meta.get("lon"):
+        try:
+            row["lon"] = _num(_wrap_lon(float(meta["lon"])))
+        except ValueError:
+            pass
+
+
+def _apply_site_aniso(row: Dict[str, str], mean: Optional[AniMeanTensor]) -> None:
+    """Fusionne les colonnes AMS de site (anisotropy_site_magic_fields)
+    dans `row`, et ajoute le code de methode du tenseur (ex. LP-AN-TRM)
+    a `method_codes` s'il n'y est pas deja - meme principe que
+    build_specimens_rows pour le niveau specimen (paleointensite/
+    anisotropie), demande explicite utilisateur ("l'exportation de
+    l'AMS (niveau specimen et sites)")."""
+    if mean is None:
+        return
+    row.update(anisotropy_site_magic_fields(mean))
+    _aniso_type, aniso_method = _ANISO_MAGIC_INFO.get(mean.code2, ("AMS", "LP-X"))
+    codes = row.get("method_codes", "")
+    if aniso_method not in codes.split(":"):
+        row["method_codes"] = f"{codes}:{aniso_method}" if codes else aniso_method
+
+
+_C_SUFFIX_RE = re.compile(r"_[a-z]{1,2}$")
+
+
+def _strip_c_suffix(c: str) -> str:
+    """Retire le suffixe anti-collision "_<lettre(s)>" d'un `c` (voir
+    calcul._next_specimen_c : une lettre a-z, puis deux au-dela de 26
+    collisions pour le meme specimen - jamais observe en pratique mais
+    couvert quand meme) pour retrouver le nom de specimen d'origine SANS
+    avoir besoin du resultat individuel correspondant charge en memoire -
+    demande explicite utilisateur ("it should resolve also with the mean
+    too as the codes are used to select the true specimen name"). Ne
+    retire RIEN si `c` ne suit pas ce format exact (ex. un `c` numerique
+    d'un ancien fichier .pmagres - voir _next_specimen_c, remplace un
+    entier aleatoire 0-99999 dans les fichiers ecrits AVANT ce format)."""
+    return _C_SUFFIX_RE.sub("", c)
+
+
+def _site_mean_rows(site: str, results: List[FitResult]) -> List[Dict[str, str]]:
+    """Equivalent de `magicmeanres` : TOUTES les moyennes de site (cat1=='F'
+    via id "mean: <site>") correspondant a `site` (magic_site, ou son
+    equivalent tronque a 6 caracteres comme la convention interne des id
+    "mean: XXXXXX") - UNE ligne par resultat trouve (IS ET TC, PLUS
+    plusieurs composantes A/B/C... si presentes), PAS seulement le
+    premier - demande explicite utilisateur ("the export do not include
+    the Tilt corrected results that should appear on a second line") :
+    un site archive en IS ET en TC (voir _archive_fisher_mean, qui
+    archive les deux automatiquement) n'exportait jusqu'ici QUE le
+    premier trouve (le Fortran d'origine, magicmeanres, ne connaissait
+    lui-meme qu'une seule orientation par appel - jamais deux archivees
+    pour le meme site).
+
+    BUGS REELS corriges ici (demande explicite utilisateur, "the export
+    do not decode well the lines and planes") : `dir_k` lisait
+    `r.par2_mean` (jamais renseigne pour une moyenne de site - toujours
+    0.0) au lieu de `r.tx[0]` (ou k EST reellement stocke, voir
+    build_site_mean_result: `tx=(stats.k, 0.0)`) ; `dir_n_specimens_lines`/
+    `dir_n_specimens_planes` lisaient `r.tx[0]`/`r.tx[1]` (donc le K
+    recopie comme "nombre de lignes", et 0.0 constant comme "nombre de
+    plans") au lieu de `r.n_lines`/`r.n_planes` (les VRAIS comptes, voir
+    _MEAN_FIELDS colonne "L/P")."""
     site6 = (site or "").strip()[:6]
+    rows = []
     for r in results:
         if r.id[:5] != "mean:":
             continue
         if r.id[6:12].strip() != site6:
             continue
         tilt = "0" if r.par3_mean == 2.0 else "100"
-        comp = _COMP_NAMES.get(r.numcomp, "Comp_A")
+        comp = _comp_name(r.component)
+        # `r.liste` porte les `c` des resultats combines (ex.
+        # "96CC0301B_a"), PAS leur nom de specimen - `c` est
+        # l'identifiant anti-collision "<specimen>_<lettre>" attribue a
+        # l'archivage (voir _next_specimen_c), jamais le nom de specimen
+        # MagIC lui-meme - demande explicite utilisateur ("only the
+        # number of the specimen is included. not with the extension _a
+        # or b", puis "it should resolve also with the mean too as the
+        # codes are used to select the true specimen name") : resout
+        # chaque `c` en priorite vers le resultat individuel correspondant
+        # (retrouve par egalite de `c` parmi `results` - le plus fiable,
+        # marche meme si un specimen contient lui-meme un underscore) ;
+        # si ce resultat individuel n'est PAS charge (ex. moyenne seule
+        # selectionnee, mode 'm' plutot que 's'), retombe sur le retrait
+        # du suffixe "_<lettre(s)>" du `c` lui-meme via _strip_c_suffix -
+        # la convention de _next_specimen_c (1 lettre, puis 2 au-dela de
+        # 26 collisions) suffit a elle seule a retrouver le nom. Deduplique
+        # en gardant l'ordre (meme specimen combine deux fois - deux
+        # composantes A/B distinctes du meme specimen physique, par
+        # exemple - ne doit apparaitre qu'une fois dans la liste).
+        by_c = {str(other.c): other.id for other in results if other.id[:5] != "mean:"}
+        codes = [t.strip() for t in r.liste.replace("codes:", "").split(":") if t.strip()]
         specimens = ":".join(
-            t.strip() for t in r.liste.replace("codes:", "").split(":") if t.strip()
+            dict.fromkeys(by_c.get(c) or _strip_c_suffix(c) for c in codes)
         )
-        return {
+        rows.append({
             "specimens": specimens,
             "result_quality": "g",
             "dir_comp_name": comp,
@@ -189,19 +352,44 @@ def _site_mean_row(site: str, results: List[FitResult]) -> Optional[Dict[str, st
             "dir_dec": _num(r.dec, 1),
             "dir_inc": _num(r.inc, 1),
             "dir_alpha95": _num(r.mad, 1),
-            "dir_k": _num(r.par2_mean, 1),
-            "dir_n_samples": str(r.nb),
-            "dir_n_specimens_lines": str(int(r.tx[0])),
-            "dir_n_specimens_planes": str(int(r.tx[1])),
+            "dir_k": _num(r.tx[0], 1),
+            "dir_n_specimens": str(r.nb),
+            "dir_n_specimens_lines": str(r.n_lines) if r.n_lines >= 0 else "",
+            "dir_n_specimens_planes": str(r.n_planes) if r.n_planes >= 0 else "",
             "vgp_lat": _num(r.par4, 1),
             "vgp_lon": _num(r.par5, 1),
             "vgp_dp": _num(r.vgp_dp, 1) if r.vgp_dp else "",
             "vgp_dm": _num(r.vgp_dm, 1) if r.vgp_dm else "",
-        }
-    return None
+        })
+    return rows
 
 
-def build_sites_rows(samples: List[SelectedSample], results: List[FitResult]) -> List[List[str]]:
+def build_sites_rows(
+    samples: List[SelectedSample], results: List[FitResult],
+    site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+    aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
+) -> List[List[str]]:
+    """`site_metadata` (voir load_site_metadata_table) : ne COMBLE que les
+    champs formation/lithologies/geologic_classes/geologic_types/age_low/
+    age_high/age_unit/location encore VIDES (voir _apply_site_metadata) -
+    utile pour un site SANS specimen (aucune autre source, voir plus bas
+    dans cette fonction), mais applique aussi aux sites avec specimens
+    dont l'un de ces champs n'a jamais ete renseigne (ex. .prmag jamais
+    passe par "Complete sample information...").
+
+    UNE LIGNE PAR RESULTAT de moyenne trouve pour le site (voir
+    _site_mean_rows) - PAS une seule ligne meme quand le site porte une
+    moyenne IS ET une moyenne TC (ou plusieurs composantes) - demande
+    explicite utilisateur ("the export do not include the Tilt corrected
+    results that should appear on a second line").
+
+    `aniso_mean_tensors` (site -> AniMeanTensor 'A0' deja calcule, voir
+    anisotropy_site_magic_fields) : demande explicite utilisateur
+    ("l'exportation de l'AMS (niveau specimen et sites)"), meme principe
+    que `aniso_tensors` niveau specimen (build_specimens_rows) - fusionne
+    dans TOUTES les lignes du site (une moyenne AMS de site n'est pas
+    liee a l'orientation IS/TC d'une moyenne directionnelle particuliere,
+    contrairement a dir_dec/dir_inc)."""
     rows = []
     seen = []
     for ech in samples:
@@ -212,7 +400,7 @@ def build_sites_rows(samples: List[SelectedSample], results: List[FitResult]) ->
 
         age, age_sigma, age_low, age_high, age_unit = parse_age(ech.magic_age)
         elevation = "" if ech.altitude <= 0.0 else _num(ech.altitude, 1)
-        row = {
+        base_row = {
             "site": site,
             "citations": "This study",
             "location": ech.magic_loc,
@@ -230,10 +418,58 @@ def build_sites_rows(samples: List[SelectedSample], results: List[FitResult]) ->
             "age": age, "age_sigma": age_sigma, "age_low": age_low,
             "age_high": age_high, "age_unit": age_unit,
         }
-        mean = _site_mean_row(site, results)
-        if mean:
+        _apply_site_metadata(base_row, (site_metadata or {}).get(site))
+        _apply_site_aniso(base_row, (aniso_mean_tensors or {}).get(site))
+        means = _site_mean_rows(site, results)
+        if not means:
+            rows.append([base_row.get(col, "") for col in _SITES_HEADER])
+        for mean in means:
+            row = dict(base_row)
             row.update(mean)
-        rows.append([row.get(col, "") for col in _SITES_HEADER])
+            rows.append([row.get(col, "") for col in _SITES_HEADER])
+
+    # Sites connus SEULEMENT via une moyenne archivee ("mean: <site>"),
+    # SANS specimen charge dans `samples` - demande explicite utilisateur
+    # ("in the case of legacy files, it might be interesting to publish
+    # the site with its mean result (the published assuming that we lost
+    # some data). can we have a site in prmag without data?") : un site
+    # dont les mesures brutes sont perdues mais dont le resultat publie
+    # (direction moyenne, VGP) est connu (ex. transcrit depuis une table
+    # publiee - voir build_site_mean_result/le tableau du papier) reste
+    # publiable sur MagIC - le format sites.txt de MagIC n'exige PAS de
+    # specimens/measurements pour porter un resultat de site. lat/lon/
+    # bed_dip proviennent alors du resultat lui-meme (r.lat/r.rlong/
+    # r.dip/r.str_, voir build_site_mean_result) plutot que d'un
+    # specimen ; formation/lithologies/age/geologic_classes n'ont ICI
+    # AUCUNE source specimen - viennent UNIQUEMENT de `site_metadata` si
+    # fourni (voir load_site_metadata_table/_apply_site_metadata),
+    # restent vides sinon plutot que d'inventer une valeur.
+    for r in results:
+        if r.id[:5] != "mean:":
+            continue
+        site = r.id[6:].strip()
+        if not site or site in seen:
+            continue
+        seen.append(site)
+        means = _site_mean_rows(site, results)
+        if not means:
+            continue
+        base_row = {
+            "site": site,
+            "citations": "This study",
+            "lat": _num(r.lat) if (r.lat or r.rlong) else "",
+            "lon": _num(_wrap_lon(r.rlong)) if (r.lat or r.rlong) else "",
+            "bed_dip_direction": _num(_bed_dip_direction(r.str_, r.dip), 1) if (r.dip or r.str_) else "",
+            "bed_dip": _num(r.dip, 1) if (r.dip or r.str_) else "",
+            "geographic_precision": "0.0001",
+            "method_codes": "FS-FD:GE-WGS84:FS-LOC-GPS",
+        }
+        _apply_site_metadata(base_row, (site_metadata or {}).get(site))
+        _apply_site_aniso(base_row, (aniso_mean_tensors or {}).get(site))
+        for mean in means:
+            row = dict(base_row)
+            row.update(mean)
+            rows.append([row.get(col, "") for col in _SITES_HEADER])
     return rows
 
 
@@ -304,6 +540,19 @@ def build_samples_rows(samples: List[SelectedSample]) -> List[List[str]]:
     rows = []
     seen = []
     for ech in samples:
+        # Bloc "specimen: n.d / sample: n.d" (testlect les lit comme id=""
+        # - voir "specimen: n.d" dans le .prmag), sans aucune mesure : PAS
+        # un vrai specimen, juste un porteur de metadonnees de SITE (lat/
+        # lon/bed_dip/formation/age/geologie) pour un site dont les
+        # donnees brutes sont perdues - demande explicite utilisateur
+        # ("in the prmag... can we have a site without data?", "is this
+        # OK?"). Contribue a build_sites_rows (qui l'utilise deja plus
+        # haut) mais PAS ici : un nom d'echantillon vide est un champ cle
+        # invalide pour MagIC (samples.txt exige un nom non vide et
+        # unique) - verifie concretement (produisait une ligne avec
+        # sample="").
+        if not ech.id.strip() and not ech.mesures:
+            continue
         sample = ech.magic_sample.strip() or ech.id
         if sample in seen:
             continue
@@ -350,9 +599,21 @@ _SPECIMENS_HEADER = [
     "description",
 ]
 
-# code2 ('A0' seul demande explicitement - "prendre les A0") -> (aniso_type,
-# method_codes) MagIC - MEME convention que AMS_Py._ANI_MAGIC_INFO (A0=TRM).
-_ANISO_MAGIC_INFO = {"A0": ("ATRM", "LP-AN-TRM")}
+# code2 -> (aniso_type, method_codes) MagIC - MEME convention/memes 3
+# entrees que AMS_Py.app._ANI_MAGIC_INFO (A0=ATRM, F0=AARM, N0=AMS -
+# susceptibilite basse frequence, le cas le plus courant pour un .pmagani
+# importe depuis AMS_Py/un ASC Agico, voir rn01_15_converted.pmagani reel
+# - "prendre les A0" ne couvrait QUE le premier cas, code2 REELLEMENT
+# rencontre etant souvent 'N0' - demande explicite utilisateur en
+# verifiant "how to join the two exports from prmag & pmagres with the
+# Anisotropy" sur un vrai fichier). Le defaut ("AMS","LP-X") ci-dessous
+# (get avec fallback) couvrait deja N0 par coincidence ; explicite ici
+# pour ne plus en dependre.
+_ANISO_MAGIC_INFO = {
+    "A0": ("ATRM", "LP-AN-TRM"),
+    "F0": ("AARM", "LP-AN-ARM"),
+    "N0": ("AMS", "LP-X"),
+}
 
 
 # aniso_s/aniso_tilt_correction/aniso_ftest* pour specimens.txt, depuis un
@@ -391,6 +652,129 @@ def anisotropy_specimen_magic_fields(tensor: AniTensor) -> Dict[str, str]:
     if tensor.quality in ("g", "b"):
         out["aniso_ftest_quality"] = tensor.quality
     return out
+
+
+# aniso_v1/v2/v3/aniso_p.../sites.txt (groupe "Anisotropy") depuis une
+# moyenne de site DEJA calculee (calcul.AniMeanTensor, .pmagani section
+# "#site mean tensor results") - demande explicite utilisateur ("je
+# voudrais ajouter l'exportation de l'AMS (niveau specimen et sites).
+# Les donnees d'AMS vont aussi dans les fichiers sites.txt et
+# specimens.txt" - le niveau specimen existait deja, voir
+# anisotropy_specimen_magic_fields ci-dessus). Port DIRECT de
+# AMS_Py.ams_stats.magic_site_aniso_fields/shape_params (meme app,
+# meme probleme deja resolu et verifie contre MagIC-data-model.txt
+# reel - y compris le desaccord documente avec un bug repere dans
+# pmagpy.ipmag ou aniso_v3 reutilise a tort l'angle e12 de v1 au lieu
+# de e13) : PAS reimplemente a la main, seulement adapte aux champs
+# deja disponibles sur AniMeanTensor (k1/k2/k3/dec/inc/alpha1_N/alpha2_N
+# et P/T/L/F/Pprim DEJA fournis par l'appelant, contrairement a
+# TensorialMeanResult ou tsmean/shape_params les calcule) - evite de
+# redemontrer des formules deja etablies. Contrairement a AMS_Py (qui
+# connait l'orientation Sa/IS/TC du resultat moyenne, STARpaleomag_Py
+# n'a pas de champ AniMeanTensor dedie - mais AMS_Py l'ecrit deja en
+# texte libre dans `info` (ex. 'tilt_correction: 0; site mean (AMS_Py)')
+# a l'archivage (voir AMS_Py.ams_selection._mean_row_to_result, meme
+# convention de lecture en sens inverse) : aniso_tilt_correction est
+# RETROUVE depuis ce texte (voir _tilt_correction_from_info) plutot que
+# fige a "-1" - BUG REEL corrige ici (demande explicite utilisateur :
+# "la moyenne est en in situ et/ou TC rarement en SC. Il manque cette
+# info dans le fichier pmagani" - l'info N'ETAIT PAS manquante dans le
+# fichier, juste jamais lue cote export STARpaleomag_Py, qui annoncait
+# systematiquement "-1"/coordonnees specimen meme pour une moyenne
+# reellement IS ou TC). "-1" reste le defaut si `info` ne porte aucune
+# mention exploitable (moyenne d'une origine plus ancienne/differente).
+# Format "tau:dec:inc:eta/zeta:..." SANS espaces autour des ":"
+# (contrairement a AMS_Py, " : ") - aligne sur pmagpy.convert_2_magic.py
+# (source faisant foi, ':'.join(...)) et sur aniso_s ci-dessus, deja
+# sans espaces dans ce module."""
+_INFO_TILT_CORRECTION_RE = re.compile(r"tilt_correction:\s*(-?\d+)\b")
+# code STOCKE dans `info` (convention AMS_Py, voir _FILE_CODE_TO_ORIENT
+# cote AMS_Py : 1=Sa/2=IS/3=TC en interne, mais le TEXTE ecrit est deja
+# le code fichier "1"/"0"/"100", PAS l'enum 1/2/3) -> code MagIC reel
+# (voir AMS_Py.ams_stats.MAGIC_TILT_CORRECTION_CODE) : seul "1"
+# (specimen/Sa) differe ("-1" en MagIC) ; "0"(IS) et "100"(TC) sont deja
+# les codes MagIC tels quels.
+_INFO_CODE_TO_MAGIC_TILT = {"1": "-1", "0": "0", "100": "100"}
+
+
+def _tilt_correction_from_info(info: str) -> str:
+    m = _INFO_TILT_CORRECTION_RE.search(info or "")
+    if not m:
+        return "-1"
+    return _INFO_CODE_TO_MAGIC_TILT.get(m.group(1), "-1")
+
+
+def _mean_tilt_correction(mean: AniMeanTensor) -> str:
+    """`mean.tilt_correction` (colonne dediee, .pmagani ecrit apres
+    l'ajout de ce champ - voir AniMeanTensor.__doc__) en priorite ; repli
+    sur le texte libre `info` (`_tilt_correction_from_info`) pour un
+    fichier plus ancien qui ne l'a jamais eue - demande explicite
+    utilisateur ("oui ajouter une colonne avant info")."""
+    if mean.tilt_correction:
+        return _INFO_CODE_TO_MAGIC_TILT.get(mean.tilt_correction.strip(), "-1")
+    return _tilt_correction_from_info(mean.info)
+
+
+def anisotropy_site_magic_fields(mean: AniMeanTensor) -> Dict[str, str]:
+    k1, k2, k3 = mean.k1, mean.k2, mean.k3
+    aniso_type, _method_codes = _ANISO_MAGIC_INFO.get(mean.code2, ("AMS", "LP-X"))
+
+    # aniso_perc/aniso_total/aniso_ll/aniso_ff/aniso_vg/aniso_fl : formules
+    # officielles (MagIC-data-model.txt) - PAS deja sur AniMeanTensor
+    # (seuls P/T/L/F/Pprim - Jelinek - y sont stockes), memes formules que
+    # AMS_Py.ams_stats.magic_site_aniso_fields.
+    total_k = k1 + k2 + k3
+    aniso_perc = 100.0 * (k1 - k3) / total_k if total_k else 0.0
+    mean_k = total_k / 3.0 if total_k else 0.0
+    aniso_total = 100.0 * (k1 - k3) / mean_k if mean_k else 0.0
+    aniso_ll = math.log(k1 / k2) if k2 else 0.0
+    aniso_ff = math.log(k2 / k3) if k3 else 0.0
+    aniso_vg = math.degrees(math.asin(math.sqrt((k2 - k3) / (k1 - k3)))) if (k1 - k3) else 0.0
+    aniso_fl = (mean.F / mean.L) if (mean.L and mean.F is not None) else 0.0
+
+    dec = (mean.dec1, mean.dec2, mean.dec3)
+    inc = (mean.inc1, mean.inc2, mean.inc3)
+    k = (mean.k1, mean.k2, mean.k3)
+    # alpha_major(axis N)=alpha1_N (demi-grand axe, vers l'axe j - "eta"),
+    # alpha_minor(axis N)=alpha2_N (demi-petit axe, vers l'axe k - "zeta") -
+    # voir AniMeanTensor.__doc__ ; eta/zeta pointent vers les DEUX AUTRES
+    # axes propres eux-memes (comme pmagpy.ipmag), pas une orientation
+    # d'ellipse recalculee - meme simplification qu'AMS_Py, meme ecart
+    # documente avec le formalisme par paire e12/e13/e23 de Hext (1963).
+    alpha_major = (mean.alpha1_1, mean.alpha1_2, mean.alpha1_3)
+    alpha_minor = (mean.alpha2_1, mean.alpha2_2, mean.alpha2_3)
+
+    def aniso_v(i: int, j: int, kk: int) -> str:
+        return ":".join(str(v) for v in [
+            k[i], dec[i], inc[i], "eta/zeta",
+            dec[j], inc[j], alpha_major[i],
+            dec[kk], inc[kk], alpha_minor[i],
+        ])
+
+    fields = {
+        "aniso_type": aniso_type,
+        "aniso_tilt_correction": _mean_tilt_correction(mean),
+        "aniso_v1": aniso_v(0, 1, 2),
+        "aniso_v2": aniso_v(1, 0, 2),
+        "aniso_v3": aniso_v(2, 0, 1),
+        "aniso_perc": f"{aniso_perc:.4f}",
+        "aniso_total": f"{aniso_total:.4f}",
+        "aniso_ll": f"{aniso_ll:.6f}",
+        "aniso_ff": f"{aniso_ff:.6f}",
+        "aniso_vg": f"{aniso_vg:.4f}",
+        "aniso_fl": f"{aniso_fl:.6f}",
+    }
+    if mean.P is not None:
+        fields["aniso_p"] = f"{mean.P:.6f}"
+    if mean.Pprim is not None:
+        fields["aniso_pp"] = f"{mean.Pprim:.6f}"
+    if mean.T is not None:
+        fields["aniso_t"] = f"{mean.T:.6f}"
+    if mean.L is not None:
+        fields["aniso_l"] = f"{mean.L:.6f}"
+    if mean.F is not None:
+        fields["aniso_f"] = f"{mean.F:.6f}"
+    return fields
 
 # Colonnes MagIC v3 (table "specimens", groupe paleointensite) construites
 # depuis UNE ligne .pmagint (voir paleointensity.read_pmagint) - demande
@@ -519,7 +903,7 @@ def _dir_rows_for_specimen(ech: SelectedSample, results: List[FitResult]) -> Lis
         elif r.cat1 == "s":
             comp = "Blanket"
         else:
-            comp = f"ChRM_{r.numcomp}"
+            comp = _comp_name(r.component)
 
         base_codes = []
         if r.cat1 == "L" and r.orig == "o":
@@ -582,6 +966,11 @@ def build_specimens_rows(
     d'anisotropie au niveau du fichier specimens (prendre les A0)")."""
     rows = []
     for ech in samples:
+        # Porteur de metadonnees de site sans vraie mesure - voir la meme
+        # garde dans build_samples_rows (un nom de specimen vide est
+        # invalide pour specimens.txt).
+        if not ech.id.strip() and not ech.mesures:
+            continue
         azimuth = ech.caz - 90.0
         if azimuth < 0.0:
             azimuth += 360.0
@@ -1014,7 +1403,7 @@ def build_measurements_rows(
 
             row = [
                 "This study", lab_analysts, ech.id, f"{ech.id}_Rem_Mag",
-                "Rennes_Pmag_Starmac", "", f"{counter}-{ech.id}", "g", "u",
+                "STARpaleomag_Py", "", f"{counter}-{ech.id}", "g", "u",
                 str(j + 1),
                 _num(temp, 1) if temp else "",
                 _num(af_field, 6) if af_field else "",
@@ -1046,6 +1435,24 @@ class MagicExportResult:
 
 
 def _write_tsv(path: str, table_name: str, header: List[str], rows: List[List[str]]) -> None:
+    # Colonnes ENTIEREMENT vides sur TOUTES les lignes (ex. aucune donnee
+    # de paleointensite dans tout l'export) supprimees avant ecriture -
+    # demande explicite utilisateur ("est-ce possible d'éviter les
+    # colonnes vides, par exemple si il n'y a pas de paleointensité,
+    # éviter ces colonnes") : les en-tetes (_SITES_HEADER/_SPECIMENS_
+    # HEADER/...) listent le SUR-ENSEMBLE de colonnes possibles (int_*/
+    # aniso_*/vgp_*...), la plupart des exports n'en utilisant qu'un
+    # sous-ensemble - une colonne ecrite alors qu'AUCUNE ligne ne la
+    # renseigne n'ajoute aucune information, juste du bruit. Gardee des
+    # qu'AU MOINS une ligne la renseigne (une valeur ponctuelle, meme
+    # rare, reste une vraie donnee - jamais retiree).
+    if rows:
+        keep = [i for i in range(len(header)) if any(str(row[i]).strip() for row in rows)]
+    else:
+        keep = list(range(len(header)))
+    if len(keep) != len(header):
+        header = [header[i] for i in keep]
+        rows = [[row[i] for i in keep] for row in rows]
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(f"tab delimited\t{table_name}\n")
         f.write("\t".join(header) + "\n")
@@ -1063,6 +1470,8 @@ def export_to_magic(
     anisotropy_skip: Optional[set] = None,
     pmagint_rows: Optional[Dict[str, Dict[str, str]]] = None,
     aniso_tensors: Optional[Dict[str, AniTensor]] = None,
+    aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
+    site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> MagicExportResult:
     """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
     les resultats de paleointensite deja archives dans .pmagint
@@ -1077,7 +1486,12 @@ def export_to_magic(
     deja calcule, voir calcul.read_ani_tensor) : meme principe, colonnes
     aniso_s/aniso_ftest* - demande explicite utilisateur ("il manque aussi
     les données d'anisotropie au niveau du fichier specimens (prendre les
-    A0)").
+    A0)"). `aniso_mean_tensors` (site -> AniMeanTensor 'A0' deja calcule,
+    voir calcul.read_ani_mean_tensor) : meme principe au niveau SITE
+    plutot que specimen, colonnes aniso_v1/v2/v3/aniso_p... dans
+    sites.txt - demande explicite utilisateur ("l'exportation de l'AMS
+    (niveau specimen et sites). Les données d'AMS vont aussi dans les
+    fichiers sites.txt et specimens.txt").
     `samples` est trie par (magic_site, magic_sample, id) avant traitement
     - voir l'ecart documente en tete de module."""
     ordered = sorted(
@@ -1087,7 +1501,8 @@ def export_to_magic(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    sites_rows = build_sites_rows(ordered, results)
+    sites_rows = build_sites_rows(
+        ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors)
     locations_rows = build_locations_rows(ordered, continent_ocean, country, region)
     samples_rows = build_samples_rows(ordered)
     specimens_rows = build_specimens_rows(

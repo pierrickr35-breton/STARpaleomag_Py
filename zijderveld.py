@@ -189,6 +189,19 @@ def draw_zijderveld(
         if dt and dt not in demag_types_seen:
             demag_types_seen.append(dt)
 
+    if not n_vals:
+        # Rien a tracer (ex. un "echantillon" dont TOUTES les mesures sont
+        # une acquisition d'IRM - kind 'I'/'D_IRM' des le premier run,
+        # donc exclues plus haut - il n'y a alors aucune desaimantation de
+        # NRM a projeter). Le Fortran d'origine n'a jamais ce cas (zijder2
+        # n'est appele que pour des echantillons demagnetises) ; ici on
+        # l'evite juste (plutot qu'un crash sur le zip/unpack ci-dessous)
+        # en affichant un message a la place du diagramme - demande
+        # explicite utilisateur : "it seems that the zijderveld cannot be
+        # plotted... can you just skip the sample".
+        ctx.plottxt(-4.0, 0.0, 0.35, f"{ech.id}: no NRM demagnetization data to plot")
+        return
+
     # Bascule automatique N<->E (equivalent iorzij==0 : itest1)
     xm, xn = max(n_vals + [0.0]), min(n_vals + [0.0])
     ym, yn = max(e_vals + [0.0]), min(e_vals + [0.0])
@@ -391,7 +404,33 @@ def draw_zijderveld(
         ctx.plot(0.0, 0.0, -4)
         ctx.plot(6.0, 14.0, -3)
         r_mini = draw_stereo_net(ctx, orientation, dimster=dimster, show_orient_label=True)
-        draw_stereo_measurements(ctx, [ech], r_mini, orientation, point_size=0.18 * dimster / 10.0)
+        # Points BLEUS pour les etapes effectivement utilisees par
+        # l'ajustement (matching_fits, deja filtre plus haut sur
+        # fit.id==ech.id) - demande explicite utilisateur ("to identify
+        # the data used in the fit... change the color to blue on the
+        # stereo just to highlight the points used in the calculation.
+        # Not necessary for the zijderveld but useful for the stereo") :
+        # PAS applique au Zijderveld lui-meme (deja distingue par son
+        # propre segment rouge/vert superpose, voir plus haut dans cette
+        # fonction).
+        highlight_ranges = [(fit.step_first, fit.step_last) for fit in matching_fits]
+        draw_stereo_measurements(
+            ctx, [ech], r_mini, orientation, point_size=0.18 * dimster / 10.0,
+            highlight_ranges=highlight_ranges,
+        )
+        # Resultat (point pour une ligne, grand cercle pour un plan) EN
+        # PLUS des donnees brutes, sur ce meme mini-stereo - demande
+        # explicite utilisateur ("I do not understand why the stereo is
+        # still on the right. The routine with the zijder and stereo
+        # above the zijder already exist") : plutot que le panneau
+        # separe "Stereo Results" a cote du Zijderveld (build_
+        # zijderveld_stereo_results_figure, qui forcait une figure large
+        # a 2 panneaux), reutilise ce mini-stereo INTEGRE (deja au-dessus
+        # du Zijderveld, un seul panneau, donc jamais de fenetre agrandie
+        # en largeur) - `matching_fits` deja filtre plus haut sur
+        # `fit.id == ech.id`.
+        if matching_fits:
+            draw_stereo_results(ctx, matching_fits, r_mini, orientation, point_size=0.18 * dimster / 10.0)
 
 
 def build_zijderveld_figure(
@@ -486,6 +525,17 @@ def build_zijderveld_stereo_results_figure(
     dimster = 12.0 * 1.5
     point_size = (0.18 * dimster) / 10.0
     r = draw_stereo_net(ctx_ster, orientation, dimster=dimster)
+    # Donnees individuelles (chaque etape de desaimantation, reliees par
+    # des arcs) EN PLUS du resultat (point pour une ligne, grand cercle
+    # pour un plan) - demande explicite utilisateur ("the same plot that
+    # for the zijder + stereo above and the individual data on the
+    # stereo as well as the result whether a line or a plane") : avant ce
+    # changement, ce panneau (contrairement au petit encart stereo integre
+    # de la vue Zijderveld seule, draw_zijderveld/show_stereo=True)
+    # affichait UNIQUEMENT le resultat, jamais les points de mesure bruts.
+    # Trace en premier pour que le resultat (newpen plus epais) reste
+    # visible par-dessus.
+    draw_stereo_measurements(ctx_ster, [ech], r, orientation, point_size=point_size)
     draw_stereo_results(ctx_ster, results, r, orientation, point_size=point_size, nbech=1)
     ax_ster.relim()
     ax_ster.autoscale_view()

@@ -26,7 +26,7 @@ dans ce port) :
     # mean directions
     layer  id  dec  inc  alpha95  n  tilt_correction  symbol  color  size  info
     # VGP
-    site  id  paleolon  paleolat  dp  dm  n  a95  tilt_correction  symbol  color  size  info
+    site  id  paleolon  paleolat  dp  dm  n  a95  site_lat  site_lon  tilt_correction  symbol  color  size  info
 
 - Bloc "individual directions" : UNE ligne par resultat de specimen
   (cat1 in L/P/f/s), `type` d(irection)/g(rand cercle) selon cat1=='P' ou
@@ -39,7 +39,17 @@ dans ce port) :
 - Bloc "VGP" : UNE ligne par moyenne de site QUI PORTE un VGP (par4/par5
   renseignes) - paleolon/paleolat, pas dec/inc (point GEOGRAPHIQUE, jamais
   une direction de stereonet - voir StereoUtils_Py/stereo_pmagpy.
-  plot_vgp_project).
+  plot_vgp_project). `site_lat`/`site_lon` (r.lat/r.rlong - coordonnees du
+  SITE, PAS du pole) AJOUTES - demande explicite utilisateur ("is it
+  possible to plot the VGP with their dp,dm ellipse") : la vraie ellipse
+  dp/dm (asymetrique, orientee le long du meridien site->pole - voir
+  Butler 1992 fig. A.2) a besoin de la position du SITE pour calculer
+  cette orientation (angle de rotation via la loi des cosinus spherique
+  sur le triangle site/pole nord/paleopole) - PAS calculable depuis le
+  seul VGP. Sans site connu (0.0/0.0, sentinelle documentee par
+  calcul.build_site_mean_result quand le site n'a pas de lat/lon), voir
+  StereoUtils_Py/stereo_pmagpy.plot_vgp_project pour le repli sur un
+  simple cercle de rayon p95, deja en place avant cet ajout.
 
 `tilt_correction` : 0/100 (in-situ/apres pendage complet), MEME convention
 MagIC dir_tilt_correction que calcul._ORIENT_TO_FILE_CODE (colonne "IS/TC"
@@ -78,7 +88,7 @@ _BLOCK_HEADERS = {
     "means": ["layer", "id", "dec", "inc", "alpha95", "n",
               "tilt_correction", "symbol", "color", "size", "info"],
     "vgp": ["site", "id", "paleolon", "paleolat", "dp", "dm", "n", "a95",
-            "tilt_correction", "symbol", "color", "size", "info"],
+            "site_lat", "site_lon", "tilt_correction", "symbol", "color", "size", "info"],
 }
 
 
@@ -132,6 +142,7 @@ def export_stereo_project(results: List[FitResult], out_path: str, orientation: 
             vgp_rows.append([
                 site, site, f"{r.par5:.1f}", f"{r.par4:.1f}",  # paleolon=par5, paleolat=par4
                 f"{vgp_dp:.1f}", f"{vgp_dm:.1f}", str(r.nb), f"{r.mad:.1f}",
+                f"{r.lat:.4f}", f"{r.rlong:.4f}",  # site_lat/site_lon - voir docstring module
                 tilt, "c", "blue", "0.50", "",
             ])
 

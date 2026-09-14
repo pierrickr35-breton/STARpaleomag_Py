@@ -9,6 +9,7 @@ Travaille sur les SelectedSample/Measurement de selection.py.
 
 import math
 import os
+import re
 import string
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
@@ -16,8 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from selection import (
-    Measurement, SelectedSample, apply_orientation, polere, select_samples, normalized_intensity,
-    _fmt_step,
+    Measurement, SelectedSample, apply_orientation, corpen, polere, select_samples,
+    normalized_intensity, _fmt_step,
 )
 from testlect import Pmag
 
@@ -600,7 +601,26 @@ def planar_fit(points: List[Tuple[float, float, float]], normalize: bool = True)
     (grand cercle) passant par les points fournis. `normalize` : equivalent
     de `norm=='o'` (points ramenes sur la sphere unite avant l'ACP - option
     par defaut de `ajusplans`). Retourne None si MAD>25 (equivalent
-    itestplan=-1)."""
+    itestplan=-1).
+
+    BUG REEL corrige ici (demande explicite utilisateur : "there is a
+    problem in the calculation of the great circles... seems a problem in
+    calculation of the fit") : la matrice de dispersion etait calculee
+    apres avoir SOUSTRAIT LA MOYENNE des points (`diffs = pts - center`),
+    ce qui ajuste le plan le plus proche du NUAGE DE POINTS LUI-MEME (son
+    propre centroide) - correct pour un plan 3D generique, mais FAUX pour
+    un ajustement de grand cercle a la Kirschvink [1980] : un grand
+    cercle est par definition un plan passant par le CENTRE de la sphere
+    (l'origine), pas par le centroide des points de desaimantation
+    (qui n'a aucune raison de coincider avec l'origine, surtout sur un
+    arc partiel/asymetrique du cercle - cas frequent en donnees reelles).
+    Verifie sur 102 plans reels (pmagCARF.r, Arriagada et al. 2006) :
+    l'ancienne formule donnait un pole a plus de 15 deg. du veritable
+    grand cercle (ecart median au pole de 90 deg. : 19.7 deg., vs 1.9 deg.
+    pour le meme plan tel qu'archive par le Fortran d'origine) pour 50 des
+    102 plans ; retirer le centrage (utiliser directement `pts.T @ pts`,
+    sans soustraire `pts.mean(axis=0)`) ramene l'ecart median a 1.7 deg.,
+    conforme a l'archive Fortran."""
     pts = np.asarray(points, dtype=float)
     n = len(pts)
     if n == 0:
@@ -610,9 +630,7 @@ def planar_fit(points: List[Tuple[float, float, float]], normalize: bool = True)
         norms[norms == 0] = 1.0
         pts = pts / norms[:, None]
 
-    center = pts.mean(axis=0)
-    diffs = pts - center
-    cov = diffs.T @ diffs
+    cov = pts.T @ pts
 
     eigvals, eigvecs = np.linalg.eigh(cov)
     order = np.argsort(eigvals)[::-1]
@@ -836,30 +854,19 @@ def _correct_dec_inc(res: FitResult, orientation: int) -> Tuple[float, float]:
     stereo.py:_correct_dec_inc pour eviter un import circulaire (stereo.py
     importe deja FitResult depuis ce module).
 
-    Bug corrige (signale par l'utilisateur sur des moyennes de site
-    importees de MagIC - sites.txt, deja calculees en In-Situ/apres
-    pendage via dir_tilt_correction : "les moyennes de site ne se
-    calculent pas en coordonnees echantillons mais en In situ et/ou
-    bedding correction") : un resultat "mean:" est DEJA fige dans UNE
-    orientation precise (par3_mean : 1=echantillon/2=in-situ/3=apres
-    pendage), pas dans le repere echantillon brut comme un resultat L/P -
-    STARpaleomag_Py n'a pas les directions specimen individuelles pour le
-    reprojeter dans une AUTRE orientation (une moyenne de Fisher ne
-    s'inverse pas comme une simple rotation, contrairement a un fit
-    L/P individuel - voir recompute_fit_geometry, qui resout le meme
-    genre de probleme mais UNIQUEMENT parce qu'il peut retrouver le
-    specimen d'origine). Sans ce garde-fou, `apply_orientation` utilisait
-    cin=caz=0.0 (jamais renseignes sur une moyenne) et `corfor`
-    introduisait une rotation parasite (~90 deg, meme symptome que le bug
-    deja corrige pour les resultats individuels charges depuis .pmagres) -
-    et meme avec orientation=1 (repere echantillon, un no-op), la valeur
-    stockee etait affichee SANS AVERTIR qu'elle est en realite dans une
-    AUTRE orientation. Retourne desormais TOUJOURS la valeur stockee
-    telle quelle pour un "mean:", quelle que soit `orientation` demandee -
-    voir list_results pour l'etiquette (Sa)/(IS)/(TC) AFFICHEE, qui
-    reflete `par3_mean` (l'orientation REELLE de la moyenne), pas la
-    colonne demandee, pour ne pas laisser croire a une reprojection qui
-    n'a pas lieu."""
+    Un resultat "mean:" est DEJA fige dans UNE orientation precise
+    (par3_mean : 1=echantillon/2=in-situ/3=apres pendage) - retourne
+    TOUJOURS la valeur stockee TELLE QUELLE pour un "mean:", quelle que
+    soit `orientation` demandee. Une tentative anterieure de reprojeter
+    une moyenne IS en TC (et reciproquement) via le pendage/strike du
+    site a ete EXPLICITEMENT ECARTEE - demande utilisateur ("this is not
+    exactly what is needed... only the means in IS are plotted if you
+    are in IS and only the selected TC means if you are in TC") : le
+    comportement voulu n'est PAS une reprojection mais un FILTRAGE - une
+    moyenne archivee dans une orientation ne doit etre selectionnee/
+    tracee QUE quand cette meme orientation est active (voir
+    _load_mean_results et draw_stereo_results), jamais recalculee dans
+    une autre."""
     if res.id[:5] == "mean:":
         return res.dec, res.inc
     incr, decr = math.radians(res.inc), math.radians(res.dec)
@@ -941,15 +948,51 @@ def dir_to_vgp(dec: float, inc: float, site_lat: float, site_lon: float) -> Tupl
     return math.degrees(plat), math.degrees(plon)
 
 
-def site_lat_lon_from_donnees(site: str, donnees) -> Optional[Tuple[float, float]]:
-    """Latitude/longitude du site, lues sur N'IMPORTE QUEL specimen de
-    `donnees` dont l'id commence par `site` (meme principe que
-    _mean_site_strike_dip - une propriete de site, identique pour tous ses
-    specimens). Retourne None si `donnees` n'est pas fourni ou si aucun
-    specimen du site n'y est trouve."""
+def _find_site_specimen(site: str, donnees):
+    """N'IMPORTE QUEL specimen de `donnees` appartenant a `site` - d'abord
+    par `magic_site` (le champ 'site:' du .prmag, EDITABLE independamment
+    de l'id via "Complete sample information" en mode site avec
+    renommage - voir complete_sample_info.py), et SEULEMENT en repli par
+    id.startswith(site) (ancienne convention "6 premiers caracteres de
+    l'id = site", plus fiable qu'un magic_site jamais renseigne).
+
+    BUG REEL corrige ici (demande explicite utilisateur, apres avoir
+    renomme des sites - "in the calculation of a mean for a site, it does
+    not use the information from the site") : magic_site est la source de
+    verite du nom de site (peut differer de l'id, delibarement JAMAIS
+    renomme lui-meme, voir complete_sample_info.py - "specimen ID kept
+    untouched (site is just metadata, not derived from the ID)") ; ne
+    chercher que par `id.startswith(site)` faisait echouer TOUTE recherche
+    de lat/lon/pendage de site des qu'un site avait ete renomme (ex. ancien
+    nom de campagne "95CH43" renomme en "P10" : aucun id de specimen ne
+    commence plus par "P10", l'id garde son ancien prefixe) - le VGP
+    archive retombait alors silencieusement sur 0.0/0.0."""
     if not donnees:
         return None
-    ech = next((s for s in donnees if s.id.startswith(site)), None)
+    ech = next((s for s in donnees if getattr(s, "magic_site", "") == site), None)
+    if ech is not None:
+        return ech
+    return next((s for s in donnees if s.id.startswith(site)), None)
+
+
+def site_of_result(res: FitResult, donnees) -> str:
+    """Nom de site d'un resultat SPECIMEN (pas "mean:") : `magic_site` du
+    specimen correspondant dans `donnees` (source de verite, voir
+    _find_site_specimen) si trouve, sinon repli sur les 6 premiers
+    caracteres de `res.id` (ancienne convention, comportement inchange si
+    `donnees` n'est pas fourni ou si le specimen n'y est pas trouve)."""
+    ech = next((s for s in (donnees or []) if s.id == res.id), None)
+    site = getattr(ech, "magic_site", "") if ech is not None else ""
+    return site or res.id[:6]
+
+
+def site_lat_lon_from_donnees(site: str, donnees) -> Optional[Tuple[float, float]]:
+    """Latitude/longitude du site, lues sur N'IMPORTE QUEL specimen de
+    `donnees` appartenant a ce site (voir _find_site_specimen - une
+    propriete de site, identique pour tous ses specimens). Retourne None
+    si `donnees` n'est pas fourni ou si aucun specimen du site n'y est
+    trouve."""
+    ech = _find_site_specimen(site, donnees)
     if ech is None:
         return None
     return ech.lat, ech.rlong
@@ -1056,14 +1099,12 @@ def mean_components(r: FitResult, results: List[FitResult]) -> List[FitResult]:
 def _mean_site_strike_dip(r: FitResult, donnees) -> Optional[Tuple[float, float]]:
     """Equivalent de la boucle `do inech=1,nb_ech ... if(tr(i).id(7:12)==
     pmag(inech).id(1:6))` : strike/pendage du site, lus sur N'IMPORTE
-    QUEL specimen de `donnees` dont l'id commence par le nom du site
-    (le pendage est une propriete du site, identique pour tous ses
-    specimens). Retourne None si `donnees` n'est pas fourni ou si aucun
-    specimen du site n'y est trouve."""
-    if not donnees:
-        return None
+    QUEL specimen de `donnees` appartenant a ce site (voir
+    _find_site_specimen - le pendage est une propriete du site, identique
+    pour tous ses specimens). Retourne None si `donnees` n'est pas fourni
+    ou si aucun specimen du site n'y est trouve."""
     site = _mean_site_name(r.id)
-    ech = next((s for s in donnees if s.id.startswith(site)), None)
+    ech = _find_site_specimen(site, donnees)
     if ech is None:
         return None
     return ech.str_, ech.dip
@@ -1119,11 +1160,15 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
     for i, r in enumerate(results, start=1):
         dec, inc = _correct_dec_inc(r, orientation)
         if r.id[:5] == "mean:":
+            # "2/5 (line/plane)" - demande explicite utilisateur ("?/?
+            # 2/5 replace by 2/5 (line/plane)"), remplace l'ancien
+            # "L  2  P  5" (illisible une fois le vrai bug de lecture
+            # corrige - voir _format_mean_line).
             if r.n_lines >= 0:
-                lp_txt = f"L{r.n_lines:3d}  P{r.n_planes:3d}"
+                lp_txt = f"{r.n_lines}/{r.n_planes} (line/plane)"
             else:
                 counts = _mean_line_plane_counts(r, results)
-                lp_txt = f"L{counts[0]:3d}  P{counts[1]:3d}" if counts else "L  ?  P  ?"
+                lp_txt = f"{counts[0]}/{counts[1]} (line/plane)" if counts else "?/? (line/plane)"
             e95 = _e95(r.mad, inc)
             # dp/dm : la valeur ARCHIVEE (voir dp_dm_from_a95) si presente,
             # sinon calculee a la volee depuis a95/inc (meme repli que e95
@@ -1135,6 +1180,10 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
             )
             strdip = _mean_site_strike_dip(r, donnees)
             strdip_txt = f"str={strdip[0]:5.1f} dip={strdip[1]:4.1f}" if strdip else "str=?  dip=?"
+            # (Sa)/(IS)/(TC) AFFICHEE : celle de l'orientation ARCHIVEE
+            # (r.par3_mean), PAS celle demandee en tete de tableau (voir
+            # _correct_dec_inc - une moyenne n'est jamais reprojetee, la
+            # valeur stockee est toujours celle affichee).
             own_tag = _ORIENT_MODE_TAG.get(int(r.par3_mean), "?")
             # Ligne separee pour [codes:...] (demande explicite utilisateur,
             # "when you list the results with a mean... a linefeed might be
@@ -1144,7 +1193,7 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
             # (site a beaucoup de specimens) illisibles sur une seule ligne
             # sans retour a la ligne, la fenetre Text ayant wrap="none".
             lines.append(
-                f"{i:4d}: {r.id:<13s}[{r.component or 'A'}]{r.numcomp:4d}   {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
+                f"{i:4d}: {r.id:<13s}[{r.component or 'A'}]    {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
                 f"  {lp_txt}  {r.nb:4d}  {dec:6.1f} {inc:6.1f} ({own_tag})  a95={r.mad:5.1f} e95={e95:5.1f}"
                 f"  k={r.tx[0]:8.1f}  lat={r.lat:9.5f} lon={r.rlong:9.5f}"
                 f"  VGP=({r.par4:6.1f},{r.par5:6.1f})  dp/dm=({dp_show:.1f}/{dm_show:.1f})  {strdip_txt}\n"
@@ -1152,7 +1201,7 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
             )
         else:
             lines.append(
-                f"{i:4d}: {r.id:<13s}{r.numcomp:5d}   {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
+                f"{i:4d}: {r.id:<13s}[{r.component or 'A'}]    {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
                 f"  {r.step_first:5.0f}  {r.step_last:5.0f}  {r.nb:4d}  {dec:6.1f} {inc:6.1f}  {r.mad:5.1f}"
             )
     return "\n".join(lines)
@@ -1287,16 +1336,29 @@ _MEAN_HEADER = "#site mean results"
 # variable, rien apres elle sur la ligne).
 _SPECIMEN_FIELDS = [
     ("specimen", 12), ("step1", 7), ("step2", 7), ("L/P", 5), ("anc/not", 8),
-    ("demag", 7), ("comp", 5), ("n", 6), ("dec", 7), ("inc", 7),
-    ("mad", 7), ("magcomp", 8), ("random", 8),
+    ("demag", 7), ("n", 6), ("dec", 7), ("inc", 7),
+    ("mad", 7), ("component", 10), ("random", 8),
 ]
 _MEAN_FIELDS = [
     ("site", 9), ("type", 6), ("n", 5), ("dec", 7), ("inc", 7), ("a95", 7),
     ("k", 9), ("IS/TC", 7), ("lat_site", 12), ("long_site", 12),
     ("VGP_lat", 8), ("VGP_lon", 8), ("VGP_dp", 7), ("VGP_dm", 7),
-    ("magcomp", 8), ("L/P", 8),
+    ("component", 10), ("L/P", 8),
     ("included_samples", 0),
 ]
+# "comp" (numcomp, 1-9 - numero d'ajustement PCA, sans aucun role dans le
+# calcul - voir fit_line/fit_plane, purement une etiquette) RETIRE de
+# _SPECIMEN_FIELDS/du fichier ecrit - demande explicite utilisateur
+# ("autant partir sur un format plus etabli et retirer le numcomp"),
+# suite a "there is an ambiguity between the component (number and
+# letter)... it will be confusing for new user otherwise". "magcomp"
+# renomme "component" (au lieu d'une abreviation cryptique) - plus besoin
+# de le distinguer visuellement d'un "comp" numerique qui n'existe plus.
+# `FitResult.numcomp` reste un champ INTERNE (fit_lines_auto : 1=ancre/
+# 2=non-ancre, redo files, diagnostics) - simplement plus ecrit dans
+# .pmagres. Retro-compatibilite en LECTURE sur 3 formats possibles (voir
+# _parse_specimen_line) : le plus recent (12 colonnes, sans comp, avec
+# component) est ecrit desormais ; deux anciens formats restent lisibles.
 
 # "anc"/"not" (anchored/not-anchored) au lieu de 'o'/'n' (francais
 # origine/non) dans la colonne "anc/not" du fichier .pmagres - demande
@@ -1327,9 +1389,24 @@ def _parse_anchor_token(token: str) -> str:
 
 
 def _row(fields: List[Tuple[str, int]], values: List[str]) -> str:
+    """BUG REEL corrige ici (trouve en testant import_published_means avec
+    un nom de site de 9 caracteres, la largeur nominale de la colonne
+    'site' - voir _MEAN_FIELDS) : `value.ljust(width)` ne separe PAS deux
+    colonnes des que `value` atteint ou depasse `width` (ex. site="J0123456"
+    a 8 caracteres, colonne 'site' large de 9 -> aucun padding ajoute,
+    "J0123456" colle directement a la colonne suivante) - la ligne ecrite
+    a alors un token de MOINS une fois relue par whitespace-split (meme
+    categorie de bug que la colonne 'liste' vide - voir _format_mean_line).
+    Garantit desormais au moins UN espace separateur apres chaque colonne
+    a largeur fixe, meme si la valeur deborde de sa largeur nominale."""
     parts = []
     for (_label, width), value in zip(fields, values):
-        parts.append(value.ljust(width) if width else value)
+        if not width:
+            parts.append(value)
+        elif len(value) < width:
+            parts.append(value.ljust(width))
+        else:
+            parts.append(value + " ")
     return "".join(parts).rstrip()
 
 
@@ -1356,7 +1433,7 @@ def _format_specimen_line(res: FitResult) -> str:
     return _row(_SPECIMEN_FIELDS, [
         res.id, _fmt1(res.step_first), _fmt1(res.step_last),
         res.cat1, _ANCHOR_TO_FILE_CODE.get(res.orig, res.orig), res.demag,
-        str(res.numcomp), str(res.nb),
+        str(res.nb),
         _fmt1(res.dec), _fmt1(res.inc), _fmt1(res.mad),
         (res.component or "A").strip(), str(res.c),
     ])
@@ -1365,13 +1442,31 @@ def _format_specimen_line(res: FitResult) -> str:
 def _format_mean_line(res: FitResult) -> str:
     tilt_code = _ORIENT_TO_FILE_CODE.get(res.par3_mean, _fmt1(res.par3_mean, 0))
     lp_token = f"{res.n_lines}/{res.n_planes}" if res.n_lines >= 0 else "?/?"
+    # BUG REEL corrige ici (signale par l'utilisateur, "?/?     2/5 replace
+    # by 2/5" - le L/P se retrouvait faux/manquant a la relecture) : `liste`
+    # (derniere colonne, largeur 0 - voir _MEAN_FIELDS) etait ecrite TELLE
+    # QUELLE, y compris vide ("" si aucun `contributing` connu - ex. une
+    # moyenne construite depuis une table externe, sans resultats
+    # individuels a combiner). `_row` fait un `.rstrip()` final sur la
+    # ligne entiere : une derniere colonne vide efface alors AUSSI le
+    # remplissage (largeur 8) de `lp_token` juste avant - la ligne ecrite
+    # a donc UN token de MOINS que prevu. `_parse_mean_line` (retro-
+    # compatibilite sur le NOMBRE de colonnes) retombe alors sur la
+    # branche a 16 colonnes au lieu de 17 : lp_token y est FIGE a "?/?"
+    # (jamais relu depuis le fichier dans cette branche) et le VRAI
+    # lp_token ecrit ("6/0" par ex.) est mal interprete comme `liste`.
+    # Corrige a la source en ne laissant JAMAIS `liste` vide en ecriture -
+    # "codes:" (prefixe vide, deja ce que mean_components() interprete
+    # comme "aucun composant individuel connu") garantit une derniere
+    # colonne toujours non-vide, donc jamais absorbee par le rstrip.
+    liste = res.liste or "codes:"
     return _row(_MEAN_FIELDS, [
         _mean_site_name(res.id), "Fi", str(res.nb),
         _fmt1(res.dec), _fmt1(res.inc), _fmt1(res.mad), _fmt1(res.tx[0]),
         tilt_code, f"{res.lat:.5f}", f"{res.rlong:.5f}",
         _fmt1(res.par4), _fmt1(res.par5),
         _fmt1(res.vgp_dp), _fmt1(res.vgp_dm),
-        (res.component or "A").strip(), lp_token, res.liste,
+        (res.component or "A").strip(), lp_token, liste,
     ])
 
 
@@ -1383,26 +1478,154 @@ def _format_result_line(res: FitResult) -> str:
     return _format_specimen_line(res)
 
 
+_KNOWN_CAT1_LETTERS = ("L", "P", "f", "F", "s", "S")
+
+# Variante encore plus ancienne de .r decouverte sur un fichier reel
+# (pmagCARF.r, campagnes 94-98/03) : la colonne "anc/not" (index 4, voir
+# _SPECIMEN_FIELDS) est carrement ABSENTE de la ligne quand le fit n'est
+# PAS ancre (pas meme un espace-caractere, "o" est le SEUL cas ecrit) -
+# demande explicite utilisateur ("I just need a file with specimen temp1
+# temp2 ancr (o or white sspace) comp"). Ce fichier a en plus DEUX
+# colonnes numeriques (correction de pendage, jamais utilisees ailleurs -
+# le fichier .prmag porte deja bed_dip_strike) inserees avant la lettre
+# L/P, elle-meme TOUJOURS collee sans espace au nombre qui la precede
+# (ex. "11.2L", "1.3P" - artefact de largeur de colonne Fortran figee).
+# Consequence : `.split()` decale TOUS les champs a partir de l'index 3
+# d'une position variable (0, 1 ou 2 selon anc/not present ou non et la
+# largeur des colonnes de pendage) - la lecture "moderne" ci-dessus
+# retombait donc sur des valeurs n'importe quoi pour cat1/orig/demag
+# (ex. cat1='64.1' au lieu de 'L'/'P'), silencieusement (aucune
+# ValueError - ces chaines sont toutes des valeurs de type valide) : TOUS
+# les resultats du fichier reel se retrouvaient avec un cat1 hors de
+# ('L','P','f','F') et disparaissaient de `data+interpretation`
+# (afficher_visres filtre sur cat1) sans aucun message d'erreur. Detecte
+# ici en verifiant que parts[3] (cat1 attendu) est bien une des lettres
+# connues - sinon, retrouve la position reelle de L/P en cherchant le
+# token colle (`_OLD_VARIANT_LP_RE`) a partir de l'index 3."""
+_OLD_VARIANT_LP_RE = re.compile(r"^-?\d+\.\d+([LP])$")
+_OLD_VARIANT_DEMAG_LETTERS = set("DdSsFfNnIi")
+
+
+def _component_from_numcomp(numcomp: int) -> str:
+    """"A"/"B"/"C"... depuis un ANCIEN `numcomp` (1-9) - demande explicite
+    utilisateur ("I think we should update everything to the letter and
+    change the component number to letter during import of legacy") :
+    les tres vieux formats de resultats (voir _parse_specimen_line_old_
+    variant/_parse_legacy_result_line ci-dessous) n'ont JAMAIS de lettre
+    A/B/C dediee - seul `numcomp` (1-9) y distingue deja, de facto, les
+    differentes interpretations d'un meme specimen (numero d'ajustement
+    PCA, seule information disponible a l'epoque) - AVANT l'ajout du
+    champ `component` (demande explicite utilisateur separee, "when
+    there is different components of magnetizations within the same
+    site... We need to add a column component A,B,C"), tout import
+    legacy figeait `component` a "A" par defaut, perdant cette
+    distinction de fait au passage au nouveau format. UNIQUEMENT pour un
+    resultat SPECIMEN (jamais une moyenne de site - deja explicitement
+    exclu ailleurs : "I think it is best not to use the numcomp of
+    individual samples for the mean"). 1->A, 2->B, ... 9->I ; toute
+    valeur hors 1-9 retombe sur "A" plutot que produire un caractere
+    non-alphabetique."""
+    if 1 <= numcomp <= 9:
+        return chr(ord("A") + numcomp - 1)
+    return "A"
+
+
+def _parse_specimen_line_old_variant(parts: List[str]) -> Optional[FitResult]:
+    """Voir docstring de `_KNOWN_CAT1_LETTERS` ci-dessus pour le contexte -
+    retrouve L/P par recherche du token colle plutot qu'une position fixe,
+    puis avance un pointeur colonne par colonne (anc/not optionnel, demag
+    optionnel) au lieu de supposer que toutes les colonnes sont presentes.
+    `component` PAS trouvable comme telle dans ce tres vieux format (pas
+    de lettre A/B/C/... nulle part dans le fichier reel de test - cette
+    distinction n'existait probablement pas encore comme colonne dediee)
+    - DERIVEE de `numcomp` (voir _component_from_numcomp) plutot que
+    figee a "A" pour tous les resultats : demande explicite utilisateur
+    ("change the component number to letter during import of legacy").
+    `c` (juste un disambiguateur d'id, pas une donnee scientifique)
+    reprend le token numerique restant s'il y en a un, sinon vide."""
+    j = None
+    for i in range(3, len(parts)):
+        tok = parts[i]
+        if tok in ("L", "P") or _OLD_VARIANT_LP_RE.match(tok):
+            j = i
+            break
+    if j is None:
+        return None
+    lp = parts[j][-1]
+
+    ptr = j + 1
+    ancr = "n"
+    if ptr < len(parts) and parts[ptr] == "o":
+        ancr = "o"
+        ptr += 1
+    demag = ""
+    if ptr < len(parts) and len(parts[ptr]) == 1 and parts[ptr] in _OLD_VARIANT_DEMAG_LETTERS:
+        demag = parts[ptr]
+        ptr += 1
+
+    try:
+        numcomp = int(parts[ptr]); ptr += 1
+        nb = int(parts[ptr]); ptr += 1
+        dec = float(parts[ptr]); ptr += 1
+        inc = float(parts[ptr]); ptr += 1
+        mad = float(parts[ptr]); ptr += 1
+        return FitResult(
+            id=parts[0].strip(),
+            step_first=int(round(float(parts[1]))), step_last=int(round(float(parts[2]))),
+            cat1=lp, orig=ancr, demag=demag, numcomp=numcomp, nb=nb,
+            dec=dec, inc=inc, mad=mad,
+            component=_component_from_numcomp(numcomp),
+            c=(parts[ptr].strip() if ptr < len(parts) else ""),
+        )
+    except (ValueError, IndexError):
+        return None
+
+
 def _parse_specimen_line(parts: List[str]) -> Optional[FitResult]:
     if len(parts) < 12:
         return None
+    if parts[3].strip() not in _KNOWN_CAT1_LETTERS:
+        return _parse_specimen_line_old_variant(parts)
     try:
-        # "magcomp" (component A/B/C) insere avant `c` (random/anti-
-        # collision id, TOUJOURS le dernier champ - voir _next_specimen_c) :
-        # un fichier ecrit avant ce changement a 12 colonnes (c en
-        # dernier), un fichier ecrit apres en a 13 (magcomp puis c) -
-        # retro-compatible en verifiant le nombre de colonnes, comme
-        # vgp_dp/vgp_dm sur les lignes "mean:" (voir _parse_mean_line).
+        # 3 formats possibles, du plus recent au plus ancien (voir
+        # _SPECIMEN_FIELDS - "comp"/numcomp retire, "magcomp" renomme
+        # "component" - demande explicite utilisateur "autant partir sur
+        # un format plus etabli et retirer le numcomp") :
+        #   - 13 colonnes : comp ET magcomp presents (format juste avant
+        #     ce changement).
+        #   - 12 colonnes, RECENT : sans comp, avec component - parts[10]
+        #     (juste avant `c`) est une LETTRE.
+        #   - 12 colonnes, TRES ANCIEN : avec comp, sans component/
+        #     magcomp du tout - parts[10] est mad, un NOMBRE.
+        # Les deux variantes a 12 colonnes ne se distinguent PAS par leur
+        # longueur (identique) mais par le CONTENU de parts[10] - meme
+        # principe que _parse_mean_line (verifie le nombre de colonnes),
+        # pousse un cran plus loin ici car la longueur seule ne suffit
+        # plus a lever l'ambiguite.
         if len(parts) >= 13:
+            numcomp, nb_s = int(parts[6]), parts[7]
+            dec_s, inc_s, mad_s = parts[8], parts[9], parts[10]
             component, c = parts[11].strip() or "A", parts[12].strip()
         else:
-            component, c = "A", parts[11].strip()
+            try:
+                float(parts[10])
+                ancient_with_comp = True
+            except ValueError:
+                ancient_with_comp = False
+            if ancient_with_comp:
+                numcomp, nb_s = int(parts[6]), parts[7]
+                dec_s, inc_s, mad_s = parts[8], parts[9], parts[10]
+                component, c = "A", parts[11].strip()
+            else:
+                numcomp, nb_s = 1, parts[6]
+                dec_s, inc_s, mad_s = parts[7], parts[8], parts[9]
+                component, c = parts[10].strip() or "A", parts[11].strip()
         return FitResult(
             id=parts[0].strip(),
             step_first=int(round(float(parts[1]))), step_last=int(round(float(parts[2]))),
             cat1=parts[3].strip(), orig=_parse_anchor_token(parts[4]), demag=parts[5].strip(),
-            numcomp=int(parts[6]), nb=int(parts[7]),
-            dec=float(parts[8]), inc=float(parts[9]), mad=float(parts[10]),
+            numcomp=numcomp, nb=int(nb_s),
+            dec=float(dec_s), inc=float(inc_s), mad=float(mad_s),
             component=component, c=c,
         )
     except ValueError:
@@ -1589,6 +1812,109 @@ def archivres(
     return c, existing_ids
 
 
+def import_published_means(
+    pmagres_path: str, table_path: str, encoding: str = "utf-8",
+) -> Tuple[int, List[str]]:
+    """Archive des moyennes de site PUBLIEES (table externe, ex. Table 1
+    d'un papier) comme resultats "mean:" - demande explicite utilisateur
+    ("how do we fill the prmag in that case", suite a "can we have a site
+    in prmag without data?") : pour un site dont les mesures BRUTES sont
+    perdues (fichier legacy), le SEUL moyen d'obtenir un resultat "mean:"
+    exploitable (par data+interpretation, l'export MagIC - voir
+    magic_export.build_sites_rows - etc.) etait jusqu'ici soit de calculer
+    une moyenne depuis des specimens reellement charges (build_site_mean_
+    result), soit un import MagIC deja publie, soit un script ad hoc
+    (voir la conversion manuelle faite cette session pour Table 1
+    d'Arriagada et al. 2006) - generalise ici en fonctionnalite reutilisable.
+
+    Table (colonnes obligatoires 'site','orientation','dec','inc','a95',
+    'k','n' - meme lecteur que complete_sample_info._read_table_rows,
+    tabulation OU virgule auto-detectee) :
+        #site   orientation   dec   inc   a95   k   n
+        J01     IS            46.1  -55.4 7.5   80  6
+    'orientation' : IS/TC (insensible a la casse, ou directement 0/100 -
+    meme convention fichier que _FILE_CODE_TO_ORIENT). Colonnes
+    optionnelles : 'n_lines','n_planes' (colonne L/P du .pmagres, vide si
+    omises - voir _format_mean_line) ; 'component' (A/B/C..., 'A' par
+    defaut) ; 'lat','lon' (site, necessaires au calcul du VGP - VGP
+    calcule UNIQUEMENT si l'orientation est TC, meme raison que partout
+    ailleurs dans ce module : un VGP n'a de sens que depuis une direction
+    deja en repere geographique/apres correction de pendage, jamais
+    depuis de l'in-situ).
+
+    Retourne (nb_moyennes_archivees, liste_erreurs_par_ligne) - une ligne
+    en erreur (orientation non reconnue, dec/inc/a95/k/n non numeriques)
+    est SIGNALEE et IGNOREE, n'interrompt jamais l'import des autres
+    lignes."""
+    from complete_sample_info import _read_table_rows
+
+    header, rows = _read_table_rows(table_path, encoding=encoding)
+    required = ("site", "orientation", "dec", "inc", "a95", "k", "n")
+    missing = [c for c in required if c not in header]
+    if missing:
+        raise ValueError(
+            f"Table file must have columns: {', '.join(required)} (missing: {', '.join(missing)})."
+        )
+
+    orient_aliases = {
+        "is": 2.0, "insitu": 2.0, "in-situ": 2.0, "in_situ": 2.0, "0": 2.0, "2": 2.0,
+        "tc": 3.0, "tilt": 3.0, "tiltcorrected": 3.0, "tilt-corrected": 3.0,
+        "tilt_corrected": 3.0, "100": 3.0, "3": 3.0,
+    }
+
+    n_imported = 0
+    errors: List[str] = []
+    existing_ids: Optional[set] = None
+    for i, row in enumerate(rows, start=2):
+        record = dict(zip(header, row))
+
+        def col(name: str, default: str = "") -> str:
+            return record.get(name, default).strip()
+
+        site = col("site")
+        if not site:
+            continue
+        orient_key = col("orientation").lower().replace(" ", "").replace("_", "").replace("-", "")
+        orientation = orient_aliases.get(orient_key)
+        if orientation is None:
+            errors.append(f"line {i} (site {site}): unrecognized orientation "
+                           f"'{col('orientation')}' (use IS or TC)")
+            continue
+        try:
+            dec, inc = float(col("dec")), float(col("inc"))
+            a95, k = float(col("a95")), float(col("k"))
+            n = int(float(col("n")))
+        except ValueError:
+            errors.append(f"line {i} (site {site}): dec/inc/a95/k/n must be numeric")
+            continue
+
+        n_lines = int(float(col("n_lines"))) if col("n_lines") else -1
+        n_planes = int(float(col("n_planes"))) if col("n_planes") else -1
+        component = col("component") or "A"
+        try:
+            lat = float(col("lat")) if col("lat") else 0.0
+            lon = float(col("lon")) if col("lon") else 0.0
+        except ValueError:
+            lat = lon = 0.0
+
+        vgp_lat = vgp_lon = vgp_dp = vgp_dm = 0.0
+        if orientation == 3.0 and (lat or lon):
+            vgp_lat, vgp_lon = dir_to_vgp(dec, inc, lat, lon)
+            vgp_dp, vgp_dm = dp_dm_from_a95(a95, inc)
+
+        res = FitResult(
+            id=f"mean: {site}", cat1="F", cat2="i",
+            dec=dec, inc=inc, mad=a95, tx=(k, 0.0), nb=n,
+            par3_mean=orientation, component=component,
+            lat=lat, rlong=lon, par4=vgp_lat, par5=vgp_lon,
+            vgp_dp=vgp_dp, vgp_dm=vgp_dm, n_lines=n_lines, n_planes=n_planes,
+        )
+        _, existing_ids = archivres(res, pmagres_path, existing_ids)
+        n_imported += 1
+
+    return n_imported, errors
+
+
 def recompute_fit_geometry(res: FitResult, donnees) -> FitResult:
     """Complete un FitResult CHARGE DEPUIS .pmagres avec ce que ce format
     ne stocke plus, en le recalculant/le relisant depuis le specimen
@@ -1715,6 +2041,11 @@ def _parse_legacy_result_line(line: str) -> Optional[FitResult]:
     try:
         return FitResult(
             **prefix_kwargs,
+            # component DERIVEE de numcomp - specimen SEULEMENT, jamais la
+            # branche "mean:" ci-dessus (voir _component_from_numcomp -
+            # demande explicite utilisateur "change the component number
+            # to letter during import of legacy").
+            component=_component_from_numcomp(prefix_kwargs["numcomp"]),
             tx=(float(seg("tx1")), float(seg("tx2"))),
             ty=(float(seg("ty1")), float(seg("ty2"))),
             tz=(float(seg("tz1")), float(seg("tz2"))),
@@ -1881,7 +2212,16 @@ def _load_mean_results(
     `component` : filtre PAS dans le Fortran (voir FitResult.component) -
     "*" (defaut) = pas de filtre. Compare la propre etiquette de LA
     MOYENNE, jamais celle de ses resultats constitutifs ("I think it is
-    best not to use the numcomp of individual samples for the mean")."""
+    best not to use the numcomp de samples individuels pour la moyenne").
+
+    Filtre d'orientation EXACT (`res.par3_mean == iorient`) - demande
+    explicite utilisateur ("If you are in in situ, you select only the
+    mean that are in in situ. If you want to select in TC, the user
+    should decide to switch to TC") : le comportement voulu n'est PAS une
+    reprojection automatique mais un filtrage strict - basculer
+    l'orientation courante de l'appli (self.orientation) est la SEULE
+    facon de rendre selectionnable une moyenne archivee dans une autre
+    orientation."""
     site = (pattern or "*").strip()
     full_pattern = "*" if site in ("", "*") else f"MEAN: {site.upper()}"
     nlen = len(full_pattern) if full_pattern != "*" else 0
@@ -2196,7 +2536,7 @@ def compute_mean_intensity(selected: List[SelectedSample]) -> Optional[MeanInten
 
     amoy, ecart, erreur, rgeom, rinf, rsup = _arith_geom_stats(rint)
     return MeanIntensityResult(
-        id6=selected[0].id[:6], n=len(rint), unit=unit,
+        id6=(getattr(selected[0], "magic_site", "") or selected[0].id[:6]), n=len(rint), unit=unit,
         arith_mean=amoy, arith_sd=ecart, arith_se=erreur,
         geom_mean=rgeom, geom_inf=rinf, geom_sup=rsup,
     )
@@ -2666,6 +3006,16 @@ class AniTensor:
     # l'estimation dans le comment satisfactory or not satisfactory").
     f_crit: Optional[float] = None
     quality: Optional[str] = None
+    # "Y"/"N" - colonne dediee ajoutee cote AMS_Py (ams_selection.
+    # AMSMeasurement.export/mark_pmagani_export, MEME fichier .pmagani
+    # partage) - demande explicite utilisateur ("is it possible to export
+    # from AMS_py only the data and mean tensors that we want to export
+    # and only these selected data will be taken into account in the
+    # main export from Starpaleomag") : "N" signifie que ce tenseur doit
+    # etre IGNORE par ouvrir_export_magic_dialog. "Y" par defaut (ancien
+    # fichier jamais marque cote AMS_Py = tout exporte, comme avant
+    # l'ajout de cette colonne).
+    export: str = "Y"
 
 
 @dataclass
@@ -2714,6 +3064,21 @@ class AniMeanTensor:
     L: Optional[float] = None
     F: Optional[float] = None
     Pprim: Optional[float] = None
+    # Orientation de la moyenne (Sa/IS/TC) - colonne DEDIEE (demande
+    # explicite utilisateur "ajouter une colonne avant info", suite a
+    # "in the file pmagani, there is no information about the IS/TC") :
+    # meme convention fichier "1"/"0"/"100" que la colonne "IS/TC" de
+    # .pmagres (voir _ORIENT_TO_FILE_CODE/_FILE_CODE_TO_ORIENT) - PAS le
+    # code MagIC (qui utiliserait "-1" au lieu de "1"). "" = inconnue
+    # (fichier ecrit avant l'ajout de cette colonne - voir magic_export.
+    # _tilt_correction_from_info pour le repli sur `info`, seule source
+    # pour un tel fichier).
+    tilt_correction: str = ""
+    # Meme colonne "export" (voir AniTensor.export ci-dessus), niveau
+    # site mean - MEME cle (site, code2, tilt_correction) que
+    # ams_selection.mark_pmagani_export utilise cote AMS_Py pour cibler
+    # une ligne mean precise.
+    export: str = "Y"
     info: str = ""
 
 
@@ -2956,6 +3321,62 @@ def replace_position_by_symmetry(
     return new_positions
 
 
+# Direction TRM ATTENDUE pour chaque position (repere specimen, meme
+# repere que Measurement.x/y/z) - PAS dans le Fortran (celui-ci ne teste
+# que le SIGNE de X/Y, voir _check_position_inversion ci-dessous) :
+# demande explicite utilisateur ("parfois par erreur, les échantillons
+# ont été mal orientés dans le four... est-ce possible de mettre un
+# warning lorsque le code ne correspond pas à la vraie direction
+# enregistrée"). Un champ fort applique selon +X (ou -X, +Y...) impose
+# une TRM le long de cet axe ; l'anisotropie devie cette direction du
+# champ applique, mais reste dans un cone raisonnable (l'utilisateur
+# fixe 45 deg - une anisotropie meme forte, quelques dizaines de %,
+# n'ecarte jamais la TRM a plus de la moitie d'un angle droit du champ
+# applique) : au-dela, c'est le signe d'une position reellement inversee
+# lors de l'acquisition (four/porte-echantillon), pas un effet
+# d'anisotropie.
+_EXPECTED_POSITION_DIRECTION = {
+    "X+": (1.0, 0.0, 0.0), "X-": (-1.0, 0.0, 0.0),
+    "Y+": (0.0, 1.0, 0.0), "Y-": (0.0, -1.0, 0.0),
+    "Z+": (0.0, 0.0, 1.0), "Z-": (0.0, 0.0, -1.0),
+}
+_POSITION_DEVIATION_WARNING_DEG = 45.0
+
+
+def _position_deviation_deg(vec: Tuple[float, float, float], expected: Tuple[float, float, float]) -> float:
+    """Angle (deg) entre `vec` (mesure, ligne de base deja soustraite) et
+    `expected` (axe theorique de cette position, voir
+    _EXPECTED_POSITION_DIRECTION) - 0.0 si `vec` est nul (rien a comparer,
+    pas une deviation infinie)."""
+    mag = math.sqrt(sum(c * c for c in vec))
+    if mag == 0.0:
+        return 0.0
+    dot = sum((c / mag) * e for c, e in zip(vec, expected))
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(math.acos(dot))
+
+
+def _find_misoriented_positions(
+    positions: Dict[str, Measurement], holder: Optional["ArmHolderBackground"],
+) -> List[Tuple[str, float]]:
+    """Verifie les 6 positions (pas seulement X/Y comme _check_position_
+    inversion) contre leur direction attendue - retourne [(position,
+    deviation_deg), ...] pour chaque position au-dela de
+    _POSITION_DEVIATION_WARNING_DEG, triees par deviation decroissante -
+    [] si aucune. Demande explicite utilisateur ("mettre un warning
+    lorsque le code ne correspond pas à la vraie direction enregistrée
+    par l'échantillon")."""
+    idx_of = {"X+": 0, "X-": 1, "Y+": 2, "Y-": 3, "Z+": 4, "Z-": 5}
+    warnings = []
+    for key, expected in _EXPECTED_POSITION_DIRECTION.items():
+        vec = _position_vector(positions, key, idx_of[key], holder)
+        dev = _position_deviation_deg(vec, expected)
+        if dev > _POSITION_DEVIATION_WARNING_DEG:
+            warnings.append((key, dev))
+    warnings.sort(key=lambda item: -item[1])
+    return warnings
+
+
 def _check_position_inversion(raw: Dict[str, Tuple[float, float, float]]) -> Optional[str]:
     """Equivalent de calcul.f:4386-4393 (X) et 4420-4427 (Y) : detecte une
     inversion de la position lors de l'acquisition TRM - le "+"-composant
@@ -3033,6 +3454,15 @@ class AnisotropyComputation:
     zb_used: bool  # Zplus remplace par ZB (evolution > seuil + use_zb_on_evolution)
     pair_nrm: List[AnisotropyPairNrm]  # les 3 estimations "ARN X+X-/Y+Y-/Z+Z-" avant leur moyenne (nrm_mean)
     nrm_mean_diag: AnisotropyPairNrm  # nrm_mean, en moment/dec/inc - meme format que pair_nrm, pour comparaison directe
+    # [(position, deviation_deg), ...] au-dela de _POSITION_DEVIATION_
+    # WARNING_DEG (45 deg par defaut) - voir _find_misoriented_positions -
+    # PAS deja corrige (contrairement a swapped_axes) : juste signale,
+    # une deviation de plus de 45 deg ne se laisse pas "corriger" en
+    # inversant simplement le signe (contrairement a X/Y ci-dessus, ou le
+    # Fortran sait deja quoi faire) - demande explicite utilisateur
+    # ("mettre un warning lorsque le code ne correspond pas à la vraie
+    # direction enregistrée par l'échantillon").
+    misoriented_positions: List[Tuple[str, float]]
 
 
 def _all_ani_variants(
@@ -3186,12 +3616,14 @@ def compute_anisotropy_tensor(
     )
     tensor = all_tensors[0]  # 'A0', identique a l'ancien calcul direct ci-dessus
     raw = ((ani011, ani012, ani013), (ani021, ani022, ani023), (ani031, ani032, ani033))
+    misoriented_positions = _find_misoriented_positions(positions, holder)
     return AnisotropyComputation(
         tensor=tensor, all_tensors=all_tensors, raw=raw, positions=positions,
         holder_used=holder is not None,
         nrm_mean=nrm_mean, position_diags=diags, deviation_pct=deviation_pct,
         swapped_axes=swapped_axes, trm_evolution_pct=trm_evolution_pct, zb_used=zb_used,
         pair_nrm=pair_nrm, nrm_mean_diag=nrm_mean_diag,
+        misoriented_positions=misoriented_positions,
     )
 
 
@@ -3214,8 +3646,13 @@ def compute_anisotropy_tensor(
 _PMAGANI_HEADER = [
     "specimen", "code2", "etape",
     "k11", "k22", "k33", "k12", "k23", "k13", "s(SI*1e-5)",
-    "n_positions", "sigma", "ftest", "ftest12", "ftest23", "quality", "info",
+    "n_positions", "sigma", "ftest", "ftest12", "ftest23", "quality", "export", "info",
 ]
+# Largeur d'un fichier ecrit AVANT l'ajout de la colonne "export" (voir
+# AniTensor.export) - MEME principe de retro-compatibilite que
+# _PMAGANI_MEAN_HEADER_LEGACY_LEN plus bas ; un tel fichier reste lu
+# "export=Y" par defaut (voir _read_pmagani_tensors).
+_PMAGANI_HEADER_LEGACY_LEN = len(_PMAGANI_HEADER) - 1
 # `quality` ('g'/'b'/n.d) : verdict PmagPy (Hext F-test, aniso_ftest_
 # quality) persiste comme colonne A PART ENTIERE (pas seulement noye dans
 # le texte libre `info`) - necessaire pour pouvoir le RELIRE de facon
@@ -3245,8 +3682,28 @@ _PMAGANI_MEAN_HEADER = [
     "dec1", "inc1", "dec2", "inc2", "dec3", "inc3",
     "alpha1_1", "alpha2_1", "alpha1_2", "alpha2_2", "alpha1_3", "alpha2_3",
     "P", "T", "L", "F", "Pprim",
-    "info",
+    "tilt_correction", "export", "info",
 ]
+# nombre de colonnes d'un ancien fichier (avant l'ajout de
+# tilt_correction, colonne dediee) - demande explicite utilisateur ("oui
+# ajouter une colonne avant info", suite a "in the file pmagani, there is
+# no information about the IS/TC" : l'info existait mais SEULEMENT en
+# texte libre dans `info` - "tilt_correction: N" - jamais une vraie
+# colonne du tableau, une decision deliberee au depart cote AMS_Py
+# ("encoder ceci dans info evite de re-modifier le schema deja valide
+# cote STARpaleomag_Py/calcul") revenue explicitement ici). Les DEUX
+# largeurs restent lisibles en lecture (voir _read_pmagani_mean_tensors) -
+# un fichier ecrit AVANT ce changement n'a que 24 colonnes (info en
+# dernier), un fichier ecrit APRES en a 25 (tilt_correction avant info).
+# TROIS paliers desormais (meme principe que ams_selection._PMAGANI_
+# MEAN_HEADER_LEGACY_LEN/_NO_EXPORT_LEN cote AMS_Py, MEME fichier
+# partage) : la colonne "export" (voir AniMeanTensor.export) a ete
+# ajoutee APRES tilt_correction, donc un fichier peut avoir 24
+# colonnes (ni l'un ni l'autre), 25 (tilt_correction seul) ou 26 (les
+# deux, format actuel) - _read_pmagani_mean_tensors verifie la plus
+# longue en premier.
+_PMAGANI_MEAN_HEADER_NO_EXPORT_LEN = len(_PMAGANI_MEAN_HEADER) - 1
+_PMAGANI_MEAN_HEADER_LEGACY_LEN = len(_PMAGANI_MEAN_HEADER) - 2
 
 # `s` (susceptibilite scalaire) est en SI*1e-5 (ex. 7261 = 0.07261 SI) -
 # convention Bartington ("since the 80s ... measure in 1e-5 SI assuming a
@@ -3348,6 +3805,7 @@ def _format_pmagani_line(
         _fmt_pmagani_stat(tensor.sigma), _fmt_pmagani_stat(tensor.ftest),
         _fmt_pmagani_stat(tensor.ftest12), _fmt_pmagani_stat(tensor.ftest23),
         tensor.quality or "n.d",
+        tensor.export or "Y",
         info,
     ]
     return "\t".join(fields) + "\n"
@@ -3397,11 +3855,19 @@ def _read_pmagani_tensors(path: str) -> List[AniTensor]:
             quality = None
             if len(parts) > 15 and parts[15].strip() in ("g", "b"):
                 quality = parts[15].strip()
+            # export : colonne ajoutee cote AMS_Py (voir AniTensor.export) -
+            # absente (fichier plus ancien que _PMAGANI_HEADER_LEGACY_LEN)
+            # => "Y" par defaut, meme retro-compatibilite que n_positions/
+            # sigma/ftest* ci-dessus.
+            export = "Y"
+            if len(parts) > 16 and parts[16].strip() in ("Y", "N"):
+                export = parts[16].strip()
             out.append(AniTensor(
                 id=parts[0], code2=parts[1], k11=k11, k22=k22, k33=k33,
                 k12=k12, k23=k23, k13=k13,
                 n_positions=n_positions, sigma=sigma, ftest=ftest,
                 ftest12=ftest12, ftest23=ftest23, quality=quality,
+                export=export,
             ))
     return out
 
@@ -3418,7 +3884,7 @@ def _format_pmagani_mean_line(mean: AniMeanTensor) -> str:
         f"{mean.alpha1_3:.3f}", f"{mean.alpha2_3:.3f}",
         _fmt_pmagani_stat(mean.P), _fmt_pmagani_stat(mean.T),
         _fmt_pmagani_stat(mean.L), _fmt_pmagani_stat(mean.F), _fmt_pmagani_stat(mean.Pprim),
-        info,
+        mean.tilt_correction, mean.export or "Y", info,
     ]
     return "\t".join(fields) + "\n"
 
@@ -3445,8 +3911,23 @@ def _read_pmagani_mean_tensors(path: str) -> List[AniMeanTensor]:
             parts = line.split("\t")
             if not parts or parts[0] == "site":
                 continue  # ligne d'entete
-            if len(parts) < len(_PMAGANI_MEAN_HEADER):
+            # Retro-compatibilite sur le NOMBRE de colonnes (meme principe
+            # que _parse_mean_line pour .pmagres) : TROIS paliers, verifies
+            # du plus long au plus court (voir commentaire au-dessus de
+            # _PMAGANI_MEAN_HEADER_LEGACY_LEN) - le format actuel a
+            # tilt_correction ET export avant info, le palier intermediaire
+            # a tilt_correction mais pas export, le plus ancien n'a ni
+            # l'un ni l'autre (info en dernier).
+            if len(parts) >= len(_PMAGANI_MEAN_HEADER):
+                tilt_correction, export, info_raw = parts[23].strip(), parts[24].strip(), parts[25]
+            elif len(parts) >= _PMAGANI_MEAN_HEADER_NO_EXPORT_LEN:
+                tilt_correction, export, info_raw = parts[23].strip(), "Y", parts[24]
+            elif len(parts) >= _PMAGANI_MEAN_HEADER_LEGACY_LEN:
+                tilt_correction, export, info_raw = "", "Y", parts[23]
+            else:
                 continue
+            if export not in ("Y", "N"):
+                export = "Y"
             try:
                 out.append(AniMeanTensor(
                     id=parts[0], code2=parts[1], n=int(float(parts[2])),
@@ -3460,7 +3941,9 @@ def _read_pmagani_mean_tensors(path: str) -> List[AniMeanTensor]:
                     P=_parse_pmagani_stat(parts[18]), T=_parse_pmagani_stat(parts[19]),
                     L=_parse_pmagani_stat(parts[20]), F=_parse_pmagani_stat(parts[21]),
                     Pprim=_parse_pmagani_stat(parts[22]),
-                    info=parts[23].strip('"') if len(parts) > 23 else "",
+                    tilt_correction=tilt_correction,
+                    export=export,
+                    info=info_raw.strip('"'),
                 ))
             except ValueError:
                 continue
@@ -3688,6 +4171,142 @@ def read_ani_tensor(path: str, sample_id: str, code2: str) -> Optional[AniTensor
         if t.id.upper() == sample_id_upper and t.code2 == code2:
             return t
     return None
+
+
+def read_all_ani_tensors(path: str) -> List[AniTensor]:
+    """TOUS les tenseurs specimen d'un .pmagani/.ANI (meme dispatch par
+    extension que read_ani_tensor) - demande explicite utilisateur
+    ("il peut y avoir des specimens dans pmagani qui n'ont pas de
+    mesures dans prmag mais il faut aussi les exporter") : permet de
+    retrouver, cote export MagIC, les specimens connus SEULEMENT via
+    leur mesure d'anisotropie (jamais dans self.donnees/.prmag - AMS
+    mesuree sur un sous-ensemble different, ou import .pmagani separe)
+    plutot que de se limiter a `self.selection`, qui ne connait que ce
+    qui vient du .prmag."""
+    if not os.path.exists(path):
+        return []
+    ext = os.path.splitext(path)[1].lower()
+    return _read_pmagani_tensors(path) if ext == ".pmagani" else _read_ani_tensors_legacy(path)
+
+
+def find_orphan_ani_specimens(pmag_list: List["Pmag"], ani_path: str) -> List[str]:
+    """Ids d'un .pmagani/.ANI SANS AUCUNE trace (id insensible a la
+    casse) dans `pmag_list` (self.donnees) - demande explicite
+    utilisateur ("en theorie pmagani est lie a prmag. Il faut interdire
+    dans pmagani les specimens qui ne sont pas présents dans prmag").
+    Un .pmagani decrit des specimens du .prmag COMPAGNON (meme nom de
+    base, voir ani_path_for) : un id qui n'y figure meme pas signale un
+    vrai desaccord entre les deux fichiers (fichiers desassortis, faute
+    de frappe, .pmagani d'un autre jeu de donnees copie/renomme par
+    erreur) - a controler des l'OUVERTURE du .prmag (voir app._load_
+    data_file), pas seulement au moment d'un export MagIC (ou ces
+    memes ids etaient jusqu'ici rejetes silencieusement, sans jamais
+    alerter l'utilisateur en amont)."""
+    if not os.path.exists(ani_path):
+        return []
+    known = {p.id.strip().upper() for p in pmag_list}
+    return sorted({
+        t.id.strip() for t in read_all_ani_tensors(ani_path)
+        if t.id.strip() and t.id.strip().upper() not in known
+    })
+
+
+# ---------------------------------------------------------------------------
+# Detection de doublons (meme etape/memes codes) dans .prmag/.pmagres/
+# .pmagint/.pmagani - demande explicite utilisateur ("add a menu for a
+# routine to evaluate the files prmag, pmagres, pmagint and pmagani to
+# check for measurements with the same step and codes, just a warning to
+# help the user clean the files") : QUATRE controles distincts, un par
+# fichier, chacun avec sa propre notion de "meme etape et memes codes" -
+# jamais correctif (juste une LISTE d'avertissements a afficher, voir
+# app.ouvrir_check_duplicates_dialog), le nettoyage reste manuel.
+# ---------------------------------------------------------------------------
+
+def find_duplicate_measurements(pmag_list: List["Pmag"]) -> List[str]:
+    """.prmag : pour chaque specimen, regroupe ses mesures par (etape,
+    cod1, cod2) - signale tout groupe de plus d'une mesure (meme pas de
+    desaimantation/acquisition mesure plusieurs fois pour le meme
+    specimen, erreur d'import/de saisie frequente)."""
+    warnings: List[str] = []
+    for p in pmag_list:
+        counts: Dict[Tuple[float, str, str], int] = {}
+        for m in p.mesures:
+            key = (m.etape, m.cod1, m.cod2)
+            counts[key] = counts.get(key, 0) + 1
+        for (etape, cod1, cod2), n in sorted(counts.items()):
+            if n > 1:
+                warnings.append(
+                    f"{p.id}: step {_fmt1(etape)} code {cod1}{cod2} appears {n} times (.prmag)"
+                )
+    return warnings
+
+
+def find_duplicate_results(results: List[FitResult]) -> List[str]:
+    """.pmagres : pour les resultats SPECIMEN (jamais une moyenne "mean:",
+    qui n'a pas de notion de step1/step2 comparable), regroupe par (id,
+    step1, step2, cat1, demag, orig) - signale un meme ajustement
+    archive plusieurs fois pour le meme specimen (component/numero de
+    fit differents mais MEME segment/type/ancrage : probablement un
+    doublon involontaire, pas deux composantes reellement distinctes)."""
+    groups: Dict[Tuple[str, int, int, str, str, str], List[str]] = {}
+    for r in results:
+        if r.id[:5] == "mean:":
+            continue
+        key = (r.id, r.step_first, r.step_last, r.cat1, r.demag, r.orig)
+        groups.setdefault(key, []).append(r.c or r.id)
+    warnings = []
+    for (rid, step1, step2, cat1, demag, orig), ids in sorted(groups.items()):
+        if len(ids) > 1:
+            warnings.append(
+                f"{rid}: {cat1} fit {step1}-{step2} ({demag}, {orig}) archived {len(ids)} "
+                f"times (.pmagres) [{', '.join(ids)}]"
+            )
+    return warnings
+
+
+def find_duplicate_pmagint_rows(path: str) -> List[str]:
+    """.pmagint : lit TOUTES les lignes brutes (contrairement a
+    paleointensity.read_pmagint, qui ne garde QUE la derniere par
+    specimen - une revision normale n'est PAS un doublon) - signale
+    seulement un (specimen, t1, t2) identique archive plus d'une fois
+    (meme intervalle de temperature reinterprete/resauvegarde sans
+    aucun changement, pas une vraie revision)."""
+    if not os.path.exists(path):
+        return []
+    from paleointensity import _PMAGINT_HEADER
+    counts: Dict[Tuple[str, str, str], int] = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if not parts or parts[0] == "specimen" or len(parts) < len(_PMAGINT_HEADER):
+                continue
+            key = (parts[0], parts[1], parts[2])  # specimen, t1, t2
+            counts[key] = counts.get(key, 0) + 1
+    warnings = []
+    for (specimen, t1, t2), n in sorted(counts.items()):
+        if n > 1:
+            warnings.append(f"{specimen}: interpretation {t1}-{t2}°C archived {n} times (.pmagint)")
+    return warnings
+
+
+def find_duplicate_ani_tensors(path: str) -> List[str]:
+    """.pmagani (section specimen) : regroupe par (id, code2) - un
+    specimen ne devrait avoir qu'UN tenseur par type (A0/F0/N0...) ;
+    plusieurs signalent un recalcul archive sans nettoyer le precedent."""
+    if not os.path.exists(path):
+        return []
+    counts: Dict[Tuple[str, str], int] = {}
+    for t in read_all_ani_tensors(path):
+        key = (t.id, t.code2)
+        counts[key] = counts.get(key, 0) + 1
+    warnings = []
+    for (specimen, code2), n in sorted(counts.items()):
+        if n > 1:
+            warnings.append(f"{specimen}: tensor '{code2}' archived {n} times (.pmagani)")
+    return warnings
 
 
 def apply_inverse_anisotropy(ech: SelectedSample, tensor: AniTensor) -> None:

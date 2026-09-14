@@ -371,6 +371,28 @@ def select_samples(
             and (demag2 == "*" or m.cod2 == demag2)
         ]
         if not matched_mesures:
+            # Porteur de metadonnees de SITE sans specimen reel (id vide,
+            # 0 mesure - "specimen: n.d" dans le .prmag, voir
+            # magic_export.build_sites_rows) : jamais un candidat de
+            # FIT (rien a demagnetiser), mais doit rester selectionnable
+            # en mode "tout" (pattern='*', ET aucun filtre demag actif)
+            # pour que son lat/lon/bed_dip/formation/age atteignent
+            # l'export MagIC - sans ce cas particulier, `if not
+            # matched_mesures: continue` l'excluait TOUJOURS de
+            # self.selection, donc de tout export, meme apres avoir ete
+            # correctement complete dans le .prmag (demande explicite
+            # utilisateur : "the export of results without data lack the
+            # information from the site that was added to the .prmag
+            # files"). Le filtre demag1/demag2 (et pas seulement pattern)
+            # doit AUSSI etre '*' - un porteur sans mesure ne "matche"
+            # jamais un code demag precis, il ne doit donc pas apparaitre
+            # des qu'une selection FILTRE reellement sur les mesures (ex.
+            # demag='I') - demande explicite utilisateur ("when there are
+            # sites without samples, do not select data", suite a une
+            # selection filtree sur le code 'I' qui remontait quand meme
+            # ces porteurs de site).
+            if not (p.id or "").strip() and pattern == "*" and demag1 == "*" and demag2 == "*":
+                selected.append(_build_selected_sample(p, []))
             continue
 
         selected.append(_build_selected_sample(p, matched_mesures))
@@ -419,6 +441,14 @@ def select_samples_by_site(
             and (demag2 == "*" or m.cod2 == demag2)
         ]
         if not matched_mesures:
+            # Meme cas particulier que select_samples (voir sa docstring,
+            # y compris la restriction demag1/demag2=='*' - "when there
+            # are sites without samples, do not select data") : un
+            # porteur de metadonnees de site (id vide, 0 mesure) reste
+            # selectionnable si ce site precis (ou tous, want_all) est
+            # demande, mais seulement hors filtre demag.
+            if not (p.id or "").strip() and demag1 == "*" and demag2 == "*":
+                selected.append(_build_selected_sample(p, []))
             continue
 
         selected.append(_build_selected_sample(p, matched_mesures))

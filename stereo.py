@@ -21,12 +21,12 @@ le trace des mesures individuelles.
 """
 
 import math
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from matplotlib.figure import Figure
 
 from selection import SelectedSample, angle, apply_orientation, polere
-from calcul import FitResult
+from calcul import FitResult, _correct_dec_inc
 from plotlib import PlotContext
 
 
@@ -222,12 +222,25 @@ def draw_stereo_measurements(
     phi: float = 0.0,
     iproj: int = 1,
     point_size: float = 0.324,
+    highlight_ranges: Optional[List[Tuple[float, float]]] = None,
 ) -> None:
     """Dessine les mesures des echantillons de `selected`, reliees par des
     arcs de grand cercle, a l'origine COURANTE de `ctx` (voir draw_stereo_net
-    pour `r`)."""
+    pour `r`).
+
+    `highlight_ranges` : liste de (step_first, step_last) - les points dont
+    `etape` tombe dans l'un de ces intervalles sont traces en BLEU (pen 5)
+    plutot qu'en noir, pour identifier visuellement quelles donnees ont
+    contribue a un ajustement (ligne ou plan) - demande explicite
+    utilisateur ("to identify the data used in the fit... can you change
+    the color to blue on the stereo just to highlight the points used in
+    the calculation. Not necessary for the zijderveld but useful for the
+    stereo" - le Zijderveld distingue deja l'ajustement via son propre
+    segment rouge/vert superpose, voir draw_zijderveld). Les arcs de
+    liaison entre points restent NOIRS (pen 1) quel que soit `etape`,
+    seuls les symboles de points changent de couleur."""
     ctx.thickn(0.5)
-    ctx.newpen(1)
+    ranges = highlight_ranges or []
     for ech in selected:
         prev_dec = prev_dip = None
         for m in ech.mesures:
@@ -237,9 +250,12 @@ def draw_stereo_measurements(
             dip = math.degrees(math.atan2(zz, rh))
 
             u, v, ifl = superc(la, phi, dec, dip, iproj)
+            ctx.newpen(1)
             if prev_dec is not None:
                 gdcerc(ctx, la, phi, iproj, prev_dec, prev_dip, dec, dip, r)
             symtype = 8 if ifl == 5 else 14
+            used = any(lo <= m.etape <= hi for lo, hi in ranges)
+            ctx.newpen(5 if used else 1)
             ctx.symbol(v * r, u * r, point_size, symtype, -1)
             prev_dec, prev_dip = dec, dip
 
@@ -303,31 +319,6 @@ def circle(al: float, ai: float, ad: float, ph: float) -> tuple:
     return ei, ed
 
 
-def _correct_dec_inc(res: FitResult, orientation: int) -> tuple:
-    """Equivalent de `correct(rd,ri,cdip,caz,dip,str)` (StarUtil.f:66) :
-    reapplique la correction d'orientation courante a la direction BRUTE
-    stockee dans un resultat (res.dec/res.inc, repere echantillon d'origine),
-    avec les cin/caz/dip/str_ PROPRES a ce resultat (pas d'un SelectedSample
-    live - FitResult porte deja ces memes champs, `apply_orientation` n'a
-    besoin que de leur presence, pas du type exact de l'objet).
-
-    Bug corrige - meme correctif et memes raisons que calcul.py:
-    _correct_dec_inc (duplique ici pour eviter un import circulaire) :
-    un "mean:" est deja fige dans une orientation precise (par3_mean),
-    pas dans le repere echantillon brut - le renvoyer tel quel plutot que
-    de lui appliquer apply_orientation (qui, avec cin=caz=0 jamais
-    renseignes sur une moyenne, introduirait une rotation parasite)."""
-    if res.id[:5] == "mean:":
-        return res.dec, res.inc
-    incr, decr = math.radians(res.inc), math.radians(res.dec)
-    x = math.cos(incr) * math.cos(decr)
-    y = math.cos(incr) * math.sin(decr)
-    z = math.sin(incr)
-    xx, yy, zz = apply_orientation(x, y, z, res, orientation)
-    _, dec, inc = polere(xx, yy, zz)
-    return dec, inc
-
-
 def draw_stereo_results(
     ctx: PlotContext,
     results: List[FitResult],
@@ -346,7 +337,19 @@ def draw_stereo_results(
     pour les ajustements de droite/direction unique (cat1 'L'/'f'), et
     grands cercles pour les ajustements de plan (cat1='P'). `nbech` :
     nombre d'echantillons de la selection courante - le libelle "fit
-    between X et Y" ne s'affiche que si nbech==1 ET un seul resultat."""
+    between X et Y" ne s'affiche que si nbech==1 ET un seul resultat.
+
+    FILTRE une moyenne "mean:" dont l'orientation archivee (par3_mean) ne
+    correspond pas a `orientation` - demande explicite utilisateur ("If
+    you are in in situ, you select only the mean that are in in situ...
+    when you plot the means on a stereo, only the means in IS are
+    plotted if you are in IS and only the selected TC means if you are in
+    TC") : si `results` contient un melange de moyennes IS et TC
+    (accumulees via plusieurs "Select results..." successifs a des
+    orientations differentes - voir ouvrir_selres_dialog, qui n'efface
+    jamais self.results), seules celles archivees dans l'orientation
+    COURANTE sont tracees, les autres sont silencieusement ignorees
+    (jamais reprojetees - voir _correct_dec_inc)."""
     ctx.thickn(0.5)
 
     # --- directions moyennes de Fisher + cone de confiance (lignes 253-306) :
@@ -355,9 +358,11 @@ def draw_stereo_results(
     # reapplique `correct()` (resultat "individuel", repere echantillon).
     means = []
     for res in results:
-        if res.cat1 == "F" and res.cat2 == "m":
+        if res.cat1 != "F" or res.par3_mean != float(orientation):
+            continue
+        if res.cat2 == "m":
             means.append((res.dec, res.inc, res.mad))
-        elif res.cat1 == "F" and res.cat2 == "i":
+        elif res.cat2 == "i":
             dec, inc = _correct_dec_inc(res, orientation)
             means.append((dec, inc, res.mad))
 
@@ -446,7 +451,9 @@ def build_stereo_results_figure(
 ) -> Figure:
     """Equivalent de `sterres` (stereoplot(1)) : cadre du reseau + directions
     moyennes de Fisher (avec cone de confiance) + grands cercles/points pour
-    les ajustements de droite/plan de `results` (self.results cote app.py)."""
+    les ajustements de droite/plan de `results` (self.results cote app.py).
+    FILTRE les moyennes "mean:" dont l'orientation ne correspond pas -
+    voir draw_stereo_results."""
     dimster = 12.0 * 1.5
     point_size = (0.18 * dimster) / 10.0
 

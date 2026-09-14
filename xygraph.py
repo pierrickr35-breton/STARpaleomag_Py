@@ -103,6 +103,19 @@ def _normalize_ref(vals: List[float]) -> float:
     return vmax if vmax > 2.0 * ref else ref
 
 
+def _pick_points(ax, steps, norm, specimen_id: str) -> None:
+    """Un point interactif INVISIBLE par mesure tracee (meme mecanisme que
+    plotlib.PlotContext.pick_point, mais directement sur `ax` - ce module
+    reste volontairement hors PlotContext, voir docstring en tete de
+    fichier) - clic-pour-info cote app.py (`_on_plot_pick`), demande
+    explicite utilisateur ("in XY plots and IRM plots, can we click on a
+    point to get the sample number")."""
+    for x, y in zip(steps, norm):
+        artist = ax.scatter([x], [y], s=250, alpha=0, picker=True, zorder=1000)
+        artist._starmac_pick_kind = "xygraph_specimen"
+        artist._starmac_pick_data = specimen_id
+
+
 def _plot_group(
     ax, samples: List[SelectedSample], component: str, title: str,
     irm_demag: Optional[List[SelectedSample]] = None,
@@ -119,6 +132,7 @@ def _plot_group(
         color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
         ax.plot(steps, norm, "o-", color=color, markerfacecolor=color,
                  markersize=4, linewidth=1, label=ech.id)
+        _pick_points(ax, steps, norm, ech.id)
         demag_code = demag_code or _sample_demag_code(ech)
 
     # desaimantation thermique d'une IRM deja acquise (code cod2='I' sur
@@ -138,6 +152,7 @@ def _plot_group(
         color = _COLOR_CYCLE[(n_samples + j) % len(_COLOR_CYCLE)]
         ax.plot(steps, norm, "s--", color=color, markerfacecolor="none",
                  markersize=4, linewidth=1, label=f"{ech.id} (IRM demag)")
+        _pick_points(ax, steps, norm, ech.id)
         demag_code = demag_code or _sample_demag_code(ech)
 
     unit = _UNITS.get(demag_code, "")

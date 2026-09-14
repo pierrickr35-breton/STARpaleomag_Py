@@ -11,13 +11,26 @@ Trois modes, chacun avec ses propres colonnes de table (`#` optionnel en
 tete de la ligne d'en-tete, comme les fichiers complement existants de
 convert_legacy_ren.py) :
 
-- Mode SITE (`complete_site_info`) : suppose que specimen/sample/site sont
+- Mode SITE (`complete_site_info`) : suppose que specimen/sample sont
   DEJA corrects dans le .prmag (typiquement le cas apres un import MagIC
   ou une conversion legacy qui a bien derive le site des 6 premiers
   caracteres du specimen) - la table ne fournit QUE les metadonnees
   complementaires, UNE LIGNE PAR SITE, appliquee a TOUS les specimens de
   ce site :
       #site	lat	lon	formation	age	geologic_classes	geologic_types	lithologies	location	obs
+  La colonne 'site' EST la cle de recherche (nom deja present dans le
+  .prmag) - mais peut etre RENOMMEE en repetant l'en-tete 'site' une
+  seconde fois, cette seconde colonne fournissant alors le nouveau nom -
+  demande explicite utilisateur ("i cannot select site and replace it
+  by an other site"), format exact d'un fichier reel de l'utilisateur
+  (Complement_tect.txt : ancien nom de campagne -> nouveau nom
+  consolide) :
+      #site	site	lat	lon	...
+  Ce meme fichier fournit aussi l'age deja separe en age_low/age_high/
+  age_unit plutot qu'une seule colonne 'age' (voir `_normalize_age`), et
+  utilise des VIRGULES comme separateur plutot qu'une tabulation (voir
+  `_sniff_delimiter` - les deux styles sont acceptes, detectes
+  automatiquement depuis la ligne d'en-tete).
 
 - Mode SPECIMEN (`complete_specimen_info`) : ne suppose RIEN de fiable sur
   sample/site dans le .prmag - la table fournit AUSSI sample/site
@@ -72,8 +85,24 @@ _ROCHE_TABLE_FIELDS = (
 )
 
 
-def _split_line(line: str) -> List[str]:
-    return [f.strip() for f in line.rstrip("\n").split("\t")]
+def _split_line(line: str, delimiter: str = "\t") -> List[str]:
+    return [f.strip() for f in line.rstrip("\n").split(delimiter)]
+
+
+def _sniff_delimiter(header_line: str) -> str:
+    """Les tables de completion existantes (complement_Tibet.txt) sont
+    tabulees, mais Complement_tect.txt (demande explicite utilisateur -
+    correspondance ancien/nouveau nom de site) est separee par des
+    virgules, avec des espaces de remplissage autour de chaque champ
+    (ex. '96CC02     ,   C04     ,   -25.989   , ...') - deja absorbes
+    par le .strip() de _split_line. Priorite a la tabulation si les deux
+    sont presentes (jamais le cas en pratique, mais une valeur pourrait
+    contenir une virgule)."""
+    if "\t" in header_line:
+        return "\t"
+    if "," in header_line:
+        return ","
+    return "\t"
 
 
 def _read_table_rows(path: str, encoding: str) -> Tuple[List[str], List[List[str]]]:
@@ -96,10 +125,11 @@ def _read_table_rows(path: str, encoding: str) -> Tuple[List[str], List[List[str
         raw_lines = [l for l in f if l.strip()]
     if not raw_lines:
         return [], []
-    header = [h.lstrip("#").strip().lower().replace(" ", "_") for h in _split_line(raw_lines[0])]
+    delimiter = _sniff_delimiter(raw_lines[0])
+    header = [h.lstrip("#").strip().lower().replace(" ", "_") for h in _split_line(raw_lines[0], delimiter)]
     rows = []
     for l in raw_lines[1:]:
-        row = _split_line(l)
+        row = _split_line(l, delimiter)
         if len(row) < len(header):
             row = row + [""] * (len(header) - len(row))
         rows.append(row)
@@ -170,6 +200,26 @@ def _missing_fields(line_a: dict, line_d: dict, check_height: bool) -> List[str]
     return missing
 
 
+def _normalize_age(record: dict) -> None:
+    """Complement_tect.txt (et master_site_list_with_geology.csv dont il
+    reprend la forme) fournit l'age SEPARE en colonnes age_low/age_high/
+    age_unit (deja au vocabulaire Magic reel, ex. 'Ma') plutot qu'une
+    seule colonne 'age' - reconstruit la chaine 'age_low - age_high
+    age_unit' en place (meme forme que magic_export.parse_age sait
+    re-decouper via son branchement '\\s-\\s' pour age_low/age_high, et
+    la table _AGE_UNIT_PATTERNS pour age_unit) UNIQUEMENT si 'age' n'est
+    pas deja fournie directement - ne change rien pour les tables
+    existantes qui fournissent 'age' toute faite (mode specimen/sample)."""
+    if record.get("age"):
+        return
+    low = record.get("age_low", "").strip()
+    high = record.get("age_high", "").strip()
+    if not (low and high):
+        return
+    unit = record.get("age_unit", "").strip()
+    record["age"] = f"{low} - {high} {unit}".strip()
+
+
 def _apply_table(
     prmag_path: str, table: Dict[str, dict], key_field: str,
 ) -> Tuple[int, List[str], List[Tuple[str, List[str]]]]:
@@ -230,6 +280,7 @@ def _apply_table(
             skip_blank()
             continue
 
+        _normalize_age(record)
         a_updates = {}
         if record.get("lat"):
             try:
@@ -266,6 +317,17 @@ def _apply_table(
                 a_updates["sample"] = record["sample"]
             if record.get("site"):
                 a_updates["site"] = record["site"]
+        # Mode site : une SECONDE colonne "site" dans la table (deux
+        # colonnes de meme nom d'en-tete, ex. Complement_tect.txt :
+        # "site,site,Lat,Lon,...") est le nom vers lequel RENOMMER - la
+        # premiere est la cle de recherche (nom deja present dans le
+        # .prmag), demande explicite utilisateur ("i cannot select site
+        # and replace it by an other site"). Pas de collision avec le
+        # bloc specimen ci-dessus (mutuellement exclusif sur key_field).
+        if key_field == "site" and record.get("site"):
+            new_site = record["site"].strip()
+            if new_site:
+                a_updates["site"] = new_site
         if a_updates:
             lines[idx_a] = _rewrite_kv_line(lines[idx_a], a_updates)
 
@@ -301,16 +363,40 @@ def complete_site_info(
     """Table indexee par SITE (colonne 'site' obligatoire) - voir
     docstring module. Retourne (nb_specimens_mis_a_jour,
     liste_specimens_sans_site_correspondant_dans_la_table,
-    liste_specimens_encore_incomplets)."""
+    liste_specimens_encore_incomplets).
+
+    Une SECONDE colonne 'site' (meme nom d'en-tete repete, ex.
+    "site\\tsite\\tLat\\tLon\\t..." comme Complement_tect.txt : ancien
+    nom de campagne -> nouveau nom consolide) est acceptee pour RENOMMER
+    le site - demande explicite utilisateur ("i cannot select site and
+    replace it by an other site"). La PREMIERE colonne 'site' reste
+    toujours la cle de recherche (nom deja present dans le .prmag) ;
+    construire `record` par position (pas par dict(zip(header, row)),
+    qui ne garderait que la DERNIERE colonne 'site' et perdrait la cle
+    de recherche pour les tables a une seule colonne 'site' - non, en
+    fait l'inverse : cela ferait passer la valeur de renommage comme cle
+    de recherche par erreur) fait naturellement atterrir la seconde
+    colonne 'site', si presente, dans record['site'] (lu par
+    _apply_table comme cible de renommage) sans rien changer pour les
+    tables existantes a une seule colonne 'site' (record ne contient
+    alors aucune cle 'site', comportement inchange)."""
     header, rows = _read_table_rows(table_path, encoding=encoding)
     if "site" not in header:
         raise ValueError("Table file must have a 'site' column header (site-level mode).")
+    lookup_idx = header.index("site")
     table: Dict[str, dict] = {}
     for row in rows:
-        record = dict(zip(header, row))
-        site = record.get("site", "").strip()
-        if site:
-            table[site] = record
+        if lookup_idx >= len(row):
+            continue
+        site = row[lookup_idx].strip()
+        if not site:
+            continue
+        record = {
+            col: row[i].strip()
+            for i, col in enumerate(header)
+            if i != lookup_idx and i < len(row)
+        }
+        table[site] = record
     return _apply_table(prmag_path, table, key_field="site")
 
 
