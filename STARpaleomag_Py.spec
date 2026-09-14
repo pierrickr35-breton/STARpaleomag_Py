@@ -16,12 +16,21 @@ datas = collect_data_files('pmagpy')
 # (sys._MEIPASS + 'help' + nom de fichier) le retrouve une fois empaquete.
 datas += [('help', 'help')]
 
+# matplotlib charge les backends SVG/PDF dynamiquement au moment de
+# fig.savefig(path, format="svg") (Export SVG...) / pdf.savefig(fig)
+# (detailed_export.py), PAS via un `import` statique visible dans le
+# source - PyInstaller ne les detecte donc pas tout seuls et l'app
+# packagee echoue a l'export avec "No module named matplotlib.backends.
+# backend_svg" (repere sur un vrai .app construit, fonctionnait depuis
+# les sources).
+hiddenimports = ['matplotlib.backends.backend_svg', 'matplotlib.backends.backend_pdf']
+
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
