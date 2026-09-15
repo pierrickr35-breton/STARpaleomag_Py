@@ -3056,6 +3056,18 @@ class AniTensor:
     # fichier jamais marque cote AMS_Py = tout exporte, comme avant
     # l'ajout de cette colonne).
     export: str = "Y"
+    # Champ applique (A/m) durant la mesure - colonne .pmagani DEDIEE
+    # ajoutee cote AMS_Py (ams_selection.AMSMeasurement.field, MEME
+    # fichier partage) - demande explicite utilisateur ("in the AMS
+    # measurements, there is also an important parameter, the field
+    # used (in A/m)... The MFK2 instrument allow measurements at
+    # different field values") : verifie sur un vrai fichier qu'un MEME
+    # specimen peut etre remesure a PLUSIEURS champs distincts (5, 50,
+    # 200, 425, 700 A/m) - une valeur legitimement differente par
+    # ligne, pas une propriete constante du specimen. None si non
+    # disponible (ancien .pmagani, ou tenseur natif STARpaleomag_Py -
+    # jamais issu d'un .asc AGICO).
+    field: Optional[float] = None
 
 
 @dataclass
@@ -3686,13 +3698,20 @@ def compute_anisotropy_tensor(
 _PMAGANI_HEADER = [
     "specimen", "code2", "etape",
     "k11", "k22", "k33", "k12", "k23", "k13", "s(SI*1e-5)",
-    "n_positions", "sigma", "ftest", "ftest12", "ftest23", "quality", "export", "info",
+    "n_positions", "sigma", "ftest", "ftest12", "ftest23", "quality",
+    "field_Am", "export", "info",
 ]
-# Largeur d'un fichier ecrit AVANT l'ajout de la colonne "export" (voir
-# AniTensor.export) - MEME principe de retro-compatibilite que
-# _PMAGANI_MEAN_HEADER_LEGACY_LEN plus bas ; un tel fichier reste lu
-# "export=Y" par defaut (voir _read_pmagani_tensors).
-_PMAGANI_HEADER_LEGACY_LEN = len(_PMAGANI_HEADER) - 1
+# TROIS largeurs possibles pour un fichier .pmagani specimen (MEME
+# principe de retro-compatibilite que _PMAGANI_MEAN_HEADER_LEGACY_LEN/
+# _NO_EXPORT_LEN plus bas) : le plus ancien format (ni field_Am ni
+# export), un format intermediaire (export ajoute, pas encore field_Am),
+# et le format actuel (field_Am + export avant info) - voir AniTensor.
+# field, demande explicite utilisateur ("the field used (in A/m)... The
+# MFK2 instrument allow measurements at different field values"). Un
+# fichier plus ancien reste lu "export=Y"/field=None par defaut (voir
+# _read_pmagani_tensors).
+_PMAGANI_HEADER_LEGACY_LEN = len(_PMAGANI_HEADER) - 2
+_PMAGANI_HEADER_NO_FIELD_LEN = len(_PMAGANI_HEADER) - 1
 # `quality` ('g'/'b'/n.d) : verdict PmagPy (Hext F-test, aniso_ftest_
 # quality) persiste comme colonne A PART ENTIERE (pas seulement noye dans
 # le texte libre `info`) - necessaire pour pouvoir le RELIRE de facon
@@ -3845,6 +3864,7 @@ def _format_pmagani_line(
         _fmt_pmagani_stat(tensor.sigma), _fmt_pmagani_stat(tensor.ftest),
         _fmt_pmagani_stat(tensor.ftest12), _fmt_pmagani_stat(tensor.ftest23),
         tensor.quality or "n.d",
+        _fmt_pmagani_stat(tensor.field),
         tensor.export or "Y",
         info,
     ]
@@ -3895,16 +3915,25 @@ def _read_pmagani_tensors(path: str) -> List[AniTensor]:
             quality = None
             if len(parts) > 15 and parts[15].strip() in ("g", "b"):
                 quality = parts[15].strip()
-            # export : colonne ajoutee cote AMS_Py (voir AniTensor.export) -
-            # absente (fichier plus ancien que _PMAGANI_HEADER_LEGACY_LEN)
-            # => "Y" par defaut, meme retro-compatibilite que n_positions/
-            # sigma/ftest* ci-dessus.
+            # field_Am/export : colonnes ajoutees cote AMS_Py (voir
+            # AniTensor.field/export) - TROIS largeurs possibles (meme
+            # principe que _PMAGANI_HEADER_LEGACY_LEN/_NO_EXPORT_LEN) :
+            # index 16/17 different selon que field_Am est present ou
+            # non, un simple test de position ("len(parts) > 16") ne
+            # suffit PAS a les distinguer - il faut la largeur totale.
+            field = None
             export = "Y"
-            if len(parts) > 16 and parts[16].strip() in ("Y", "N"):
-                export = parts[16].strip()
+            if len(parts) >= len(_PMAGANI_HEADER):
+                field = _parse_pmagani_stat(parts[16])
+                if parts[17].strip() in ("Y", "N"):
+                    export = parts[17].strip()
+            elif len(parts) >= _PMAGANI_HEADER_NO_FIELD_LEN:
+                if parts[16].strip() in ("Y", "N"):
+                    export = parts[16].strip()
             out.append(AniTensor(
                 id=parts[0], code2=parts[1], k11=k11, k22=k22, k33=k33,
                 k12=k12, k23=k23, k13=k13,
+                field=field,
                 n_positions=n_positions, sigma=sigma, ftest=ftest,
                 ftest12=ftest12, ftest23=ftest23, quality=quality,
                 export=export,
