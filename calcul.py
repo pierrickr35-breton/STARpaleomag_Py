@@ -775,6 +775,29 @@ def _resolve_step_range_by_value(
     return jdeb, jfin
 
 
+def _parse_redo_numcomp(token: str) -> Tuple[int, str]:
+    """Derniere colonne d'une ligne de redo file (voir fit_from_redo_file) :
+    accepte soit un ANCIEN numero (1-9, converti en lettre via
+    _component_from_numcomp - MEME principe que l'import legacy, "change
+    the component number to letter during import of legacy"), soit DEJA
+    une lettre de composante (A/B/C...) - demande explicite utilisateur
+    ("quand on utilise un redo file, transformer le numero de composante
+    1 en A; 2 en B, 3 en C etc; si le redo file a deja les composantes en
+    A,B etc, garder les lettres"). `numcomp` (l'entier, usage INTERNE
+    seulement - voir FitResult.numcomp, ex. couleur du trace Zijderveld)
+    est deduit de la lettre dans ce 2e cas (A=1, B=2, ...) plutot que
+    fige a 1 pour toutes les composantes. Retourne (1, "A") si le token
+    n'est ni un nombre ni une lettre seule."""
+    token = token.strip()
+    if token.isdigit():
+        numcomp = int(token)
+        return numcomp, _component_from_numcomp(numcomp)
+    if len(token) == 1 and token.isalpha():
+        letter = token.upper()
+        return ord(letter) - ord("A") + 1, letter
+    return 1, "A"
+
+
 def fit_from_redo_file(
     pmag_list: List[Pmag], redo_lines: List[str]
 ) -> List[FitResult]:
@@ -789,7 +812,11 @@ def fit_from_redo_file(
     nbmes=0; recherche dans pmag(:) par id, etapmin=0/etapmax=9999/
     demag='*'), independamment de toute selection en cours. Un fichier redo
     peut donc rejouer des ajustements sur des specimens jamais selectionnes
-    manuellement au prealable."""
+    manuellement au prealable.
+
+    La derniere colonne (numcomp) est convertie en lettre de composante
+    (voir _parse_redo_numcomp) et assignee a `FitResult.component` -
+    demande explicite utilisateur (voir _parse_redo_numcomp)."""
     results: List[FitResult] = []
     last_line: Optional[str] = None
 
@@ -810,8 +837,9 @@ def fit_from_redo_file(
         ech = matches[0] if matches else None
         if ech is None or len(ech.mesures) < 3:
             continue
+        numcomp, component = _parse_redo_numcomp(numcomp_s)
         try:
-            tempmin, tempmax, numcomp = float(tempmin_s), float(tempmax_s), int(numcomp_s)
+            tempmin, tempmax = float(tempmin_s), float(tempmax_s)
         except ValueError:
             continue
 
@@ -831,6 +859,7 @@ def fit_from_redo_file(
                 # calcul PCA lui-meme ignore ancr, seul le champ change).
                 fit.orig = "o" if anchored else "n"
         if fit is not None:
+            fit.component = component
             results.append(fit)
 
     return results
