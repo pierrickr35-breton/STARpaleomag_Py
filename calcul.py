@@ -3834,6 +3834,32 @@ def _insert_pmagani_line(path: str, line: str, is_mean: bool) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def create_empty_pmagani_if_missing(path: str) -> bool:
+    """Cree un .pmagani VIDE (juste l'en-tete, section specimen sans
+    aucune ligne de donnees) si `path` n'existe pas deja - demande
+    explicite utilisateur ("lors de la creation d'un .prmag ce serait
+    peut-etre bien de creer un pmagani meme si il est vide") : le
+    compagnon .pmagani existe des la creation du .prmag (voir
+    write_prmag_from_field_notes cote field_notes.py), pret a etre
+    archive dedans (AMS_Py "Archive ASC into .pmagani...") sans devoir
+    d'abord passer par un .asc/.ANI pour qu'il existe. NE FAIT RIEN si
+    le fichier existe deja (jamais ecrase - meme discipline "archiver,
+    jamais remplacer" que partout ailleurs dans ce projet). Retourne
+    True si le fichier a ete cree, False s'il existait deja."""
+    if os.path.exists(path):
+        return False
+    lines = [
+        "# pmagani v2 - companion of .prmag/.pmagres, join key = specimen "
+        "(specimen section) / site (site mean section)",
+        _PMAGANI_UNITS_NOTE.rstrip("\n"),
+        _ANI_SPECIMEN_HEADER,
+        "\t".join(_PMAGANI_HEADER),
+    ]
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    return True
+
+
 def _format_pmagani_line(
     specimen_id: str, tensor: AniTensor, etape: int,
     zplus_label: str, zminus_label: str, trm_evolution_pct: float, deviation_pct: float,

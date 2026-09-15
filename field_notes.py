@@ -114,6 +114,7 @@ from typing import Dict, List, Optional, Tuple
 from testlect import Pmag
 from convert_ren_to_r import _sample_header_block, _MEAS_HEADER
 from orient_sample import igrf_declination, _sun_declination_and_eot, _spherical_azimuth
+from calcul import ani_path_for, create_empty_pmagani_if_missing
 
 _LETTERS = ("A", "B", "C")
 
@@ -618,7 +619,15 @@ def build_pmag_records(sites: List[FieldSite], ispec: int) -> List[Pmag]:
 def write_prmag_from_field_notes(records: List[Pmag], out_path: str) -> int:
     """Ecrit `records` (mesures vides) au format .prmag moderne - un bloc
     de 4 lignes d'entete + l'entete de mesures (SANS ligne de mesure,
-    aucun instrument n'a encore rien mesure), separes par une ligne vide."""
+    aucun instrument n'a encore rien mesure), separes par une ligne vide.
+
+    Cree aussi le .pmagani compagnon (vide, juste l'en-tete) s'il
+    n'existe pas deja - demande explicite utilisateur ("lors de la
+    creation d'un .prmag ce serait peut-etre bien de creer un pmagani
+    meme si il est vide") : pret a etre archive (AMS_Py "Archive ASC
+    into .pmagani...") sans devoir d'abord passer par un .asc/.ANI pour
+    qu'il existe. N'ecrase JAMAIS un .pmagani deja present (voir
+    calcul.create_empty_pmagani_if_missing)."""
     blocks = []
     for p in records:
         blocks.append(_sample_header_block(p) + "\n" + _MEAS_HEADER)
@@ -626,6 +635,7 @@ def write_prmag_from_field_notes(records: List[Pmag], out_path: str) -> int:
         f.write("\n\n".join(blocks) + "\n")
         f.flush()
         os.fsync(f.fileno())
+    create_empty_pmagani_if_missing(ani_path_for(out_path))
     return len(records)
 
 
