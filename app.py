@@ -5493,12 +5493,12 @@ class STARpaleomagApp:
             if site is None:
                 return
             component = self._console_input(
-                "Magnetization component (A/B/C..., * = all): ", "A")
+                "Magnetization component (A/B/C..., blank = all): ", "")
             if component is None:
                 return
             loaded = load_results(
                 self.results_path, pattern=site or "*", carselect=carselect,
-                iorient=self.orientation.get(), component=component or "A",
+                iorient=self.orientation.get(), component=component or "*",
             )
             if not loaded:
                 available = available_mean_orientations(self.results_path, site or "*")
@@ -5519,12 +5519,12 @@ class STARpaleomagApp:
             if cat1 is None:
                 return
             component = self._console_input(
-                "Magnetization component (A/B/C..., * = all): ", "A")
+                "Magnetization component (A/B/C..., blank = all): ", "")
             if component is None:
                 return
             loaded = load_results(self.results_path, pattern=pattern or "*",
                                    carselect="d", cat1=cat1 or "*", numcomp=None,
-                                   component=component or "A")
+                                   component=component or "*")
 
         # tx/ty/tz (segment ajuste, pour le trace sur un Zijderveld) ne sont
         # plus stockes dans le fichier .r (voir calcul.recompute_fit_geometry)
