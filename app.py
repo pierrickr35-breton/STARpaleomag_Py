@@ -5546,5 +5546,13 @@ class STARpaleomagApp:
 
 if __name__ == "__main__":
     root = tk.Tk()
+    # Force l'encodage systeme de Tcl a utf-8 - meme correctif que
+    # AMS_Py/StereoUtils_Py (demande explicite utilisateur "l'appli
+    # installee ne fonctionne pas tres bien, par exemple probleme de
+    # texte Latin lors de l'importation. Pas de pb depuis le terminal") :
+    # Tcl/Tk devine son "system encoding" depuis LANG/LC_ALL au
+    # demarrage - absent pour un .app lance depuis le Finder/Dock
+    # (contrairement a un Terminal, qui herite la locale du shell).
+    root.tk.call("encoding", "system", "utf-8")
     app = STARpaleomagApp(root)
     root.mainloop()

@@ -1041,10 +1041,24 @@ _MEASUREMENTS_HEADER = [
 
 _INSTRUMENT_CODES = {
     "": ("2 positions", ""),
-    "C1": ("2G_Cryo 1 position", "1"),
-    "C4": ("2G Cryo 4 positions", "4"),
+    "C1": ("2G magnetometer one position", "1"),
+    "C4": ("2G magnetometer 4 positions", "4"),
     "JA": ("JR5 or JR6 automatic", "3"),
     "J2": ("JR5 or JR6 2 positions", "2"),
+    # "S" : Schonstedt spinner (voir convert_ren_to_r.py, meme code deja
+    # traite a part pour le champ "error", jeux de donnees de ~30 ans) -
+    # demande explicite utilisateur ("Si S mettre Schonstedt").
+    "S": ("Schonstedt", ""),
+    # "J"/"J?" : modele Agico Spinner non precise dans les vieux fichiers
+    # Rennes ; "J5"/"J6" : modele precise (JR5 vs JR6) - demande explicite
+    # utilisateur ("si le code magnetometre est J, ou J? mettre Agico
+    # Spinner si c'est J5 ou J6 : Agico Spinner Jr5 ou Agico Spinner
+    # Jr6"), distinct de "JA"/"J2" ci-dessus (qui denotent le PROTOCOLE -
+    # automatique/2 positions - pas le modele d'instrument).
+    "J": ("Agico Spinner", ""),
+    "J?": ("Agico Spinner", ""),
+    "J5": ("Agico Spinner Jr5", ""),
+    "J6": ("Agico Spinner Jr6", ""),
 }
 
 
@@ -1053,7 +1067,7 @@ def _instrument(ins: str) -> str:
     if ins in _INSTRUMENT_CODES:
         return _INSTRUMENT_CODES[ins][0]
     if ins[:1] == "M":
-        return "Molspin 6 positions"
+        return "Molspin spinner"
     return "2 positions"
 
 
