@@ -1046,10 +1046,12 @@ def build_site_mean_result(
     moyenne calculee localement par l'application elle-meme.
 
     `site_lat`/`site_lon` : necessaires au calcul du VGP (dir_to_vgp) -
-    0.0/0.0 si non disponibles (voir site_lat_lon_from_donnees), le VGP est
-    alors archive mais denue de sens (0,0 n'est jamais un vrai site) -
-    laisse a l'appelant le soin de prevenir l'utilisateur plutot que de
-    bloquer l'archivage. `component` : etiquette de composante de
+    0.0/0.0 si non disponibles (voir site_lat_lon_from_donnees) : le VGP
+    n'est ALORS PAS calcule (0,0 n'est jamais un vrai site) -
+    par4/par5/vgp_dp/vgp_dm restent a 0.0 (sentinel "non calcule", meme
+    garde que import_site_mean_table) plutot que d'archiver un VGP denue
+    de sens - demande explicite utilisateur ("ne pas calculer le VGP si
+    lat et lon = 0"). `component` : etiquette de composante de
     magnetisation (A/B/C..., voir FitResult.component) - demandee
     explicitement a l'archivage, jamais deduite de `numcomp` des resultats
     individuels ("I think it is best not to use the numcomp of individual
@@ -1064,8 +1066,17 @@ def build_site_mean_result(
     renseigne ici (une moyenne archivee par cette fonction sait forcement
     ce qu'elle combine), au contraire d'une moyenne importee d'un autre
     format (voir FitResult.n_lines)."""
-    vgp_lat, vgp_lon = dir_to_vgp(stats.dec, stats.inc, site_lat, site_lon)
-    vgp_dp, vgp_dm = dp_dm_from_a95(stats.a95, stats.inc)
+    # VGP non calcule si lat/lon de site sont (0,0) - demande explicite
+    # utilisateur ("dans un calcul de direction moyenne a partir de
+    # results, ne pas calculer le VGP si lat et lon = 0") : (0,0) n'est
+    # jamais un vrai site (voir docstring ci-dessus), MEME garde deja
+    # utilisee par import_site_mean_table ("if orientation == 3.0 and
+    # (lat or lon)") - vgp_lat/vgp_lon/vgp_dp/vgp_dm restent a 0.0 (deja
+    # le sentinel "non calcule" etabli ailleurs dans ce module).
+    vgp_lat = vgp_lon = vgp_dp = vgp_dm = 0.0
+    if site_lat or site_lon:
+        vgp_lat, vgp_lon = dir_to_vgp(stats.dec, stats.inc, site_lat, site_lon)
+        vgp_dp, vgp_dm = dp_dm_from_a95(stats.a95, stats.inc)
     codes = ":".join(str(r.c) for r in contributing if r.c)
     n_lines = sum(1 for r in contributing if r.cat1 in _LINE_LIKE_CAT1)
     n_planes = sum(1 for r in contributing if r.cat1 == "P")
