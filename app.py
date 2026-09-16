@@ -1945,15 +1945,22 @@ class STARpaleomagApp:
         # --- Bilan de disponibilite + choix consolides (voir docstring,
         # point 1) : calcule ce qui EXISTE pour la selection courante
         # avant de poser la moindre question, pour que l'utilisateur
-        # sache d'emblee ce qu'il peut inclure.
-        selected_ids = {ech.id for ech in self.selection}
-        n_results = len({
-            r.id for r in self.results if r.id in selected_ids and r.cat1 in ("L", "P", "f", "F")
-        })
+        # sache d'emblee ce qu'il peut inclure. `n_results`/
+        # `pmagint_available` portent sur TOUT self.results/.pmagint,
+        # PAS seulement les specimens deja dans self.selection - un
+        # resultat/une paleointensite archives pour un specimen absent de
+        # la selection courante ("Select results..."/le .pmagint chargent
+        # un ensemble INDEPENDANT de "Select samples...") sera quand meme
+        # inclus (voir plus bas, extension de `export_samples`, meme
+        # traitement que les specimens AMS-only) - BUG REEL trouve et
+        # reproduit sur le jeu de donnees Concon rn01_15 ("in the test I
+        # selected 88 results but only 86 were exported", silencieux
+        # jusqu'ici). Le bilan doit donc annoncer ce total complet, pas
+        # seulement l'intersection avec la selection.
+        n_results = len({r.id for r in self.results if r.cat1 in ("L", "P", "f", "F")})
         pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
         pmagint_available = (
-            {sid: row for sid, row in read_pmagint(pmagint_path).items() if sid in selected_ids}
-            if pmagint_path and os.path.exists(pmagint_path) else {}
+            dict(read_pmagint(pmagint_path)) if pmagint_path and os.path.exists(pmagint_path) else {}
         )
         ani_path = self._find_ani_path()
         n_aniso_raw = sum(1 for ech in self.selection if any(m.cod1 in ("X", "Y", "Z") for m in ech.mesures))
@@ -1965,6 +1972,8 @@ class STARpaleomagApp:
             f"  - anisotropy: {n_aniso_raw} specimen(s) with raw X/Y/Z measurements"
             + (f", archived tensor(s) found in {os.path.basename(ani_path)}" if ani_path else "")
             + "\n"
+            "(results/paleointensity for a specimen outside the current selection "
+            "are still included below.)\n"
         )
 
         want_results = False
@@ -2076,6 +2085,93 @@ class STARpaleomagApp:
         aniso_tensors = {}
         aniso_mean_tensors = {}
         export_samples = list(self.selection)
+
+        # Specimens connus SEULEMENT via un resultat archive (self.results,
+        # charge par "Select results..." - un ensemble INDEPENDANT de
+        # self.selection/"Select samples...") - BUG REEL trouve et
+        # reproduit sur le jeu de donnees Concon rn01_15 ("in the test I
+        # selected 88 results but only 86 were exported") : un resultat
+        # dont le specimen n'est plus dans self.selection au moment de
+        # l'export (ex. une selection de samples plus etroite que
+        # l'ensemble de resultats charge) disparaissait de l'export SANS
+        # AUCUN avertissement - `_dir_rows_for_specimen` ne genere de
+        # ligne que pour un specimen present dans `export_samples`, jamais
+        # directement depuis `results`. Meme traitement que le cas
+        # AMS-only ci-dessous (recherche directe dans self.donnees par id
+        # exact, ajout si trouve, SIGNALE si introuvable - jamais
+        # silencieux) : evite exactement le meme genre de perte
+        # silencieuse pour les resultats que celle deja geree pour
+        # l'anisotropie.
+        if want_results:
+            known_ids = {e.id.strip().upper() for e in export_samples}
+            extra_result_ids = sorted({
+                r.id.strip() for r in self.results
+                if r.id.strip() and r.id.strip().upper() not in known_ids
+                and r.cat1 in ("L", "P", "f", "F")
+            })
+            donnees_by_id = {p.id.strip().upper(): p for p in self.donnees}
+            n_from_prmag = 0
+            orphan_ids = []
+            for extra_id in extra_result_ids:
+                p = donnees_by_id.get(extra_id.upper())
+                if p is not None:
+                    export_samples.append(_build_selected_sample(p, p.mesures))
+                    n_from_prmag += 1
+                else:
+                    orphan_ids.append(extra_id)
+            if n_from_prmag:
+                self._afficher(
+                    f"[Export to MagIC] {n_from_prmag} specimen(s) with archived "
+                    f"results only (not in the current sample selection) added "
+                    f"for export.\n"
+                )
+            if orphan_ids:
+                shown = ", ".join(orphan_ids[:20])
+                more = f", ... ({len(orphan_ids) - 20} more)" if len(orphan_ids) > 20 else ""
+                self._afficher(
+                    f"WARNING: {len(orphan_ids)} specimen(s) with archived results "
+                    f"have NO counterpart in the loaded .prmag - excluded from "
+                    f"export (check for mismatched files or a typo): {shown}{more}\n"
+                )
+
+        # Meme trou, meme correctif, pour un specimen connu SEULEMENT via
+        # .pmagint (paleointensite deja archivee) - meme risque exact que
+        # pour les resultats directionnels ci-dessus (specimen absent de
+        # self.selection au moment de l'export), pas encore observe en
+        # pratique sur un jeu de donnees reel mais partage la MEME cause
+        # racine (build_specimens_rows n'itere que sur export_samples) -
+        # corrige preventivement plutot que d'attendre un second rapport.
+        if want_pmagint and pmagint_available:
+            known_ids = {e.id.strip().upper() for e in export_samples}
+            extra_pmagint_ids = sorted({
+                sid.strip() for sid in pmagint_available
+                if sid.strip() and sid.strip().upper() not in known_ids
+            })
+            donnees_by_id = {p.id.strip().upper(): p for p in self.donnees}
+            n_from_prmag = 0
+            orphan_ids = []
+            for extra_id in extra_pmagint_ids:
+                p = donnees_by_id.get(extra_id.upper())
+                if p is not None:
+                    export_samples.append(_build_selected_sample(p, p.mesures))
+                    n_from_prmag += 1
+                else:
+                    orphan_ids.append(extra_id)
+            if n_from_prmag:
+                self._afficher(
+                    f"[Export to MagIC] {n_from_prmag} specimen(s) with archived "
+                    f"paleointensity only (not in the current sample selection) "
+                    f"added for export.\n"
+                )
+            if orphan_ids:
+                shown = ", ".join(orphan_ids[:20])
+                more = f", ... ({len(orphan_ids) - 20} more)" if len(orphan_ids) > 20 else ""
+                self._afficher(
+                    f"WARNING: {len(orphan_ids)} specimen(s) with archived "
+                    f"paleointensity have NO counterpart in the loaded .prmag - "
+                    f"excluded from export (check for mismatched files or a "
+                    f"typo): {shown}{more}\n"
+                )
 
         if want_aniso and ani_path:
             # Specimens connus SEULEMENT via leur tenseur AMS (.pmagani),
