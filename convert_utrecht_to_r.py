@@ -109,12 +109,17 @@ def _nd(value, fmt: Optional[str] = None) -> str:
 
 class _FakeMeasurement:
     """Juste assez de champs pour reutiliser magic_export._measurement_treatment
-    (qui ne lit que .etape/.cod1/.cod2) sans construire un vrai
-    testlect.Measurement (pas de x/y/z/q/ins/s pertinents a ce stade)."""
+    sans construire un vrai testlect.Measurement (pas de x/y/z/q/s
+    pertinents a ce stade). `ins` DOIT rester present (meme None) : le
+    cas cod1=='F' de _measurement_treatment lit `m.ins` inconditionnellement
+    (`(m.ins or "").strip().upper()`) - AttributeError sinon des qu'un
+    fichier Utrecht a demagnetizationType=="alternating" (bug reel trouve
+    en portant convert_ipgp_to_r.py, qui reutilise ce meme patron)."""
     def __init__(self, etape: float, cod1: str, cod2: str = "0"):
         self.etape = etape
         self.cod1 = cod1
         self.cod2 = cod2
+        self.ins = None
 
 
 def _sample_header_block(sp: dict, site: str = "n.d") -> str:

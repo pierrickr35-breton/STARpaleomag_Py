@@ -16,6 +16,7 @@ from import_new_data import parse_jr6_file, parse_legacy_new_measurements, archi
 from convert_ren_to_r import convert_file as convert_ren_to_r_file
 from convert_magic_to_r import convert_magic_file
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
+from convert_ipgp_to_r import convert_files as convert_ipgp_files
 from irm import build_irm_figure, has_irm_data
 from selection import (
     select_samples,
@@ -443,6 +444,8 @@ class STARpaleomagApp:
                                command=self.ouvrir_convert_magic_to_r_dialog)
         file_menu.add_command(label="Import Utrecht/PMAG2 .col to .prmag format...",
                                command=self.ouvrir_convert_utrecht_to_r_dialog)
+        file_menu.add_command(label="Import IPGP measurements/results to .prmag format...",
+                               command=self.ouvrir_convert_ipgp_to_r_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Orientation: field notes orientation to prmag file...",
                                command=self.ouvrir_field_notes_dialog)
@@ -1537,6 +1540,62 @@ class STARpaleomagApp:
         # utilisateur ("ce serait bien d'ouvrir les fichiers convertis a
         # la fin des conversions"). AVANT self._afficher(msg), meme
         # raison que ouvrir_convert_legacy_dialog.
+        self._load_data_file(output_path, announce=False)
+        self._afficher(msg)
+        self._showinfo("Conversion complete", msg)
+
+    def ouvrir_convert_ipgp_to_r_dialog(self):
+        """Convertit les fichiers du format IPGP (developpes par Johan
+        Guyodo/Dragomir Dragomirov) vers .prmag/.pmagres - demande
+        explicite utilisateur ("voici un nouveau format (IPGP) que je
+        souhaite convertir"), format signale INCOMPLET par l'exemple
+        fourni. Deux fichiers INDEPENDANTS, chacun optionnel a l'appel
+        (au moins un requis) : le fichier de mesures brutes ("Remanence
+        measurement file") -> .prmag, et le fichier "Results" CSV
+        (interpretations deja calculees) -> .pmagres. Voir
+        convert_ipgp_to_r.py pour le detail des transformations
+        (caz=a+90/cin=b/bed_dip_strike=s/bed_dip=d, VERIFIEES
+        numeriquement contre les Dg/Ig/Ds/Is du fichier d'exemple ; site
+        = ligne isolee precedant chaque bloc specimen, hypothese NON
+        confirmee ; AF/thermique par l'heuristique donnee par
+        l'utilisateur : "si la plupart des etapes sont a moins de 150,
+        c'est de l'AF en mT")."""
+        measurements_path = filedialog.askopenfilename(
+            title="Select IPGP raw measurement file (Cancel to skip)",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        results_path = filedialog.askopenfilename(
+            title="Select IPGP Results CSV file (Cancel to skip)",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not measurements_path and not results_path:
+            return
+        default_base = measurements_path or results_path
+        output_path = filedialog.asksaveasfilename(
+            title="Save converted .prmag as",
+            defaultextension=".prmag",
+            initialfile=os.path.splitext(os.path.basename(default_base))[0] + ".prmag",
+            initialdir=os.path.dirname(default_base),
+            filetypes=[("STARpaleomag_Py prmag", "*.prmag"), ("All files", "*.*")],
+        )
+        if not output_path:
+            return
+        try:
+            nb_sp, nb_res, nb_dup = convert_ipgp_files(
+                measurements_path or None, results_path or None, output_path
+            )
+        except Exception as e:
+            self._showerror("Error", f"Conversion failed:\n{e}")
+            return
+        msg = (
+            f"Converted: {nb_sp} specimen(s) -> {output_path}\n"
+            f"Converted: {nb_res} interpretation(s) -> {results_path_for(output_path)}"
+            f"{f' ({nb_dup} exact duplicate row(s) skipped)' if nb_dup else ''}\n"
+            "\nAssumptions used (format example was flagged incomplete - verify and "
+            "report if wrong):\n"
+            "- site = the single-token line just before each specimen header\n"
+            "- AF vs thermal decided per specimen: AF if most non-zero steps < 150\n"
+        )
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
         self._showinfo("Conversion complete", msg)
