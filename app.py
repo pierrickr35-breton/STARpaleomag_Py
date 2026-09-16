@@ -2207,6 +2207,13 @@ class STARpaleomagApp:
                     title="Save site metadata table as",
                     defaultextension=".txt",
                     initialfile="site_metadata_preview.txt",
+                    # Dossier du .prmag charge par defaut - demande
+                    # explicite utilisateur ("where is it saved?") : sans
+                    # initialdir, la boite de dialogue s'ouvrait sur le
+                    # dernier dossier utilise par macOS (souvent sans
+                    # rapport), ne laissant aucun indice visible d'ou le
+                    # fichier finirait par etre ecrit.
+                    initialdir=os.path.dirname(self.results_path) if self.results_path else None,
                     filetypes=[("Text", "*.txt"), ("All files", "*.*")],
                 )
                 if preview_path:
