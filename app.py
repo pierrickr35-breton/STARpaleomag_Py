@@ -2193,13 +2193,13 @@ class STARpaleomagApp:
                 "\nMagIC requires site-level metadata (coordinates + geologic "
                 "classification) for a valid contribution.\n"
                 f"Site metadata check: {len(preview_rows)} site(s) in this export, "
-                f"{len(missing_sites)} with at least one missing field "
+                f"{len(missing_sites)} with at least one missing field\n"
                 "(lat/lon, geologic classes, geologic types, or lithology).\n"
             )
             export_preview = self._console_input(
                 "Export a site metadata table (site/lat/lon/geologic_classes/"
-                "geologic_types/lithologies/formation) to review/complete before "
-                "continuing? Y/n: ", "Y" if missing_sites else "n")
+                "geologic_types/lithologies/formation)\n"
+                "to review/complete before continuing? Y/n: ", "Y" if missing_sites else "n")
             if export_preview is None:
                 return
             if export_preview.strip().lower() != "n":
@@ -2224,6 +2224,23 @@ class STARpaleomagApp:
                         "below - the column names already match.\n"
                     )
 
+        # Confirmation explicite AVANT de proposer un fichier complement -
+        # demande explicite utilisateur : plutot que de toujours poser la
+        # question "Fill in... from a complement table", demande d'abord
+        # si les metadonnees sont bonnes telles quelles (l'utilisateur a
+        # pu les completer a la main entre-temps, dans le fichier
+        # exporte ci-dessus ou directement dans le .prmag) - la question
+        # du fichier complement n'est plus posee du tout si la reponse
+        # est oui. Defaut "n" (pas OK) si des champs manquaient au bilan
+        # ci-dessus, "Y" sinon.
+        metadata_ok = True
+        if preview_rows:
+            ok_answer = self._console_input(
+                "Are the specimen metadata OK (Y/n): ", "n" if missing_sites else "Y")
+            if ok_answer is None:
+                return
+            metadata_ok = ok_answer.strip().lower() != "n"
+
         # Metadonnees de site (formation/lithologies/geologic_classes/
         # geologic_types/age) depuis une table externe - demande
         # explicite utilisateur ("can we also let the site-only path
@@ -2233,15 +2250,19 @@ class STARpaleomagApp:
         # un site archive uniquement via sa moyenne (aucun specimen
         # charge, voir build_sites_rows), mais s'applique aussi aux
         # sites avec specimens dont un champ n'a jamais ete renseigne.
-        # Defaut "y" (et fichier pre-selectionne) si la table d'apercu
-        # ci-dessus vient d'etre exportee - cas d'usage attendu :
-        # l'utilisateur vient de la completer a la main.
+        # Pose desormais QUE si `metadata_ok` est faux ci-dessus. Defaut
+        # "y" (et fichier pre-selectionne) si la table d'apercu ci-dessus
+        # vient d'etre exportee - cas d'usage attendu : l'utilisateur
+        # vient de la completer a la main.
         site_metadata = None
-        add_meta = self._console_input(
-            "Fill in missing site formation/lithology/age from a complement table "
-            "(e.g. the table just exported above)? y/N: ", "y" if preview_path else "n")
-        if add_meta is None:
-            return
+        add_meta = "n"
+        if not metadata_ok:
+            add_meta = self._console_input(
+                "Fill in missing site formation/lithology/age\n"
+                "from an updated complement table (e.g. the table "
+                "just exported above)? y/N: ", "y" if preview_path else "n")
+            if add_meta is None:
+                return
         if add_meta.strip().lower() == "y":
             meta_path = filedialog.askopenfilename(
                 title="Select the site metadata table",
