@@ -17,6 +17,7 @@ from convert_ren_to_r import convert_file as convert_ren_to_r_file
 from convert_magic_to_r import convert_magic_file
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
 from convert_ipgp_to_r import convert_files as convert_ipgp_files
+from convert_montpellier_to_r import convert_file as convert_montpellier_file, DEFAULT_VOLUME_CM3 as _MONTPELLIER_DEFAULT_VOLUME_CM3
 from irm import build_irm_figure, has_irm_data
 from selection import (
     select_samples,
@@ -446,6 +447,8 @@ class STARpaleomagApp:
                                command=self.ouvrir_convert_utrecht_to_r_dialog)
         file_menu.add_command(label="Import IPGP measurements/results to .prmag format...",
                                command=self.ouvrir_convert_ipgp_to_r_dialog)
+        file_menu.add_command(label="Import Montpellier .montpellier to .prmag format...",
+                               command=self.ouvrir_convert_montpellier_to_r_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Orientation: field notes orientation to prmag file...",
                                command=self.ouvrir_field_notes_dialog)
@@ -1596,6 +1599,62 @@ class STARpaleomagApp:
             "- step type: read directly from a letter prefix when present "
             "(T...=thermal, A...=AF); for a bare numeric step (no prefix), AF is "
             "assumed if most non-zero steps are < 150\n"
+        )
+        self._load_data_file(output_path, announce=False)
+        self._afficher(msg)
+        self._showinfo("Conversion complete", msg)
+
+    def ouvrir_convert_montpellier_to_r_dialog(self):
+        """Convertit un fichier ".montpellier" (table plate Sample/Step/
+        Intensity/Dec/Inc/Azimuth/Plunge/Strike/Dip) vers .prmag - demande
+        explicite utilisateur ("convert also the format from Montpellier").
+        Voir convert_montpellier_to_r.py pour le detail : colonnes
+        VERIFIEES (pas supposees) contre BN.col (meme collection BN4.*,
+        deja validee pour convert_utrecht_to_r.py) - Dec/Inc = repere
+        specimen brut, Intensity = magnetisation A/m deja, Azimuth/Plunge
+        suivent la convention PMAG2/Utrecht (caz=Azimuth+90,
+        cin=90-Plunge), PAS celle de convert_ipgp_to_r.py. Ce format ne
+        porte AUCUN volume : demande a l'utilisateur (defaut 10.80 cm3,
+        meme defaut que ams_prmag.create_prmag_from_legacy_ani) - la
+        direction/les ajustements n'en dependent pas, seul MAG(A/m)
+        affiche serait faux si le volume reel differe."""
+        path_in = filedialog.askopenfilename(
+            title="Select a Montpellier .montpellier file",
+            filetypes=[("Montpellier", "*.montpellier"), ("All files", "*.*")],
+        )
+        if not path_in:
+            return
+        vol_s = self._console_input(
+            "Assumed specimen volume in cm3 (this format does not carry one): ",
+            f"{_MONTPELLIER_DEFAULT_VOLUME_CM3:.2f}",
+        )
+        if vol_s is None:
+            return
+        try:
+            volume_cm3 = float(vol_s)
+        except ValueError:
+            self._showerror("Error", f"Not a number: {vol_s}")
+            return
+        output_path = filedialog.asksaveasfilename(
+            title="Save converted .prmag as",
+            defaultextension=".prmag",
+            initialfile=os.path.splitext(os.path.basename(path_in))[0] + ".prmag",
+            initialdir=os.path.dirname(path_in),
+            filetypes=[("STARpaleomag_Py prmag", "*.prmag"), ("All files", "*.*")],
+        )
+        if not output_path:
+            return
+        try:
+            nb_sp = convert_montpellier_file(path_in, output_path, volume_cm3)
+        except Exception as e:
+            self._showerror("Error", f"Conversion failed:\n{e}")
+            return
+        msg = (
+            f"Converted: {nb_sp} specimen(s) -> {output_path}\n"
+            f"\nAssumed specimen volume: {volume_cm3:.2f} cm3 (not carried by this "
+            "format - correct manually per specimen if the real volume differs; "
+            "direction/fits are unaffected, only the displayed MAG(A/m)).\n"
+            "site: \"n.d\" (this format has no site column either).\n"
         )
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
