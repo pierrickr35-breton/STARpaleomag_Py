@@ -6,14 +6,29 @@ souhaite convertir. Ce n'est pas un exemple complet.") vers .prmag/.pmagres.
 Deux fichiers INDEPENDANTS a convertir (confirme par l'utilisateur -
 "1" = les deux) :
 
-1) Fichier de mesures brutes ("Remanence measurement file", attribue a
-   Johan Guyodo) -> .prmag. Un bloc par specimen :
+1) Fichier de mesures brutes -> .prmag. Un bloc par specimen. DEUX
+   variantes reelles vues jusqu'ici, gerees par le MEME parseur
+   (`read_ipgp_measurements`) :
 
-       <site>
-       <specimen>  a=<az>  b=<dip>  s=<strike>  d=<dip>  v=<vol>m3  <date> <heure> [PAL <en-tete colonnes>]
-       [PAL <en-tete colonnes>]                      (si pas deja sur la ligne precedente)
-       <palier> <Xc> <Yc> <Zc> <MAG> <Dg> <Ig> <Ds> <Is> <a95>
-       ...
+   a) "Remanence measurement file" (attribue a Johan Guyodo) - paliers
+      NUS (nombre seul, ex. "0", "5", ... "200"), et un token seul
+      (ex. "Hz12"/"hz12") juste avant chaque en-tete specimen :
+
+          Hz12
+          0975A     a=340.0   b=-12.0   s=340.0   d=  1.0   v= 8.0E-6m3  08-04-2008 20:50 PAL  Xc (Am2) ...
+          PAL  Xc (Am2)  Yc (Am2)  Zc (Am2)  MAG(A/m)   Dg    Ig    Ds    Is   a95
+          0   4.10E-08 -2.52E-09  3.27E-08  6.56E-03 335.7  50.5 336.9  50.6  1.5
+
+   b) Export CryoMag/.pmd (PaleoMac - "CryoMag 2.0c-User modified data
+      file exported to PaleoMac", demande explicite utilisateur "pour
+      les fichiers .pmd") - pas de ligne "site" (la 1ere ligne du
+      fichier est un titre logiciel fixe, PAS un site), et paliers
+      PREFIXES d'une lettre indiquant directement le type (ex. "T020" =
+      thermique 20 degC) :
+
+          K15371    a= 25.0   b= 39.0   s=314.0   d= 42.0   v=11.0E-6m3  01-03-2016 00:05
+          STEP  Xc (Am2)  Yc (Am2)  Zc (Am2)  MAG(A/m)   Dg    Ig    Ds    Is   a95
+          T020  3.07E-08 -1.25E-08  5.85E-08  6.11E-03  13.4  22.9  15.3 -13.3  0.1
 
    Colonnes (Xc/Yc/Zc en Am2 DEJA, pas de conversion d'unite necessaire -
    contrairement a Utrecht/uA/m, voir convert_utrecht_to_r.py) : palier,
@@ -23,21 +38,28 @@ Deux fichiers INDEPENDANTS a convertir (confirme par l'utilisateur -
    instrument par mesure, non reutilisee - .prmag n'a pas de colonne
    pour cette valeur au niveau mesure).
 
-   Ligne "site" : un token seul juste avant l'en-tete specimen (ex.
-   "Hz12"/"hz12" dans l'exemple fourni) - hypothese retenue faute
-   d'autre source de site dans ce format (contrairement a l'ANI legacy
-   Rennes ou au nom de fichier Utrecht) : CHAQUE bloc specimen est
-   precede d'un token seul qui reapparait identique (aux capitales pres)
-   sur les 3 specimens de l'exemple fourni, cense denoter un
-   regroupement (site/etude) - A CONFIRMER par l'utilisateur des qu'un
-   exemple plus complet sera disponible (fichier explicitement signale
-   incomplet).
+   Ligne "site" : reservee aux lignes a UN SEUL token (ex. "Hz12") -
+   distingue une vraie ligne de site d'un titre logiciel multi-mots
+   (variante b, qui n'en a pas) ; reste une hypothese A CONFIRMER pour
+   la variante (a) (aucune autre source de site dans ce format,
+   contrairement a l'ANI legacy Rennes ou au nom de fichier Utrecht).
+
+   Type de palier (cod1/etape), voir `_decode_step_label` : un label
+   "NRM" -> N/0.0 ; un label prefixe d'une lettre + un nombre -> le
+   PREFIXE donne le type directement ('T...' -> thermique/D, 'A...' ->
+   AF/F, sans ambiguite, pas d'heuristique necessaire pour la variante
+   CryoMag/.pmd) ; un label NUMERIQUE NU (variante Johan Guyodo, sans
+   prefixe) -> position 0 du bloc = N, sinon heuristique donnee par
+   l'utilisateur ("si la plupart des etapes sont a moins de 150, c'est
+   de l'AF en mT") appliquee aux seuls paliers nus du bloc - voir
+   `_is_af`.
 
    a=/b=/s=/d= -> caz/cin/bed_dip_strike/bed_dip : transformation
-   VERIFIEE NUMERIQUEMENT (pas une hypothese) sur les 4 mesures "step 0"
-   des 3 specimens de l'exemple fourni, en comparant Dg/Ig/Ds/Is donnes
-   par le fichier au resultat de selection.corfor/corpen appliques a
-   Xc/Yc/Zc :
+   VERIFIEE NUMERIQUEMENT (pas une hypothese), sur les DEUX variantes
+   (4 mesures de l'exemple Johan Guyodo ET 5 mesures de l'exemple
+   CryoMag/.pmd K15371, sources differentes), en comparant Dg/Ig/Ds/Is
+   donnes par chaque fichier au resultat de selection.corfor/corpen
+   appliques a Xc/Yc/Zc :
 
        caz = (a + 90.0) % 360.0     (meme decalage +90 que Utrecht/MagIC,
                                       voir convert_utrecht_to_r.py)
@@ -45,15 +67,15 @@ Deux fichiers INDEPENDANTS a convertir (confirme par l'utilisateur -
        bed_dip_strike = s            (directement, PAS de +90 ici)
        bed_dip = d                   (directement)
 
-   Concordance Dg/Ig et Ds/Is a 0.1 pres sur les 4 points testes
-   (0975A/0765B/0490D, plusieurs paliers) - transformation consideree
-   fiable pour ce format.
-
-   AF vs thermique : ce format ne porte AUCUN marqueur explicite du type
-   de desaimantation. Heuristique donnee par l'utilisateur ("si la
-   plupart des etapes sont a moins de 150, c'est de l'AF en mT") :
-   applique par specimen, sur les paliers non nuls de son propre bloc -
-   voir `_is_af`.
+   Concordance Dg/Ig a 0.1 pres sur les 9 points testes des deux
+   fichiers. Ds/Is concorde exactement sur l'exemple Johan Guyodo, avec
+   un residu de 0.3 a 1.3 degre sur l'exemple CryoMag/.pmd (K15371) -
+   coherent avec l'arrondi a 3 chiffres significatifs de Xc/Yc/Zc
+   (residu qui grandit avec les mesures aux composantes les plus
+   faibles, et se propage/amplifie a la 2e rotation corpen alors que
+   Dg/Ig - une seule rotation corfor - reste quasi exact) : PAS un
+   signe d'erreur de convention, mais a garder en tete si un ecart plus
+   grand apparait sur des donnees reelles completes.
 
 2) Fichier "Results" IPGP (CSV, developpe par Dragomir Dragomirov,
    dragomirov@ipgp.fr) -> .pmagres. Ajustements PCA DEJA calcules par
@@ -166,22 +188,27 @@ class _FakeMeasurement:
 
 
 def read_ipgp_measurements(path: str) -> List[dict]:
-    """Parse un fichier "Remanence measurement file" IPGP -> liste de
-    dict {specimen, site, caz, cin, bed_dip_strike, bed_dip, volume_cm3,
-    date, time, steps:[{step,x,y,z,mag,dg,ig,ds,is_,a95}]}.
+    """Parse un fichier de mesures brutes IPGP/CryoMag -> liste de dict
+    {specimen, site, caz, cin, bed_dip_strike, bed_dip, volume_cm3, date,
+    time, steps:[{step_label,x,y,z,mag,dg,ig,ds,is_,a95}]} - gere les
+    deux variantes documentees dans la docstring du module (paliers nus
+    vs prefixes, avec/sans ligne de site).
 
-    Classification ligne par ligne (voir docstring module pour le detail
-    des 3 hypotheses verifiees/a confirmer) :
+    Classification ligne par ligne :
       - une ligne contenant "a=" ET "v=" demarre un nouveau bloc specimen ;
-      - une ligne commencant par "PAL" (en-tete de colonnes, sur la meme
-        ligne que le specimen ou sur la suivante selon les blocs de
-        l'exemple fourni) est ignoree (colonnes fixes, connues d'avance) ;
-      - une ligne dont le premier token est numerique, a l'interieur d'un
-        bloc specimen actif, est une ligne de mesure ;
-      - toute autre ligne non vide est retenue comme "site en attente"
-        (ecrase par la ligne suivante du meme type tant qu'aucun bloc
-        specimen ne l'a consommee - absorbe donc sans effet de bord un
-        titre de fichier avant la premiere vraie ligne de site)."""
+      - une ligne contenant "Xc" et "(Am2)" est un en-tete de colonnes
+        (que le 1er mot soit "PAL" ou "STEP") - ignoree (colonnes fixes,
+        connues d'avance) ;
+      - une ligne d'au moins 9 champs dont les champs 2 a 9 sont
+        numeriques, a l'interieur d'un bloc specimen actif, est une
+        ligne de mesure (le 1er champ, le "palier", est garde tel quel -
+        `step_label` - decode plus tard par `_decode_step_label`) ;
+      - une ligne restante A UN SEUL token (pas de sequence de mesure
+        valide, pas d'en-tete) est retenue comme "site en attente"
+        (ecrasee par la ligne suivante du meme type tant qu'aucun bloc
+        specimen ne l'a consommee) - une ligne a PLUSIEURS mots (ex. un
+        titre logiciel comme "CryoMag 2.0c-User modified data file
+        exported to PaleoMac") n'est PAS retenue comme site."""
     specimens: List[dict] = []
     current: Optional[dict] = None
     pending_site: Optional[str] = None
@@ -213,35 +240,53 @@ def read_ipgp_measurements(path: str) -> List[dict]:
             }
             continue
 
-        if line.upper().startswith("PAL"):
-            # en-tete de colonnes (deja connu, colonnes fixes) - ignore
+        if "Xc" in line and "(Am2)" in line:
+            # en-tete de colonnes ("PAL ..." ou "STEP ...") - ignore
             continue
 
-        first_token = line.split()[0]
-        try:
-            step_val = float(first_token)
-            is_data_row = True
-        except ValueError:
-            is_data_row = False
+        fields = line.split()
+        is_data_row = False
+        if current is not None and len(fields) >= 9:
+            try:
+                xc, yc, zc, mag, dg, ig, ds, is_val = (float(v) for v in fields[1:9])
+                is_data_row = True
+            except ValueError:
+                is_data_row = False
 
-        if is_data_row and current is not None:
-            fields = line.split()
-            if len(fields) < 9:
-                continue
-            step, xc, yc, zc, mag, dg, ig, ds, is_val = (float(v) for v in fields[:9])
+        if is_data_row:
             a95 = float(fields[9]) if len(fields) > 9 else None
             current["steps"].append({
-                "step": step, "x": xc, "y": yc, "z": zc, "mag": mag,
+                "step_label": fields[0], "x": xc, "y": yc, "z": zc, "mag": mag,
                 "dg": dg, "ig": ig, "ds": ds, "is_": is_val, "a95": a95,
             })
             continue
 
-        # ni en-tete specimen, ni ligne PAL, ni ligne de mesure -> site
-        pending_site = line
+        if len(fields) == 1:
+            pending_site = line
 
     if current is not None:
         specimens.append(current)
     return specimens
+
+
+def _decode_step_label(label: str) -> Optional[Tuple[str, float]]:
+    """"NRM" -> ('N', 0.0) ; un label prefixe d'une ou plusieurs lettres
+    suivies d'un nombre -> type donne par la 1ere lettre ('T...' =
+    thermique/'D', 'A...' = AF/'F') ; sinon (label numerique nu ou non
+    reconnu) -> None, l'appelant retombe sur l'heuristique de position/
+    majorite (voir docstring module)."""
+    label_u = label.strip().upper()
+    if label_u == "NRM":
+        return "N", 0.0
+    m = re.match(r"^([A-Za-z]+)(" + _NUM + r")$", label_u)
+    if not m:
+        return None
+    prefix, num = m.group(1), float(m.group(2))
+    if prefix.startswith("T"):
+        return "D", num
+    if prefix.startswith("A"):
+        return "F", num
+    return None
 
 
 def _sample_header_block(sp: dict) -> str:
@@ -270,22 +315,41 @@ def _sample_header_block(sp: dict) -> str:
 
 
 def _measurement_rows(sp: dict) -> List[str]:
-    is_af = _is_af([st["step"] for st in sp["steps"]])
-    cod1_demag = "F" if is_af else "D"
+    # Heuristique de secours (voir _decode_step_label / docstring module) :
+    # seulement pour les paliers NUS (sans prefixe de lettre) - un bloc
+    # entierement prefixe (variante CryoMag/.pmd) n'a jamais besoin de ce
+    # repli, chaque palier etant deja type par son propre label.
+    bare_numeric_steps = []
+    for st in sp["steps"]:
+        if _decode_step_label(st["step_label"]) is None:
+            try:
+                bare_numeric_steps.append(float(st["step_label"]))
+            except ValueError:
+                pass
+    cod1_demag_fallback = "F" if _is_af(bare_numeric_steps) else "D"
+
     rows = [_MEAS_HEADER]
     for j, st in enumerate(sp["steps"]):
-        cod1 = "N" if j == 0 else cod1_demag
-        step_val = st["step"]
-        etape = 0.0 if cod1 == "N" else step_val
+        decoded = _decode_step_label(st["step_label"])
+        if decoded is not None:
+            cod1, etape = decoded
+        elif j == 0:
+            cod1, etape = "N", 0.0
+        else:
+            try:
+                step_val = float(st["step_label"])
+            except ValueError:
+                step_val = 0.0
+            cod1, etape = cod1_demag_fallback, step_val
+
         fake_m = _FakeMeasurement(etape=etape, cod1=cod1, cod2="0")
         codes, _temp_k, af_field, _dc, _phi, _theta = _measurement_treatment(fake_m, [], 0.0)
 
         af_field_mT = af_field * 1.0e3 if cod1 == "F" else None
         temp_c = etape if cod1 in ("N", "D") else 0.0
-        step_str = 0.0 if cod1 == "N" else step_val
 
         row = "\t".join([
-            f"{step_str:6.1f}", cod1, "0",
+            f"{etape:6.1f}", cod1, "0",
             f"{st['x']:11.3E}", f"{st['y']:11.3E}", f"{st['z']:11.3E}",
             "n.d", "g", "n.d", "n.d",
             _nd(temp_c, "6.1f"),

@@ -1545,21 +1545,19 @@ class STARpaleomagApp:
         self._showinfo("Conversion complete", msg)
 
     def ouvrir_convert_ipgp_to_r_dialog(self):
-        """Convertit les fichiers du format IPGP (developpes par Johan
-        Guyodo/Dragomir Dragomirov) vers .prmag/.pmagres - demande
-        explicite utilisateur ("voici un nouveau format (IPGP) que je
-        souhaite convertir"), format signale INCOMPLET par l'exemple
-        fourni. Deux fichiers INDEPENDANTS, chacun optionnel a l'appel
-        (au moins un requis) : le fichier de mesures brutes ("Remanence
-        measurement file") -> .prmag, et le fichier "Results" CSV
-        (interpretations deja calculees) -> .pmagres. Voir
-        convert_ipgp_to_r.py pour le detail des transformations
-        (caz=a+90/cin=b/bed_dip_strike=s/bed_dip=d, VERIFIEES
-        numeriquement contre les Dg/Ig/Ds/Is du fichier d'exemple ; site
-        = ligne isolee precedant chaque bloc specimen, hypothese NON
-        confirmee ; AF/thermique par l'heuristique donnee par
-        l'utilisateur : "si la plupart des etapes sont a moins de 150,
-        c'est de l'AF en mT")."""
+        """Convertit les fichiers de mesures brutes IPGP/CryoMag(.pmd)
+        (developpes par Johan Guyodo/Dragomir Dragomirov a l'IPGP, et le
+        format CryoMag/PaleoMac "pour les fichiers .pmd") vers
+        .prmag/.pmagres - demande explicite utilisateur. Deux fichiers
+        INDEPENDANTS, chacun optionnel a l'appel (au moins un requis) :
+        le fichier de mesures brutes -> .prmag (2 variantes reconnues,
+        voir convert_ipgp_to_r.py : paliers nus avec ligne de site, ou
+        paliers prefixes T.../A... type CryoMag/.pmd sans ligne de
+        site), et le fichier "Results" CSV IPGP (interpretations deja
+        calculees) -> .pmagres. Transformation d'orientation
+        (caz=a+90/cin=b/bed_dip_strike=s/bed_dip=d) VERIFIEE
+        numeriquement sur les DEUX variantes (sources differentes,
+        Dg/Ig/Ds/Is reproduits, voir docstring module)."""
         measurements_path = filedialog.askopenfilename(
             title="Select IPGP raw measurement file (Cancel to skip)",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -1591,10 +1589,13 @@ class STARpaleomagApp:
             f"Converted: {nb_sp} specimen(s) -> {output_path}\n"
             f"Converted: {nb_res} interpretation(s) -> {results_path_for(output_path)}"
             f"{f' ({nb_dup} exact duplicate row(s) skipped)' if nb_dup else ''}\n"
-            "\nAssumptions used (format example was flagged incomplete - verify and "
+            "\nAssumptions used (format examples were flagged incomplete - verify and "
             "report if wrong):\n"
-            "- site = the single-token line just before each specimen header\n"
-            "- AF vs thermal decided per specimen: AF if most non-zero steps < 150\n"
+            "- site = the single-token line just before a specimen header, if any "
+            "(none found -> \"n.d\")\n"
+            "- step type: read directly from a letter prefix when present "
+            "(T...=thermal, A...=AF); for a bare numeric step (no prefix), AF is "
+            "assumed if most non-zero steps are < 150\n"
         )
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
