@@ -333,14 +333,18 @@ def _measurement_rows(sp: dict) -> List[str]:
         decoded = _decode_step_label(st["step_label"])
         if decoded is not None:
             cod1, etape = decoded
-        elif j == 0:
-            cod1, etape = "N", 0.0
         else:
             try:
                 step_val = float(st["step_label"])
             except ValueError:
                 step_val = 0.0
-            cod1, etape = cod1_demag_fallback, step_val
+            # NRM detecte par la VALEUR (== 0.0 exactement), PAS par la
+            # position dans le bloc - un bloc sans palier 0 (voir
+            # convert_montpellier_to_r.py : BN4.1A/BN4.5 demarrent
+            # directement a un palier non nul, sans NRM du tout) ne doit
+            # PAS voir son 1er palier force a N.
+            cod1 = "N" if step_val == 0.0 else cod1_demag_fallback
+            etape = 0.0 if cod1 == "N" else step_val
 
         fake_m = _FakeMeasurement(etape=etape, cod1=cod1, cod2="0")
         codes, _temp_k, af_field, _dc, _phi, _theta = _measurement_treatment(fake_m, [], 0.0)
