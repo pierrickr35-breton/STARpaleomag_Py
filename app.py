@@ -1920,15 +1920,22 @@ class STARpaleomagApp:
            d'ensemble avant de decider.
         2) Une table d'apercu des metadonnees de site (site/lat/lon/
            geologic_classes/geologic_types/lithologies/formation, voir
-           magic_export.build_site_metadata_preview_rows) est proposee
-           a l'export JUSTE APRES ce bilan, avant tout le reste du
-           dialogue - plutot que de ne demander un fichier complement
-           qu'a la toute fin (ancien comportement, question posee sans
-           que l'utilisateur ait pu voir ce qui manque). Le fichier
-           ecrit (write_site_metadata_preview) utilise EXACTEMENT les
-           memes noms de colonnes que load_site_metadata_table : on peut
-           le completer a la main puis le redonner tel quel au prompt
-           "Fill in missing site... from a complement table" plus bas."""
+           magic_export.build_site_metadata_preview_rows) peut etre
+           exportee pour revue - suivie d'une confirmation "Are the
+           specimen metadata OK" et, seulement si la reponse est non,
+           d'un prompt pour completer via un fichier complement. Ce bloc
+           entier a d'abord ete place juste apres le bilan de
+           disponibilite (1), PUIS deplace en TOUTE DERNIERE etape
+           interactive - demande explicite utilisateur, une fois le
+           premier comportement teste en pratique ("can you ask these
+           questions at the end just before writing the files") : il
+           s'execute desormais juste avant l'appel a export_to_magic,
+           apres le choix du dossier de sortie - plus aucune autre
+           decision a prendre entre cette question et l'ecriture reelle
+           des fichiers. Le fichier ecrit (write_site_metadata_preview)
+           utilise EXACTEMENT les memes noms de colonnes que
+           load_site_metadata_table : on peut le completer a la main
+           puis le redonner tel quel au prompt du fichier complement."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
@@ -2176,12 +2183,18 @@ class STARpaleomagApp:
                         aniso_mean_tensors[site] = mean_tensor
                         break
 
+        out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
+        if not out_dir:
+            return
+
         # Table d'apercu des metadonnees de site (voir docstring, point
-        # 2) - affichee/proposee AVANT le prompt "Fill in... from a
-        # complement table" ci-dessous, pour que l'utilisateur voie ce
-        # qui manque avant de decider s'il a besoin d'un fichier
-        # complement (et, le cas echeant, le prepare a partir de CETTE
-        # table plutot que d'en ecrire un de zero).
+        # 2) - demande explicite utilisateur ("can you ask these
+        # questions at the end just before writing the files") : ce bloc
+        # entier (bilan, export de la table, confirmation, fichier
+        # complement) est desormais la DERNIERE etape interactive, juste
+        # avant l'appel a export_to_magic ci-dessous - plus rien d'autre
+        # a decider entre cette question et l'ecriture reelle des
+        # fichiers.
         preview_rows = build_site_metadata_preview_rows(export_samples)
         missing_sites = [
             r for r in preview_rows
@@ -2276,10 +2289,6 @@ class STARpaleomagApp:
                 except Exception as e:
                     self._showerror("Error", f"Could not load site metadata table:\n{e}")
                     return
-
-        out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
-        if not out_dir:
-            return
 
         try:
             result = export_to_magic(
