@@ -282,6 +282,40 @@ def _step_token(m) -> str:
     return f"{num}{m.cod1}{m.cod2}"
 
 
+def _format_pmagint_row(sample_id: str, row: dict) -> str:
+    """Formate une ligne DEJA archivee dans .pmagint (voir
+    paleointensity.read_pmagint/_PMAGINT_HEADER pour les cles) pour
+    l'affichage en lecture seule (ouvrir_view_pmagint_dialog) - reprend
+    la STRUCTURE du texte affiche par ouvrir_openfilepint_dialog (memes
+    lignes f/g/q/ccr/H, Hlab/b/sb, fcor/Hcorani, gamma/k, mad/dang/fvds/
+    frac/gap_max/n_ptrm, rf1/rf2) mais avec les valeurs STOCKEES telles
+    quelles - "n.d" affiche tel quel, jamais recalcule ni reformate en
+    float (une valeur "n.d" ne doit pas planter sur un format `:.1f`)."""
+    def g(key: str) -> str:
+        return row.get(key, "n.d")
+
+    out = io.StringIO()
+    out.write(f"\n{sample_id} : Tmin={g('t1')} Tmax={g('t2')}  N={g('N')}\n")
+    out.write(
+        f" f={g('f')}  g={g('g')}  q={g('q')}  ccr={g('ccr')}  h={g('H')}  % rcrm={g('pct_crm')}\n"
+    )
+    out.write(f" Hlab={g('Hlab')}µT  b={g('b')}  sb={g('sb')}  sb/b={g('sb_over_b')}\n")
+    if g("fcor") != "n.d":
+        out.write(f" fcor={g('fcor')}  Hcorani={g('Hcorani')}µT\n")
+    if g("fcorCool") != "n.d":
+        out.write(f" fcorCool={g('fcorCool')}  HcorCool={g('HcorCool')}µT\n")
+    out.write(f" gamma={g('gamma')}  k={g('k')}  k_sse={g('k_sse')}\n")
+    out.write(
+        f" mad={g('mad')}  dang={g('dang')}  fvds={g('fvds')}  frac={g('frac')}  "
+        f"gap_max={g('gap_max')}  n_ptrm={g('n_ptrm')}  (PmagPy/MagIC)\n"
+    )
+    if g("f1") != "n.d":
+        out.write(f" rf1 - rf2 : {g('f1')}  {g('f2')}\n")
+    if g("tensor") != "n.d":
+        out.write(f" anisotropy tensor applied: {g('tensor')}\n")
+    return out.getvalue()
+
+
 def _resource_path(*parts: str) -> str:
     """Chemin absolu d'une ressource livree AVEC l'appli (ex. le guide
     utilisateur HTML, voir ouvrir_user_guide) - fonctionne aussi bien
@@ -538,7 +572,10 @@ class STARpaleomagApp:
         # exposees par un intitule de menu).
         paleoint_menu = tk.Menu(menubar, tearoff=0)
         paleoint_menu.add_command(label="Paleointensity interpretation", command=self.afficher_arai)
-        paleoint_menu.add_command(label="View batch of Paleoint Results...", command=self.ouvrir_openfilepint_dialog)
+        paleoint_menu.add_command(label="View batch of Paleoint Results (from .pmagint, read-only)...",
+                                   command=self.ouvrir_view_pmagint_dialog)
+        paleoint_menu.add_command(label="Rapid view/recompute from redo file...",
+                                   command=self.ouvrir_openfilepint_dialog)
         paleoint_menu.add_separator()
         paleoint_menu.add_command(label="Thellier >> NRM", command=self.ouvrir_convertthelli_dialog)
         paleoint_menu.add_command(label="Remove paleointensity step", command=self.ouvrir_removestep_dialog)
@@ -2815,6 +2852,147 @@ class STARpaleomagApp:
                 "No diagram",
                 "No selected sample has usable paleointensity measurements (N/R/V/P codes).",
             )
+
+    def ouvrir_view_pmagint_dialog(self):
+        """Vue en lot READ-ONLY des interpretations DEJA archivees dans
+        .pmagint - demande explicite utilisateur ("differencier la
+        visualisation des donnees deja dans pmagint, d'un redo a partir
+        du fichier simplifie... dans la premiere option, l'utilisateur
+        n'est pas sense modifier l'interpretation deja dans pmagint").
+        Sibling de `ouvrir_openfilepint_dialog` ("Rapid view/recompute
+        from redo file...", ex-"View batch of Paleoint Results...", nom
+        trompeur - CETTE routine recalcule un traitement complet depuis
+        un fichier redo EXTERNE et REECRIT .pmagint a chaque revue,
+        contrairement a ce que son ancien libelle laissait penser) :
+        meme UI (menu numerote, Entree = suivant, q/Echap = quitter),
+        mais deux differences essentielles :
+
+        1) La SOURCE de la liste est `.pmagint` lui-meme (`read_pmagint`),
+           pas un fichier redo separe a fournir par l'utilisateur - Tmin/
+           Tmax de CHAQUE ligne viennent directement du fichier deja
+           archive.
+        2) AUCUNE ecriture : `write_pmagint_line` n'est jamais appele ici.
+           Le texte affiche (f/g/q/ccr/H/mad/dang/fcor/Hcorani/gamma/k/
+           fvds/frac/gap_max/n_ptrm/tensor...) est la valeur STOCKEE,
+           relue telle quelle - PAS recalculee (evite tout risque de
+           deviation silencieuse si les donnees brutes ou un tenseur
+           .pmagani ont change depuis l'archivage). Ni prompt Hlab, ni
+           second calcul PmagPy/MagIC, ni correction d'anisotropie
+           recalculee ici - tout ca appartient au traitement (Arai
+           interactif ou "Rapid view/recompute from redo file..."), pas
+           a une simple relecture.
+
+        Le diagramme (Arai/Zijderveld/stereo, `build_paleoint_review_
+        figure`) DOIT neanmoins etre redessine depuis les mesures brutes
+        (.pmagint ne stocke pas la serie de points, seulement les
+        statistiques resumees) : `fit_arai_line(points, n1, n2, hlab=
+        Hlab_stocke)` est appele UNIQUEMENT pour reconstruire la
+        geometrie du trace, fonction PURE et DETERMINISTE de (points,
+        n1, n2, Hlab) - donc reproduit exactement le meme resultat que
+        l'archivage d'origine tant que les mesures/le fichier .pmagani
+        n'ont pas change, sans compter comme une "modification" de
+        l'interpretation au sens ou l'entend l'utilisateur (aucune
+        ecriture, aucun nouveau choix Tmin/Tmax/Hlab)."""
+        if not self.donnees:
+            self._showwarning("No data", "Load a .ren file first.")
+            return
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        if not pmagint_path or not os.path.exists(pmagint_path):
+            self._showwarning(
+                "No .pmagint file", "No paleointensity results file (.pmagint) found for this data set.")
+            return
+        stored = read_pmagint(pmagint_path)
+        if not stored:
+            self._showwarning("Empty", f"No interpretation found in {pmagint_path}.")
+            return
+        entries = list(stored.items())  # (specimen_id, row dict)
+
+        self.text_area.insert(
+            tk.END,
+            "\n--- View batch of Paleoint Results (from .pmagint, read-only - Escape to quit) ---\n",
+            "prompt",
+        )
+
+        last_iligne = None
+        while True:
+            menu = io.StringIO()
+            for i in range(0, len(entries), 3):
+                row = entries[i:i + 3]
+                menu.write("   ".join(
+                    f"{i + j + 1:3d}  {e[0]:<12}" for j, e in enumerate(row)) + "\n")
+            self._afficher(menu.getvalue())
+
+            choice = self._console_input(
+                "Type the line number to select the sample (Enter = next, q to quit) : ", "")
+            if choice is None:
+                return
+            choice = choice.strip()
+            if choice.lower().startswith("q"):
+                break
+            if not choice:
+                if last_iligne is None:
+                    break
+                iligne = last_iligne + 1
+                if iligne > len(entries):
+                    self._afficher("(no more entries)\n")
+                    break
+            else:
+                try:
+                    iligne = int(choice)
+                except ValueError:
+                    continue
+                if not (1 <= iligne <= len(entries)):
+                    continue
+            last_iligne = iligne
+
+            sample_id, row = entries[iligne - 1]
+            matches = select_samples(
+                self.donnees, sample_id, step_min=0, step_max=2000,
+                demag1="*", demag2="*", verbose=False)
+            ech = matches[0] if matches else None
+            if ech is None:
+                self._afficher(f"{sample_id}: sample not found in the loaded data.\n")
+                continue
+            self.selection = [ech]
+
+            try:
+                tmin, tmax = float(row.get("t1", "n.d")), float(row.get("t2", "n.d"))
+            except ValueError:
+                self._afficher(f"{sample_id}: invalid Tmin/Tmax stored in .pmagint\n")
+                continue
+            try:
+                hlab_stored = float(row.get("Hlab", "n.d"))
+            except ValueError:
+                hlab_stored = 0.0
+
+            points, checks, arno = compute_arai(ech, orientation=1)
+            if len(points) < 2:
+                self._afficher(f"{sample_id}: no usable paleointensity measurements (N/R/V/P).\n")
+                continue
+            n1 = next((i + 1 for i, p in enumerate(points) if p.temp == tmin), None)
+            if n1 is None and points and tmin <= points[0].temp:
+                n1 = 1
+            n2 = next((i + 1 for i, p in enumerate(points) if p.temp == tmax), None)
+            if n1 is None or n2 is None or n2 - n1 < 1:
+                self._afficher(
+                    f"{tmin:g} {tmax:g} please check the temperature interval for: {sample_id}\n"
+                    "(raw data may have changed since this specimen was archived)\n")
+                continue
+
+            # fit UNIQUEMENT pour redessiner la droite du diagramme - voir
+            # docstring ci-dessus (fonction pure, ne "modifie" rien).
+            fit = fit_arai_line(points, n1, n2, hlab=hlab_stored)
+
+            self._paleoint_review_state = (ech, points, checks, arno, fit)
+            self._current_graphic = ("paleoint_review", sample_id)
+            self._refresh_current_graphic()
+
+            self._afficher(_format_pmagint_row(sample_id, row))
+
+            pause = self._console_input(
+                "Press Return to continue (Escape to quit): ", "")
+            if pause is None:
+                return
 
     def ouvrir_openfilepint_dialog(self):
         """Equivalent GUI de `openfilepint`/`visi_paleoin` ("View Paleoint
