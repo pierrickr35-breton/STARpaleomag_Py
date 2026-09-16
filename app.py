@@ -124,7 +124,13 @@ from datatools import (
     export_thellier_tdt,
     detect_grm,
 )
-from magic_export import export_to_magic, classify_anisotropy_experiment, load_site_metadata_table
+from magic_export import (
+    export_to_magic,
+    classify_anisotropy_experiment,
+    load_site_metadata_table,
+    build_site_metadata_preview_rows,
+    write_site_metadata_preview,
+)
 from anisotropy_magic import compute_aarm_pmagpy, format_aarm_pmagpy
 from export_stereo import export_stereo_project
 from detailed_export import export_detailed_txt
@@ -1894,12 +1900,92 @@ class STARpaleomagApp:
         Li/Loc utilises viennent de la ligne « roche » decodee a
         l'ouverture du fichier (testlect.decode_roche) - un echantillon
         sans site MagIC decode n'aura simplement pas de ligne dans
-        sites.txt."""
+        sites.txt.
+
+        Deux ameliorations demandees explicitement par l'utilisateur
+        ("il faudrait guider un peu l'utilisateur en l'invitant a
+        selectionner les donnees resultats, paleointensite, anisotropie
+        [des le debut]... avertir les utilisateurs sur le contenu des
+        caracteristiques des echantillons... exporter d'abord un tableau
+        avec site, lat lon Geologic classes, types lithology... plutot
+        que de poser cette question a la fin") :
+
+        1) Un bilan de disponibilite (nb de resultats/paleointensite/
+           anisotropie trouves pour la selection) est affiche EN
+           PREMIER, suivi de TROIS choix consolides (inclure
+           resultats/paleointensite/anisotropie - Y/n chacun) - remplace
+           les anciens prompts Y/n eparpilles plus loin dans le
+           dialogue (un par categorie, au moment ou chacune etait
+           decouverte), qui ne donnaient a l'utilisateur aucune vue
+           d'ensemble avant de decider.
+        2) Une table d'apercu des metadonnees de site (site/lat/lon/
+           geologic_classes/geologic_types/lithologies/formation, voir
+           magic_export.build_site_metadata_preview_rows) est proposee
+           a l'export JUSTE APRES ce bilan, avant tout le reste du
+           dialogue - plutot que de ne demander un fichier complement
+           qu'a la toute fin (ancien comportement, question posee sans
+           que l'utilisateur ait pu voir ce qui manque). Le fichier
+           ecrit (write_site_metadata_preview) utilise EXACTEMENT les
+           memes noms de colonnes que load_site_metadata_table : on peut
+           le completer a la main puis le redonner tel quel au prompt
+           "Fill in missing site... from a complement table" plus bas."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
 
         self.text_area.insert(tk.END, "\n--- export Rennes to Magic (Escape to cancel) ---\n", "prompt")
+
+        # --- Bilan de disponibilite + choix consolides (voir docstring,
+        # point 1) : calcule ce qui EXISTE pour la selection courante
+        # avant de poser la moindre question, pour que l'utilisateur
+        # sache d'emblee ce qu'il peut inclure.
+        selected_ids = {ech.id for ech in self.selection}
+        n_results = len({
+            r.id for r in self.results if r.id in selected_ids and r.cat1 in ("L", "P", "f", "F")
+        })
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        pmagint_available = (
+            {sid: row for sid, row in read_pmagint(pmagint_path).items() if sid in selected_ids}
+            if pmagint_path and os.path.exists(pmagint_path) else {}
+        )
+        ani_path = self._find_ani_path()
+        n_aniso_raw = sum(1 for ech in self.selection if any(m.cod1 in ("X", "Y", "Z") for m in ech.mesures))
+
+        self._afficher(
+            f"{len(self.selection)} specimen(s) selected for export. Available data:\n"
+            f"  - directional results (.pmagres): {n_results} specimen(s)\n"
+            f"  - paleointensity (.pmagint): {len(pmagint_available)} specimen(s)\n"
+            f"  - anisotropy: {n_aniso_raw} specimen(s) with raw X/Y/Z measurements"
+            + (f", archived tensor(s) found in {os.path.basename(ani_path)}" if ani_path else "")
+            + "\n"
+        )
+
+        want_results = False
+        if n_results:
+            ans = self._console_input(f"Include directional results ({n_results} specimen(s))? Y/n: ", "Y")
+            if ans is None:
+                return
+            want_results = ans.strip().lower() != "n"
+
+        want_pmagint = False
+        if pmagint_available:
+            ans = self._console_input(
+                f"Include paleointensity results for {len(pmagint_available)} specimen(s) "
+                f"(from {os.path.basename(pmagint_path)})? Y/n: ", "Y")
+            if ans is None:
+                return
+            want_pmagint = ans.strip().lower() != "n"
+
+        want_aniso = False
+        if n_aniso_raw or ani_path:
+            ans = self._console_input(
+                "Include anisotropy data (raw X/Y/Z measurements and/or archived .pmagani "
+                "tensor)? Y/n: ", "Y")
+            if ans is None:
+                return
+            want_aniso = ans.strip().lower() != "n"
+        # --- fin bilan/choix ---
+
         lab_analysts = self._console_input(
             "Analysts' names (in quotes, separated by ':'): ", "")
         if lab_analysts is None:
@@ -1922,54 +2008,44 @@ class STARpaleomagApp:
         # experiment when it is dubious? and whether it wants to archive
         # these data"). classify_anisotropy_experiment tranche seule dans
         # les cas non-ambigus (companion paleointensite -> trm ; etape >
-        # 700 -> irm) ; sinon on demande specimen par specimen.
+        # 700 -> irm) ; sinon on demande specimen par specimen. Rien de
+        # tout ca si `want_aniso` est deja Non (choix consolide ci-dessus).
         anisotropy_kind_by_specimen = {}
         anisotropy_skip = set()
-        for ech in self.selection:
-            if not any(m.cod1 in ("X", "Y", "Z") for m in ech.mesures):
-                continue
-            kind = classify_anisotropy_experiment(ech.mesures)
-            if kind is not None:
-                anisotropy_kind_by_specimen[ech.id] = kind
-                continue
-            archive = self._console_input(
-                f"{ech.id}: anisotropy experiment kind is unclear. "
-                f"Archive this anisotropy data (y/N): ", "N")
-            if archive is None:
-                return
-            if archive.strip().lower() != "y":
-                anisotropy_skip.add(ech.id)
-                continue
-            kind_s = self._console_input(
-                f"{ech.id}: TRM acquisition or high-field IRM anisotropy "
-                f"(trm/irm): ", "trm")
-            if kind_s is None:
-                return
-            anisotropy_kind_by_specimen[ech.id] = (
-                "irm" if kind_s.strip().lower().startswith("i") else "trm")
+        if want_aniso:
+            for ech in self.selection:
+                if not any(m.cod1 in ("X", "Y", "Z") for m in ech.mesures):
+                    continue
+                kind = classify_anisotropy_experiment(ech.mesures)
+                if kind is not None:
+                    anisotropy_kind_by_specimen[ech.id] = kind
+                    continue
+                archive = self._console_input(
+                    f"{ech.id}: anisotropy experiment kind is unclear. "
+                    f"Archive this anisotropy data (y/N): ", "N")
+                if archive is None:
+                    return
+                if archive.strip().lower() != "y":
+                    anisotropy_skip.add(ech.id)
+                    continue
+                kind_s = self._console_input(
+                    f"{ech.id}: TRM acquisition or high-field IRM anisotropy "
+                    f"(trm/irm): ", "trm")
+                if kind_s is None:
+                    return
+                anisotropy_kind_by_specimen[ech.id] = (
+                    "irm" if kind_s.strip().lower().startswith("i") else "trm")
 
         # Paleointensite (.pmagint, deja archivee via "Paleointensity
-        # interpretation"/"View batch of Paleoint Results...") - demande
-        # explicite utilisateur ("in export to Magic, it is not asking
-        # for Paleointensity") : ce dialogue ne proposait jusqu'ici que
-        # les donnees directionnelles/anisotropie, jamais les resultats
-        # de paleointensite deja calcules et sauvegardes. Ne demande que
-        # si un .pmagint existe ET couvre au moins un specimen de la
-        # selection courante - pas de prompt inutile sinon.
-        pmagint_rows = {}
-        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
-        if pmagint_path and os.path.exists(pmagint_path):
-            selected_ids = {ech.id for ech in self.selection}
-            matched = {sid: row for sid, row in read_pmagint(pmagint_path).items()
-                       if sid in selected_ids}
-            if matched:
-                include_pint = self._console_input(
-                    f"Include paleointensity results for {len(matched)} specimen(s) "
-                    f"(from {os.path.basename(pmagint_path)})? Y/n: ", "Y")
-                if include_pint is None:
-                    return
-                if include_pint.strip().lower() != "n":
-                    pmagint_rows = matched
+        # interpretation"/"View batch of Paleoint Results..."/"Rapid
+        # view/recompute from redo file...") - demande explicite
+        # utilisateur ("in export to Magic, it is not asking for
+        # Paleointensity") : ce dialogue ne proposait jusqu'ici que les
+        # donnees directionnelles/anisotropie, jamais les resultats de
+        # paleointensite deja calcules et sauvegardes. Inclusion decidee
+        # par `want_pmagint` ci-dessus (bilan/choix consolide), plus de
+        # second prompt ici.
+        pmagint_rows = pmagint_available if want_pmagint else {}
 
         # Anisotropie (.pmagani, tenseur natif deja calcule) - demande
         # explicite utilisateur ("il manque aussi les données
@@ -1985,46 +2061,48 @@ class STARpaleomagApp:
         # (susceptibilite), jamais 'A0' - demande explicite utilisateur
         # en verifiant "how to join the two exports from prmag & pmagres
         # with the Anisotropy" sur un vrai fichier ("oui dans le dossier
-        # Concon_creixell"). Independant des mesures X/Y/Z chargees (le
-        # .pmagani peut avoir ete alimente par une session/un import
-        # different) - ne demande que si au moins un tenseur est trouve.
+        # Concon_creixell"). Tout ce bloc (tenseurs specimen/site ET
+        # l'extension export_samples pour les specimens AMS-only) est
+        # desormais gate par `want_aniso` (choix consolide ci-dessus) -
+        # plus de prompts Y/n separes par sous-categorie.
         _ANISO_CODE_PRIORITY = ("A0", "F0", "N0")
         aniso_tensors = {}
-        aniso_code2_used = None
-        ani_path = self._find_ani_path()
-
-        # Specimens connus SEULEMENT via leur tenseur AMS (.pmagani), pas
-        # dans self.selection (jamais dans le .prmag, ou juste filtres
-        # par la selection courante) - demande explicite utilisateur
-        # ("attention: l'exportation concerne seulement les
-        # spécimens/samples avec des données prmag par contre il peut y
-        # avoir des specimens dans pmagani qui n'ont pas de mesures dans
-        # prmag ... mais il faut aussi les exporter"). `export_samples`
-        # (self.selection + ces extras) remplace self.selection pour
-        # TOUT le reste de cette methode (recherche des tenseurs, des
-        # sites, et l'appel final a export_to_magic) - self.selection
-        # lui-meme reste inchange. Cherche DIRECTEMENT dans self.donnees
-        # par id exact (PAS via select_samples : verifie sur donnees
-        # reelles - des specimens AMS-only d'un vrai .pmagani sont bien
-        # dans le .prmag mais SANS aucune mesure de demag, un cas que
-        # select_samples exclut TOUJOURS sauf id vide, voir sa docstring
-        # - "AMS sans jamais de vraie mesure NRM" est le meme genre de
-        # cas que "site sans specimen", ici au niveau specimen) - vraies
-        # metadonnees site/geologie alors recuperees via
-        # _build_selected_sample.
-        #
-        # Un specimen du .pmagani INTROUVABLE dans self.donnees (aucune
-        # trace, meme sans mesure) est REJETE, pas fabrique - demande
-        # explicite utilisateur ("en theorie pmagani est lie a prmag. Il
-        # faut interdire dans pmagani les specimens qui ne sont pas
-        # présents dans prmag") : un .pmagani est cense decrire des
-        # specimens du .prmag compagnon ; un id absent du .prmag signale
-        # un vrai probleme (fichiers desassortis, faute de frappe,
-        # .pmagani d'un autre jeu de donnees) que fabriquer une ligne
-        # specimens.txt minimaliste masquerait plutot que resoudre -
-        # SIGNALE et EXCLU de l'export, jamais silencieusement invente.
+        aniso_mean_tensors = {}
         export_samples = list(self.selection)
-        if ani_path:
+
+        if want_aniso and ani_path:
+            # Specimens connus SEULEMENT via leur tenseur AMS (.pmagani),
+            # pas dans self.selection (jamais dans le .prmag, ou juste
+            # filtres par la selection courante) - demande explicite
+            # utilisateur ("attention: l'exportation concerne seulement
+            # les spécimens/samples avec des données prmag par contre il
+            # peut y avoir des specimens dans pmagani qui n'ont pas de
+            # mesures dans prmag ... mais il faut aussi les exporter").
+            # `export_samples` (self.selection + ces extras) remplace
+            # self.selection pour TOUT le reste de cette methode
+            # (recherche des tenseurs, des sites, et l'appel final a
+            # export_to_magic) - self.selection lui-meme reste inchange.
+            # Cherche DIRECTEMENT dans self.donnees par id exact (PAS via
+            # select_samples : verifie sur donnees reelles - des
+            # specimens AMS-only d'un vrai .pmagani sont bien dans le
+            # .prmag mais SANS aucune mesure de demag, un cas que
+            # select_samples exclut TOUJOURS sauf id vide, voir sa
+            # docstring - "AMS sans jamais de vraie mesure NRM" est le
+            # meme genre de cas que "site sans specimen", ici au niveau
+            # specimen) - vraies metadonnees site/geologie alors
+            # recuperees via _build_selected_sample.
+            #
+            # Un specimen du .pmagani INTROUVABLE dans self.donnees
+            # (aucune trace, meme sans mesure) est REJETE, pas fabrique -
+            # demande explicite utilisateur ("en theorie pmagani est lie
+            # a prmag. Il faut interdire dans pmagani les specimens qui
+            # ne sont pas présents dans prmag") : un .pmagani est cense
+            # decrire des specimens du .prmag compagnon ; un id absent du
+            # .prmag signale un vrai probleme (fichiers desassortis,
+            # faute de frappe, .pmagani d'un autre jeu de donnees) que
+            # fabriquer une ligne specimens.txt minimaliste masquerait
+            # plutot que resoudre - SIGNALE et EXCLU de l'export, jamais
+            # silencieusement invente.
             known_ids = {e.id.strip().upper() for e in export_samples}
             # `t.export == "N"` (voir calcul.AniTensor.export, colonne
             # ajoutee cote AMS_Py par "Mark selection for MagIC
@@ -2062,7 +2140,6 @@ class STARpaleomagApp:
                     f"(check for mismatched files or a typo): {shown}{more}\n"
                 )
 
-        if ani_path:
             for ech in export_samples:
                 for code2 in _ANISO_CODE_PRIORITY:
                     tensor = read_ani_tensor(ani_path, ech.id, code2)
@@ -2076,29 +2153,18 @@ class STARpaleomagApp:
                         continue
                     if tensor is not None:
                         aniso_tensors[ech.id] = tensor
-                        aniso_code2_used = aniso_code2_used or code2
                         break
-            if aniso_tensors:
-                include_aniso = self._console_input(
-                    f"Include anisotropy tensor '{aniso_code2_used}' for {len(aniso_tensors)} "
-                    f"specimen(s) (from {os.path.basename(ani_path)})? Y/n: ", "Y")
-                if include_aniso is None:
-                    return
-                if include_aniso.strip().lower() == "n":
-                    aniso_tensors = {}
 
-        # Anisotropie de SITE (.pmagani, section "#site mean tensor
-        # results", moyenne deja calculee - voir calcul.AniMeanTensor/
-        # read_ani_mean_tensor) - demande explicite utilisateur ("je
-        # voudrais ajouter l'exportation de l'AMS (niveau specimen et
-        # sites). Les données d'AMS vont aussi dans les fichiers
-        # sites.txt et specimens.txt") : meme principe que le bloc
-        # specimen ci-dessus (meme ordre de priorite A0/F0/N0, meme
-        # raison reelle - le .pmagani reel teste est en 'N0'), une ligne
-        # PAR SITE distinct de la selection plutot que par specimen.
-        aniso_mean_tensors = {}
-        aniso_mean_code2_used = None
-        if ani_path:
+            # Anisotropie de SITE (.pmagani, section "#site mean tensor
+            # results", moyenne deja calculee - voir calcul.AniMeanTensor/
+            # read_ani_mean_tensor) - demande explicite utilisateur ("je
+            # voudrais ajouter l'exportation de l'AMS (niveau specimen et
+            # sites). Les données d'AMS vont aussi dans les fichiers
+            # sites.txt et specimens.txt") : meme principe que le bloc
+            # specimen ci-dessus (meme ordre de priorite A0/F0/N0, meme
+            # raison reelle - le .pmagani reel teste est en 'N0'), une
+            # ligne PAR SITE distinct de la selection plutot que par
+            # specimen.
             for site in {ech.magic_site.strip() for ech in export_samples if ech.magic_site.strip()}:
                 for code2 in _ANISO_CODE_PRIORITY:
                     mean_tensor = read_ani_mean_tensor(ani_path, site, code2)
@@ -2108,16 +2174,48 @@ class STARpaleomagApp:
                         continue
                     if mean_tensor is not None:
                         aniso_mean_tensors[site] = mean_tensor
-                        aniso_mean_code2_used = aniso_mean_code2_used or code2
                         break
-            if aniso_mean_tensors:
-                include_site_aniso = self._console_input(
-                    f"Include site-mean anisotropy tensor '{aniso_mean_code2_used}' for "
-                    f"{len(aniso_mean_tensors)} site(s) (from {os.path.basename(ani_path)})? Y/n: ", "Y")
-                if include_site_aniso is None:
-                    return
-                if include_site_aniso.strip().lower() == "n":
-                    aniso_mean_tensors = {}
+
+        # Table d'apercu des metadonnees de site (voir docstring, point
+        # 2) - affichee/proposee AVANT le prompt "Fill in... from a
+        # complement table" ci-dessous, pour que l'utilisateur voie ce
+        # qui manque avant de decider s'il a besoin d'un fichier
+        # complement (et, le cas echeant, le prepare a partir de CETTE
+        # table plutot que d'en ecrire un de zero).
+        preview_rows = build_site_metadata_preview_rows(export_samples)
+        missing_sites = [
+            r for r in preview_rows
+            if not r["lat"] or not r["geologic_classes"] or not r["geologic_types"] or not r["lithologies"]
+        ]
+        preview_path = None
+        if preview_rows:
+            self._afficher(
+                "\nMagIC requires site-level metadata (coordinates + geologic "
+                "classification) for a valid contribution.\n"
+                f"Site metadata check: {len(preview_rows)} site(s) in this export, "
+                f"{len(missing_sites)} with at least one missing field "
+                "(lat/lon, geologic classes, geologic types, or lithology).\n"
+            )
+            export_preview = self._console_input(
+                "Export a site metadata table (site/lat/lon/geologic_classes/"
+                "geologic_types/lithologies/formation) to review/complete before "
+                "continuing? Y/n: ", "Y" if missing_sites else "n")
+            if export_preview is None:
+                return
+            if export_preview.strip().lower() != "n":
+                preview_path = filedialog.asksaveasfilename(
+                    title="Save site metadata table as",
+                    defaultextension=".txt",
+                    initialfile="site_metadata_preview.txt",
+                    filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+                )
+                if preview_path:
+                    write_site_metadata_preview(preview_path, preview_rows)
+                    self._afficher(
+                        f"Site metadata table written to {preview_path}.\n"
+                        "Edit it now if needed, then use it as the complement table "
+                        "below - the column names already match.\n"
+                    )
 
         # Metadonnees de site (formation/lithologies/geologic_classes/
         # geologic_types/age) depuis une table externe - demande
@@ -2128,15 +2226,20 @@ class STARpaleomagApp:
         # un site archive uniquement via sa moyenne (aucun specimen
         # charge, voir build_sites_rows), mais s'applique aussi aux
         # sites avec specimens dont un champ n'a jamais ete renseigne.
+        # Defaut "y" (et fichier pre-selectionne) si la table d'apercu
+        # ci-dessus vient d'etre exportee - cas d'usage attendu :
+        # l'utilisateur vient de la completer a la main.
         site_metadata = None
         add_meta = self._console_input(
             "Fill in missing site formation/lithology/age from a complement table "
-            "(e.g. Complement_tect.txt)? y/N: ", "n")
+            "(e.g. the table just exported above)? y/N: ", "y" if preview_path else "n")
         if add_meta is None:
             return
         if add_meta.strip().lower() == "y":
             meta_path = filedialog.askopenfilename(
                 title="Select the site metadata table",
+                initialdir=os.path.dirname(preview_path) if preview_path else None,
+                initialfile=os.path.basename(preview_path) if preview_path else "",
                 filetypes=[("Text", "*.txt"), ("All files", "*.*")],
             )
             if meta_path:
@@ -2152,7 +2255,7 @@ class STARpaleomagApp:
 
         try:
             result = export_to_magic(
-                export_samples, self.results, out_dir,
+                export_samples, self.results if want_results else [], out_dir,
                 lab_analysts=lab_analysts,
                 continent_ocean=continent, country=country, region=region,
                 anisotropy_kind_by_specimen=anisotropy_kind_by_specimen,

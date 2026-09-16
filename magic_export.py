@@ -473,6 +473,65 @@ def build_sites_rows(
     return rows
 
 
+_SITE_METADATA_PREVIEW_HEADER = [
+    "site", "lat", "lon", "geologic_classes", "geologic_types", "lithologies", "formation",
+]
+
+
+def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict[str, str]]:
+    """Une ligne PAR SITE (premier specimen rencontre pour ce site, MEME
+    tri/convention que build_sites_rows - donc les memes valeurs que
+    celles qui finiront dans sites.txt), avec les champs que MagIC exige
+    au niveau site et que ce portage sait completer depuis un fichier
+    complement (site/lat/lon/geologic_classes/geologic_types/
+    lithologies/formation) - "" quand non renseigne sur le specimen.
+
+    Sert de table d'apercu EXPORTABLE (voir
+    app.ouvrir_export_magic_dialog) affichee/proposee AVANT le reste du
+    dialogue d'export, plutot que de ne demander un fichier complement
+    qu'a la toute fin sans que l'utilisateur ait pu voir ce qui manque -
+    demande explicite utilisateur ("ce serait bien d'exporter d'abord un
+    tableau avec site, lat lon Geologic classes, types lithology en
+    invitant l'utilisateur d'avoir le fichier le plus adequat... plutot
+    que de poser cette question a la fin"). Colonnes DELIBEREMENT
+    identiques aux noms lus par load_site_metadata_table : le fichier
+    ecrit ici (voir write_site_metadata_preview) peut etre complete a la
+    main puis redonne tel quel comme fichier complement, sans renommer
+    de colonne."""
+    ordered = sorted(
+        samples, key=lambda e: (e.magic_site.strip(), e.magic_sample.strip(), e.id.strip()))
+    rows: List[Dict[str, str]] = []
+    seen: set = set()
+    for ech in ordered:
+        site = ech.magic_site.strip()
+        if not site or site in seen:
+            continue
+        seen.add(site)
+        has_latlon = ech.lat != 0.0 or ech.rlong != 0.0
+        rows.append({
+            "site": site,
+            "lat": _num(ech.lat) if has_latlon else "",
+            "lon": _num(_wrap_lon(ech.rlong)) if has_latlon else "",
+            "geologic_classes": ech.magic_gc,
+            "geologic_types": ech.magic_smt,
+            "lithologies": ech.magic_li,
+            "formation": ech.magic_fm,
+        })
+    return rows
+
+
+def write_site_metadata_preview(path: str, rows: List[Dict[str, str]]) -> None:
+    """Ecrit la table d'apercu (build_site_metadata_preview_rows) en
+    texte tabule - meme format (tabulation, en-tete en 1ere ligne) que
+    ce que load_site_metadata_table/_read_table_rows sait relire, pour
+    que ce fichier soit directement reutilisable comme fichier
+    complement une fois complete a la main."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\t".join(_SITE_METADATA_PREVIEW_HEADER) + "\n")
+        for row in rows:
+            f.write("\t".join(row.get(col, "") for col in _SITE_METADATA_PREVIEW_HEADER) + "\n")
+
+
 def build_locations_rows(
     samples: List[SelectedSample],
     continent_ocean: str = "", country: str = "", region: str = "",
