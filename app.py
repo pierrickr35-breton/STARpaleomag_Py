@@ -1519,16 +1519,20 @@ class STARpaleomagApp:
         AVANT toute conversion (demande explicite utilisateur "can you
         check the file before the import?"), scan_dip_sign verifie le
         signe des dip effectivement utilises (specimen-level en
-        priorite) sur TOUS les specimens du fichier : un signe uniforme
-        (tous positifs OU tous negatifs) est affiche en AVERTISSEMENT
-        FORT (tag "warn") - "In MagIC, the dip of the core is the angle
-        of the X axis from the horizontal" (negation standard vers la
-        convention STARpaleomag_Py, cin) - un jeu de donnees reel montre
-        normalement un melange de signes ; un signe uniforme peut
-        indiquer que cette contribution a deja enregistre le dip dans la
-        convention STARpaleomag_Py plutot que la convention MagIC brute.
-        Demande alors explicitement s'il faut appliquer la negation
-        standard - PAS assume dans un sens ou l'autre."""
+        priorite) sur TOUS les specimens du fichier : quand la MAJORITE
+        sont positifs (regle metier donnee explicitement par
+        l'utilisateur - "en pratique on ne devrait avoir que des valeurs
+        negatives <= a 0 pour le dip donc quand la majorite des
+        echantillons ont un dip >= a 0 c'est qu'il y a un probleme", PAS
+        une histoire d'unanimite - voir scan_dip_sign), un AVERTISSEMENT
+        FORT (tag "warn") est affiche - "In MagIC, the dip of the core
+        is the angle of the X axis from the horizontal" - puis demande
+        "Import as a standard MagIC convention anyway? y/N" : si non
+        (defaut), propose explicitement les DEUX conventions alternatives
+        connues plutot que de deviner - "raw" (dip .prmag = dip MagIC
+        tel quel) ou "utrecht" (dip .prmag = 90 - dip MagIC, MEME
+        convention que convert_utrecht_to_r.py pour coreDip) - jamais
+        assume silencieusement dans un sens ou l'autre."""
         path = filedialog.askopenfilename(
             title="Select the MagIC contribution file (.txt)",
             filetypes=[("Text", "*.txt"), ("All files", "*.*")],
@@ -1542,7 +1546,7 @@ class STARpaleomagApp:
             self._showerror("Error", f"Could not read {path}:\n{e}")
             return
 
-        negate_dip = True
+        dip_mode = "negate"
         dip_warning_note = ""
         if dip_scan["majority_positive"]:
             pct = 100.0 * dip_scan["n_positive"] / dip_scan["n_total"]
@@ -1568,17 +1572,29 @@ class STARpaleomagApp:
             # conversion terminee, perdant precisement l'effet recherche.
             self._afficher(f"{WARN_MARK}{dip_warning_note}{WARN_MARK}")
             ans = self._console_input(
-                "Import by taking the negative of the dip value (standard MagIC "
-                "convention)? Y/n: ", "Y")
+                "Import as a standard MagIC convention anyway? y/N: ", "N")
             if ans is None:
                 return
-            negate_dip = ans.strip().lower() != "n"
+            if ans.strip().lower() == "y":
+                dip_mode = "negate"
+            else:
+                # Deux alternatives (demande explicite utilisateur) - PAS
+                # de repli silencieux sur "raw" par defaut, l'utilisateur
+                # choisit explicitement laquelle des deux conventions
+                # connues correspond a ce fichier.
+                choice = self._console_input(
+                    "Take the dip as-is (1: dip in .prmag = dip in MagIC file) or "
+                    "the Utrecht convention (2: dip in .prmag = 90 - dip in MagIC "
+                    "file)? 1/2: ", "1")
+                if choice is None:
+                    return
+                dip_mode = "utrecht" if choice.strip() == "2" else "raw"
 
         base, _ext = os.path.splitext(path)
         output_path = base + ".prmag"
         try:
             nb, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
-                path, output_path, negate_dip=negate_dip)
+                path, output_path, dip_mode=dip_mode)
         except Exception as e:
             self._showerror("Error", f"Conversion failed:\n{e}")
             return
@@ -1596,9 +1612,14 @@ class STARpaleomagApp:
             f"Converted: {nb_aniso} anisotropy tensor(s) -> {ani_path_for(output_path)}\n"
             if nb_aniso else ""
         )
+        _DIP_MODE_LABELS = {
+            "negate": "negated (standard MagIC convention)",
+            "raw": "kept as-is (NOT negated)",
+            "utrecht": "converted as 90 - dip (Utrecht/PMAG2 convention)",
+        }
         negate_note = (
             "" if not dip_warning_note
-            else f"Dip {'negated (standard MagIC convention)' if negate_dip else 'kept as-is (NOT negated)'} on import.\n"
+            else f"Dip {_DIP_MODE_LABELS[dip_mode]} on import.\n"
         )
         msg = (
             f"{dip_warning_note}{negate_note}{report}\n"
