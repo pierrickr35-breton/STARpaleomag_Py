@@ -181,7 +181,79 @@ def _iso_from_magic_ts(ts: str) -> str:
     return f"{m.group(1)}T{m.group(2)}" if m else "n.d"
 
 
-def _sample_header_block(specimen: str, spec_row, sample_row, site_row, loc_row) -> str:
+def scan_dip_sign(path_in: str) -> Dict[str, object]:
+    """Verifie le fichier AVANT conversion (demande explicite utilisateur
+    "can you check the file before the import?") : recense, pour chaque
+    specimen EFFECTIVEMENT converti (present dans measurements.txt -
+    meme population que `by_specimen` dans convert_magic_file), le dip
+    BRUT (non encore negate) qui sera utilise - specimen-level en
+    priorite, sample-level en repli (voir _orientation_source).
+
+    Retourne {"n_total", "n_positive", "n_negative", "n_zero",
+    "n_from_specimen", "all_positive", "all_negative"} - "all_positive"/
+    "all_negative" (True seulement si n_total>=2, un seul specimen ne
+    permet aucune conclusion) signalent un jeu de donnees suspect : un
+    vrai carottage montre generalement un melange de signes, un signe
+    UNIFORME peut indiquer que cette contribution a deja enregistre le
+    dip dans la convention STARpaleomag_Py (cin) plutot que la convention
+    MagIC brute (X de la carotte depuis l'horizontale) - a confirmer par
+    l'utilisateur, jamais suppose (voir ouvrir_convert_magic_to_r_dialog,
+    qui affiche un avertissement fort et demande avant de negate)."""
+    tables = parse_magic_contribution(path_in)
+    samples = _index_by(tables.get("samples", []), "sample")
+    specimens = _index_by(tables.get("specimens", []), "specimen")
+    converted_ids = {row.get("specimen", "") for row in tables.get("measurements", [])}
+    converted_ids.discard("")
+
+    n_total = n_positive = n_negative = n_zero = n_from_specimen = 0
+    for specimen_id in converted_ids:
+        spec_row = specimens.get(specimen_id)
+        sample_row = samples.get(spec_row.get("sample", "")) if spec_row else None
+        _az_raw, dip_raw, from_specimen = _orientation_source(spec_row, sample_row)
+        if dip_raw is None:
+            continue
+        n_total += 1
+        if from_specimen:
+            n_from_specimen += 1
+        if dip_raw > 0:
+            n_positive += 1
+        elif dip_raw < 0:
+            n_negative += 1
+        else:
+            n_zero += 1
+
+    return {
+        "n_total": n_total,
+        "n_positive": n_positive,
+        "n_negative": n_negative,
+        "n_zero": n_zero,
+        "n_from_specimen": n_from_specimen,
+        "all_positive": n_total >= 2 and n_positive == n_total,
+        "all_negative": n_total >= 2 and n_negative == n_total,
+    }
+
+
+def _orientation_source(spec_row, sample_row) -> Tuple[Optional[float], Optional[float], bool]:
+    """(azimuth_raw, dip_raw, from_specimen) - MagIC autorise azimuth/dip
+    au niveau SPECIMEN (specimens.txt), pas seulement au niveau sample
+    (samples.txt) - demande explicite utilisateur ("in some Magic
+    contributions, the orientation of the core azimuth and dip are given
+    at the specimen level, when this is the case, please take it into
+    account"). Priorite au niveau specimen quand au moins l'un des deux
+    champs y est renseigne (les deux valeurs viennent alors ENSEMBLE du
+    meme niveau, jamais un azimuth specimen combine a un dip sample ou
+    l'inverse) ; repli sur le niveau sample sinon - AUCUN des deux niveau
+    n'est jamais fabrique."""
+    spec_az = _f(spec_row, "azimuth") if spec_row else None
+    spec_dip = _f(spec_row, "dip") if spec_row else None
+    if spec_az is not None or spec_dip is not None:
+        return spec_az, spec_dip, True
+    return (_f(sample_row, "azimuth"), _f(sample_row, "dip"), False)
+
+
+def _sample_header_block(
+    specimen: str, spec_row, sample_row, site_row, loc_row, negate_dip: bool = True,
+) -> str:
     sample_name = _s(spec_row, "sample") if spec_row else (sample_row.get("sample", "n.d") if sample_row else "n.d")
     site_name = _s(sample_row, "site") if sample_row else (site_row.get("site", "n.d") if site_row else "n.d")
     lat = _f(sample_row, "lat") if sample_row and sample_row.get("lat") else _f(site_row, "lat")
@@ -192,11 +264,19 @@ def _sample_header_block(specimen: str, spec_row, sample_row, site_row, loc_row)
     # transformation que extract_magic.py (az_trans = core_az_raw+90,
     # inc_trans = -core_dip_raw), appliquee ici a l'import plutot qu'a
     # l'export - demande explicite utilisateur ("correct azimuth and dip
-    # to be consistent with the comment in the header").
-    azimuth_raw = _f(sample_row, "azimuth")
+    # to be consistent with the comment in the header"). `negate_dip`
+    # (Y par defaut) rend cette negation CONTROLABLE par l'utilisateur -
+    # demande explicite utilisateur suite a la decouverte de contributions
+    # dont TOUS les dip sont positifs (voir scan_dip_sign/docstring
+    # module) : un signe uniforme est suspect (un vrai jeu de donnees de
+    # carottage montre generalement un melange +/-), signe possible que
+    # cette contribution a deja enregistre le dip dans la convention
+    # STARpaleomag_Py (cin, pas besoin de negation) plutot que la
+    # convention MagIC brute - jamais suppose silencieusement dans un
+    # sens ou l'autre, voir ouvrir_convert_magic_to_r_dialog.
+    azimuth_raw, dip_raw, _from_specimen = _orientation_source(spec_row, sample_row)
     azimuth = (azimuth_raw + 90.0) % 360.0 if azimuth_raw is not None else None
-    dip_raw = _f(sample_row, "dip")
-    dip = -dip_raw if dip_raw is not None else None
+    dip = (-dip_raw if negate_dip else dip_raw) if dip_raw is not None else None
     bed_dip_direction = _f(sample_row, "bed_dip_direction")
     bed_dip_strike = (bed_dip_direction - 90.0) % 360.0 if bed_dip_direction is not None else None
     bed_dip = _f(sample_row, "bed_dip")
@@ -573,7 +653,7 @@ def _measurement_rows(specimen: str, meas_rows: List[Dict[str, str]], problems: 
 
 
 def convert_magic_file(
-    path_in: str, path_out: str,
+    path_in: str, path_out: str, negate_dip: bool = True,
 ) -> Tuple[int, str, int, int, int, Optional[str], int]:
     tables = parse_magic_contribution(path_in)
     locations = _index_by(tables.get("locations", []), "location")
@@ -604,7 +684,8 @@ def convert_magic_file(
         if meas_lines is None:
             continue  # tout le specimen etait hors perimetre (voir problems)
 
-        header_block = _sample_header_block(specimen, spec_row, sample_row, site_row, loc_row)
+        header_block = _sample_header_block(
+            specimen, spec_row, sample_row, site_row, loc_row, negate_dip=negate_dip)
         blocks.append(header_block + "\n" + "\n".join(meas_lines))
 
     with open(path_out, "w", encoding="utf-8") as f:
@@ -766,10 +847,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert a MagIC contribution to the .r format")
     parser.add_argument("magic_file")
     parser.add_argument("-o", "--output")
+    parser.add_argument(
+        "--keep-dip-sign", action="store_true",
+        help="Do not negate the MagIC dip value (use when the contribution already "
+             "recorded dip in the STARpaleomag_Py/cin convention - see scan_dip_sign)")
     args = parser.parse_args()
     out = args.output or os.path.splitext(args.magic_file)[0] + ".prmag"
+    dip_scan = scan_dip_sign(args.magic_file)
+    if dip_scan["all_positive"] or dip_scan["all_negative"]:
+        sign_word = "positive" if dip_scan["all_positive"] else "negative"
+        print(
+            f"WARNING: all {dip_scan['n_total']} dip value(s) in this file are "
+            f"{sign_word} ({dip_scan['n_from_specimen']} from specimen-level "
+            "orientation) - check --keep-dip-sign if this contribution already used "
+            "the STARpaleomag_Py convention.\n"
+        )
     n, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
-        args.magic_file, out)
+        args.magic_file, out, negate_dip=not args.keep_dip_sign)
     print(report)
     print(f"{n} specimen(s) converted -> {out}")
     print(f"{nb_results} result(s) and {nb_means} site mean(s) -> {results_path_for(out)}")

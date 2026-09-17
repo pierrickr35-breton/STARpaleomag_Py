@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import subprocess
 import sys
 import tkinter as tk
@@ -14,7 +15,7 @@ from convert_legacy_ren import convert_legacy_auto
 from complete_sample_info import complete_site_info, complete_specimen_info, complete_sample_height
 from import_new_data import parse_jr6_file, parse_legacy_new_measurements, archive_new_measurements
 from convert_ren_to_r import convert_file as convert_ren_to_r_file
-from convert_magic_to_r import convert_magic_file
+from convert_magic_to_r import convert_magic_file, scan_dip_sign
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
 from convert_ipgp_to_r import convert_files as convert_ipgp_files
 from convert_montpellier_to_r import convert_file as convert_montpellier_file, DEFAULT_VOLUME_CM3 as _MONTPELLIER_DEFAULT_VOLUME_CM3
@@ -266,6 +267,12 @@ SHORTCUTS = _SHORTCUTS_WIN if sys.platform.startswith("win") else _SHORTCUTS_MAC
 # retire les marqueurs et applique le tag "header" au texte entre eux.
 HEADER_MARK = "\x01"
 
+# Meme principe que HEADER_MARK, pour un avertissement FORT (tag "warn" -
+# gras, rouge, fond surligne) - demande explicite utilisateur ("write a
+# strong warning") pour signaler un signe de dip suspect a l'import MagIC
+# (voir convert_magic_to_r.scan_dip_sign / ouvrir_convert_magic_to_r_dialog).
+WARN_MARK = "\x02"
+
 ORIENTATION_SHORTCUT_NAMES = {1: "selce", 2: "selis", 3: "selcp"}
 
 ORIENTATIONS = {
@@ -389,6 +396,8 @@ class STARpaleomagApp:
         self.text_area.configure(yscrollcommand=text_yscroll.set, xscrollcommand=text_xscroll.set)
         self.text_area.tag_configure("prompt", foreground="#c0392b")
         self.text_area.tag_configure("header", font=("Courier", 14, "bold"))
+        self.text_area.tag_configure(
+            "warn", foreground="#c0392b", background="#fdf1d0", font=("Courier", 14, "bold"))
         self.text_area.grid(row=0, column=0, sticky="nsew")
         text_yscroll.grid(row=0, column=1, sticky="ns")
         text_xscroll.grid(row=1, column=0, sticky="ew")
@@ -1497,18 +1506,79 @@ class STARpaleomagApp:
         aniso_s de specimens.txt - A0/TRM, N0/AMS, AA/ARM) - demande
         explicite utilisateur ("lors de l'importation des fichiers
         Magic, archiver dans le fichier pmagani les donnees de tenseurs
-        d'anisotropie") - voir extract_magic.magic_anisotropy_rows."""
+        d'anisotropie") - voir extract_magic.magic_anisotropy_rows.
+
+        Utilise DESORMAIS l'orientation (azimuth/dip) au niveau SPECIMEN
+        quand la contribution en fournit une (specimens.txt), au lieu de
+        toujours retomber sur le niveau sample - demande explicite
+        utilisateur ("in some Magic contributions, the orientation of the
+        core azimuth and dip are given at the specimen level, when this
+        is the case, please take it into account"), voir
+        convert_magic_to_r._orientation_source.
+
+        AVANT toute conversion (demande explicite utilisateur "can you
+        check the file before the import?"), scan_dip_sign verifie le
+        signe des dip effectivement utilises (specimen-level en
+        priorite) sur TOUS les specimens du fichier : un signe uniforme
+        (tous positifs OU tous negatifs) est affiche en AVERTISSEMENT
+        FORT (tag "warn") - "In MagIC, the dip of the core is the angle
+        of the X axis from the horizontal" (negation standard vers la
+        convention STARpaleomag_Py, cin) - un jeu de donnees reel montre
+        normalement un melange de signes ; un signe uniforme peut
+        indiquer que cette contribution a deja enregistre le dip dans la
+        convention STARpaleomag_Py plutot que la convention MagIC brute.
+        Demande alors explicitement s'il faut appliquer la negation
+        standard - PAS assume dans un sens ou l'autre."""
         path = filedialog.askopenfilename(
             title="Select the MagIC contribution file (.txt)",
             filetypes=[("Text", "*.txt"), ("All files", "*.*")],
         )
         if not path:
             return
+
+        try:
+            dip_scan = scan_dip_sign(path)
+        except Exception as e:
+            self._showerror("Error", f"Could not read {path}:\n{e}")
+            return
+
+        negate_dip = True
+        dip_warning_note = ""
+        if dip_scan["all_positive"] or dip_scan["all_negative"]:
+            sign_word = "positive" if dip_scan["all_positive"] else "negative"
+            dip_warning_note = (
+                f"WARNING: all {dip_scan['n_total']} dip value(s) found in this file are "
+                f"{sign_word} ({dip_scan['n_from_specimen']} from specimen-level "
+                f"orientation, the rest from sample-level).\n"
+                "In MagIC, the dip of the core is the angle of the X axis from the "
+                "horizontal - the standard import negates it to match the STARpaleomag_Py "
+                "convention (cin). A real drilled data set normally shows a mix of "
+                "positive and negative dip values; a uniform sign like this one may mean "
+                "this contribution already recorded dip in the STARpaleomag_Py convention "
+                "instead of the raw MagIC one.\n"
+            )
+            # Affiche IMMEDIATEMENT (tag "warn", voir WARN_MARK) pour donner
+            # le contexte de la question qui suit - MAIS ce console sera
+            # entierement efface par _load_data_file plus bas
+            # (self.text_area.delete("1.0", tk.END), le meme mecanisme qui
+            # affiche "File loaded: ..."), donc `dip_warning_note` (sans
+            # marqueurs, pour rester lisible dans la messagebox finale) est
+            # aussi repris dans `msg` ci-dessous - sinon un avertissement
+            # "fort" disparaitrait silencieusement de l'ecran une fois la
+            # conversion terminee, perdant precisement l'effet recherche.
+            self._afficher(f"{WARN_MARK}{dip_warning_note}{WARN_MARK}")
+            ans = self._console_input(
+                "Import by taking the negative of the dip value (standard MagIC "
+                "convention)? Y/n: ", "Y")
+            if ans is None:
+                return
+            negate_dip = ans.strip().lower() != "n"
+
         base, _ext = os.path.splitext(path)
         output_path = base + ".prmag"
         try:
             nb, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
-                path, output_path)
+                path, output_path, negate_dip=negate_dip)
         except Exception as e:
             self._showerror("Error", f"Conversion failed:\n{e}")
             return
@@ -1526,7 +1596,14 @@ class STARpaleomagApp:
             f"Converted: {nb_aniso} anisotropy tensor(s) -> {ani_path_for(output_path)}\n"
             if nb_aniso else ""
         )
-        msg = f"{report}\nConverted: {nb} specimen(s) -> {output_path}\n{results_msg}{pint_msg}{aniso_msg}"
+        negate_note = (
+            "" if not dip_warning_note
+            else f"Dip {'negated (standard MagIC convention)' if negate_dip else 'kept as-is (NOT negated)'} on import.\n"
+        )
+        msg = (
+            f"{dip_warning_note}{negate_note}{report}\n"
+            f"Converted: {nb} specimen(s) -> {output_path}\n{results_msg}{pint_msg}{aniso_msg}"
+        )
         # Ouvre directement le .prmag converti - demande explicite
         # utilisateur ("ce serait bien d'ouvrir les fichiers convertis a
         # la fin des conversions"). AVANT self._afficher(msg), meme
@@ -4057,16 +4134,27 @@ class STARpaleomagApp:
         etc.) sont inseres avec le tag "header" (gras) plutot qu'en texte
         normal, marqueurs retires - demande explicite utilisateur
         ("throughout the software, is it possible to write the header in
-        bold")."""
+        bold"). Meme principe pour WARN_MARK/tag "warn" (gras, rouge, fond
+        surligne) - demande explicite utilisateur ("write a strong
+        warning", voir convert_magic_to_r.scan_dip_sign). Chaque type de
+        marqueur bascule INDEPENDAMMENT son propre tag (les deux ne sont
+        jamais imbriques dans les appelants actuels, mais rien ne
+        l'empeche)."""
         if self.text_area.get("1.0", "end-1c").strip():
             self.text_area.insert(tk.END, "\n" + "-" * 60 + "\n")
-        for i, chunk in enumerate(text.split(HEADER_MARK)):
-            if not chunk:
+        mark_tags = {HEADER_MARK: "header", WARN_MARK: "warn"}
+        active_tag = {HEADER_MARK: False, WARN_MARK: False}
+        for part in re.split(f"([{HEADER_MARK}{WARN_MARK}])", text):
+            if part in mark_tags:
+                active_tag[part] = not active_tag[part]
                 continue
-            if i % 2:
-                self.text_area.insert(tk.END, chunk, "header")
+            if not part:
+                continue
+            tag = next((mark_tags[m] for m, on in active_tag.items() if on), None)
+            if tag:
+                self.text_area.insert(tk.END, part, tag)
             else:
-                self.text_area.insert(tk.END, chunk)
+                self.text_area.insert(tk.END, part)
         self.text_area.see(tk.END)
 
     @staticmethod
