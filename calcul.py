@@ -3530,11 +3530,25 @@ def _all_ani_variants(
     Z+,Z- dans cet ordre) - deja corrigees de la ligne de base porte-
     echantillon si applicable (memes vecteurs que ceux utilises pour A0).
     Retourne les 15 AniTensor dans l'ordre A0,A+,A-,A1,B1,A2,B2,A3,B3,A4,
-    B4,A5,B5,A6,B6."""
+    B4,A5,B5,A6,B6.
+
+    Seul 'A0' garde `export="Y"` (defaut d'AniTensor) - les 14 autres
+    variantes (A+/A-/A1/B1.../B6) sont marquees `export="N"`
+    AUTOMATIQUEMENT ici, a la creation - demande explicite utilisateur
+    ("marquer N pour l'export a Magic, automatiquement les A+, A- etc
+    sauf A0 lors du calcul d'anisotropie") : ce sont des variantes de
+    diagnostic (robustesse du jackknife, voir le commentaire au-dessus
+    d'AnisotropyComputation), jamais le tenseur a exporter vers MagIC -
+    seul 'A0' (le "major" tensor) doit l'etre. Sans ce marquage,
+    ouvrir_export_magic_dialog les aurait toutes les 15 exportees comme
+    autant de lignes 'aniso_s' distinctes pour le meme specimen."""
     tensors: List[AniTensor] = []
 
     def add(code2: str, k11: float, k22: float, k33: float, k12: float, k23: float, k13: float) -> None:
-        tensors.append(AniTensor(id=id_, code2=code2, k11=k11, k22=k22, k33=k33, k12=k12, k23=k23, k13=k13))
+        tensors.append(AniTensor(
+            id=id_, code2=code2, k11=k11, k22=k22, k33=k33, k12=k12, k23=k23, k13=k13,
+            export="Y" if code2 == "A0" else "N",
+        ))
 
     # Groupe 0 : demi-difference +/- par paire d'axes (A0=symetrise,
     # A+/A- = les 2 triangles non symetrises).
