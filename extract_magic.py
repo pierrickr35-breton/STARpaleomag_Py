@@ -617,6 +617,50 @@ _PI_NON_TRM_CODES = {
 }
 
 
+def _is_accepted_pi_codes(codes: set) -> bool:
+    """Un ensemble de method_codes designe-t-il une determination
+    Thellier/IZZI thermique rejouable par le natif STARpaleomag_Py
+    (afficher_arai) ? "LP-PI-TRM"(-*) ou "LP-PI" nu (sans code
+    _PI_NON_TRM_CODES) ou "LP-PI-BT-IZZI" - ce dernier code de vocabulaire
+    controle MagIC reel (voir pmagpy/data_model/er_methods.txt,
+    "lab_protocol") designe un protocole IZZI thermique evalue par
+    Bootstrap, PAS dans _PI_NON_TRM_CODES (rejouable de la meme facon
+    qu'un LP-PI-TRM/LP-PI nu) - BUG REEL corrige (demande explicite
+    utilisateur "il n'est pas propose de redo"), confirme sur
+    magic_contribution_20522.txt/20480.txt (specimens tagues UNIQUEMENT
+    "LP-PI-BT-IZZI", jamais "LP-PI-TRM" ni "LP-PI" nu au niveau
+    specimens.txt, jusqu'ici tous silencieusement rejetes)."""
+    is_trm_variant = any(c == "LP-PI-TRM" or c.startswith("LP-PI-TRM-") for c in codes)
+    is_generic_pi = "LP-PI" in codes and not (codes & _PI_NON_TRM_CODES)
+    is_bt_izzi = "LP-PI-BT-IZZI" in codes
+    return is_trm_variant or is_generic_pi or is_bt_izzi
+
+
+def _step_range_from_measurements(meas_df, specimen: str) -> Tuple[Optional[float], Optional[float]]:
+    """Repli sur measurements.txt (voir docstring de
+    magic_pint_results_to_redo_lines) : etendue (min/max) des
+    `treat_temp` (Kelvin, data model MagIC 3 - "Room temperature is 293")
+    parmi les mesures Thellier/IZZI de ce specimen, convertie en degC
+    (meme convention que _convert_step_range : soustraction de 273).
+    (None, None) si `meas_df` est absent, ou si aucune mesure exploitable
+    n'est trouvee pour ce specimen."""
+    if meas_df is None or "specimen" not in meas_df.columns or "treat_temp" not in meas_df.columns:
+        return None, None
+    sub = meas_df[meas_df["specimen"] == specimen]
+    temps = []
+    for _, row_series in sub.iterrows():
+        row = row_series.to_dict()
+        codes = {c.strip() for c in clean_str(row.get("method_codes", "")).split(":") if c.strip()}
+        if not _is_accepted_pi_codes(codes):
+            continue
+        t = parse_float_val(row.get("treat_temp", ""), None)
+        if t is not None and t > 0:
+            temps.append(t)
+    if not temps:
+        return None, None
+    return min(temps) - 273.0, max(temps) - 273.0
+
+
 def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
     """Meme principe que `magic_results_to_redo_lines` (specimens.txt deja
     interprete -> lignes "redo"), pour les determinations de PALEOINTENSITE
@@ -676,12 +720,28 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
     meme int_abs/meas_step_min/max qu'une ligne LP-PI-TRM sœur, mais ne
     representent pas un second ajustement independant a rejouer).
     Deduplique par specimen (une determination retenue par specimen).
-    Retourne None si la table specimens est introuvable/vide."""
+    Retourne None si la table specimens est introuvable/vide.
+
+    Repli sur measurements.txt (uniquement en mode `combined`, la seule
+    table dont on dispose alors deja) quand specimens.txt n'a pas de
+    meas_step_min/meas_step_max exploitable pour un specimen - demande
+    explicite utilisateur (rapport initial "il n'est pas propose de
+    redo", puis paste d'un vrai method_codes de mesure confirmant que
+    measurements.txt porte bien treat_temp pour chaque pas meme quand le
+    resume specimens.txt ne publie aucune borne : "LT-T-I:LP-PI-TRM:
+    LP-PI-BT-IZZI:LP-PI-TRM-ZI") : voir _step_range_from_measurements.
+    Etendue MAXIMALE (min/max treat_temp) parmi les mesures Thellier/
+    IZZI de ce specimen - PAS la fenetre exacte publiee a l'origine
+    (perdue si specimens.txt ne la porte pas), mais un point de depart
+    honnete pour le fichier redo, ajustable ensuite dans la revue
+    interactive ("View batch of Paleoint Results...")."""
     if combined:
         tables = split_combined_magic_file(specimens_source)
         df = tables.get("specimens")
+        meas_df = tables.get("measurements")
     else:
         df = read_magic_file(specimens_source)
+        meas_df = None
 
     if df is None or df.empty:
         print("❌ Specimens table not found or empty.")
@@ -715,18 +775,34 @@ def magic_pint_results_to_redo_lines(specimens_source, combined=False) -> list:
         corr_by_specimen[specimen] = (
             parse_float_val(cool_raw, 0.0), parse_float_val(ani_raw, 0.0))
 
+    # `result_quality` est une colonne OPTIONNELLE du data model MagIC -
+    # BUG REEL corrige (signale par l'utilisateur : "dans l'importation
+    # de certaines contributions avec des donnees de paleointensite, il
+    # n'est pas propose de redo") : quand la colonne est ENTIEREMENT
+    # ABSENTE de specimens.txt (verifie sur une vraie contribution,
+    # magic_contribution_20545.txt - 120 lignes LP-PI-TRM, colonne
+    # result_quality absente), `row.get("result_quality", "")` renvoyait
+    # silencieusement "" pour CHAQUE ligne, donc `!= "g"` rejetait TOUT -
+    # 0 ligne, aucun fichier redo, sans qu'aucune ligne n'ait ete
+    # explicitement marquee mauvaise. Distinct du cas ou la colonne
+    # EXISTE mais une ligne particuliere est vide/differente de "g" (ce
+    # filtre reste applique tel quel dans ce cas - une contribution qui
+    # renseigne bien result_quality l'a fait pour distinguer bon/mauvais,
+    # a respecter).
+    has_quality_col = "result_quality" in df.columns
     seen = set()
     lines = []
     for _, row_series in df.iterrows():
         row = row_series.to_dict()
-        if clean_str(row.get("result_quality", "")).lower() != "g":
+        if has_quality_col and clean_str(row.get("result_quality", "")).lower() != "g":
             continue
         codes = {c.strip() for c in clean_str(row.get("method_codes", "")).split(":") if c.strip()}
-        is_trm_variant = any(c == "LP-PI-TRM" or c.startswith("LP-PI-TRM-") for c in codes)
-        is_generic_pi = "LP-PI" in codes and not (codes & _PI_NON_TRM_CODES)
-        if not (is_trm_variant or is_generic_pi):
+        if not _is_accepted_pi_codes(codes):
             continue
         smin, smax = _convert_step_range(row)
+        if smin is None:
+            specimen_for_fallback = clean_str(row.get("specimen", ""))[:12]
+            smin, smax = _step_range_from_measurements(meas_df, specimen_for_fallback)
         if smin is None:
             continue
         specimen = clean_str(row.get("specimen", ""))[:12]
