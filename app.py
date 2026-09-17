@@ -355,6 +355,13 @@ class STARpaleomagApp:
         self._arm_holder_background = None  # equivalent xholarm/yholarm/zholarm (holderarm), pour Anisotropy
         self.entete = ""  # Préfixe de sélection (equivalent selentete)
         self.orientation = tk.IntVar(value=2)  # equivalent iorient (SC/IS/TC) - defaut In situ
+        # Ancre du guide utilisateur correspondant au DERNIER item de menu
+        # invoque (voir _menu_cmd/ouvrir_user_guide) - demande explicite
+        # utilisateur ("plus transparent pour l'utilisateur de cliquer sur
+        # seulement le menu help qui de facon transparente irait au menu
+        # precis") : None tant qu'aucun menu de contenu n'a encore ete
+        # utilise, auquel cas le guide s'ouvre sur sa page d'accueil.
+        self._help_anchor = None
         self._current_graphic = None  # ("zijderveld", sample_id) / ("stereo"|"xygraph"|"susceptibility"|"arai", None)
         self._arai_state = None  # (ech, points, checks, arno, fit_ou_None, hlab) pour kind=="arai"
         self._paleoint_review_state = None  # (ech, points, checks, arno, fit) pour kind=="paleoint_review"
@@ -468,6 +475,26 @@ class STARpaleomagApp:
         seul, lui, est purement cosmetique."""
         return f"{text}    ({SHORTCUTS[shortcut_name][0]})"
 
+    def _menu_cmd(self, anchor, func):
+        """Enveloppe `func` (la vraie commande d'un item de menu) pour
+        enregistrer `anchor` comme dernier contexte d'aide AVANT de
+        l'executer - demande explicite utilisateur ("est-ce possible
+        d'aller au plus fin avec des ancres vers certains menus
+        specifiques... plus transparent pour l'utilisateur de cliquer sur
+        seulement le menu help qui de facon transparente irait au menu
+        precis"). Chaque item de menu de contenu (PmagFile/Pmag data/
+        Results/Paleointensity/Calcul/Graphics) est cree via ce wrapper
+        plutot qu'avec `command=self.xxx` directement - voir _setup_menu.
+        `anchor` correspond a l'id du BLOC (separateur a separateur, voir
+        la reorganisation des menus) dans help/STARpaleomag_Py_Guide.html,
+        pas necessairement a l'item precis clique : plusieurs items d'un
+        meme bloc partagent la meme ancre, cette granularite suffit pour
+        retrouver la bonne zone du guide sans exiger un id HTML par item."""
+        def wrapped(*args, **kwargs):
+            self._help_anchor = anchor
+            return func(*args, **kwargs)
+        return wrapped
+
     def _setup_menu(self):
         menubar = tk.Menu(self.root)
 
@@ -487,59 +514,71 @@ class STARpaleomagApp:
         # possible de reorganiser les lignes de separations dans les
         # menus"), liste triee fournie par l'utilisateur - chaque bloc
         # separe par une ligne devient l'unite d'aide contextuelle (voir
-        # _mi/_help_anchor plus bas).
+        # _menu_cmd/_help_anchor). L'ancre passee a _menu_cmd correspond a
+        # l'id du BLOC dans help/STARpaleomag_Py_Guide.html.
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label=self._labeled("Open Pmag file...", "importpc"),
-                               command=self.ouvrir_fichier_ren)
+                               command=self._menu_cmd("pmagfile-open", self.ouvrir_fichier_ren))
         file_menu.add_separator()
-        file_menu.add_command(label="Import Starmac legacy files...", command=self.ouvrir_convert_legacy_dialog)
+        file_menu.add_command(label="Import Starmac legacy files...",
+                               command=self._menu_cmd("pmagfile-legacy", self.ouvrir_convert_legacy_dialog))
         file_menu.add_separator()
         file_menu.add_command(label="Import MagIC contribution to .prmag format...",
-                               command=self.ouvrir_convert_magic_to_r_dialog)
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_magic_to_r_dialog))
         file_menu.add_command(label="Import Utrecht/PMAG2 .col to .prmag format...",
-                               command=self.ouvrir_convert_utrecht_to_r_dialog)
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_utrecht_to_r_dialog))
         file_menu.add_command(label="Import IPGP measurements/results to .prmag format...",
-                               command=self.ouvrir_convert_ipgp_to_r_dialog)
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_ipgp_to_r_dialog))
         file_menu.add_command(label="Import Montpellier .montpellier to .prmag format...",
-                               command=self.ouvrir_convert_montpellier_to_r_dialog)
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_montpellier_to_r_dialog))
         file_menu.add_separator()
         file_menu.add_command(label="Orientation: field notes orientation to prmag file...",
-                               command=self.ouvrir_field_notes_dialog)
+                               command=self._menu_cmd("pmagfile-orient", self.ouvrir_field_notes_dialog))
         file_menu.add_command(label="Create prmag from AGICO .ged file...",
-                               command=self.ouvrir_ged_to_prmag_dialog)
+                               command=self._menu_cmd("pmagfile-orient", self.ouvrir_ged_to_prmag_dialog))
         file_menu.add_separator()
-        file_menu.add_command(label="Archive new laboratory measurements", command=self.ouvrir_archive_new_data_dialog)
+        file_menu.add_command(label="Archive new laboratory measurements",
+                               command=self._menu_cmd("pmagfile-archive", self.ouvrir_archive_new_data_dialog))
         file_menu.add_separator()
-        file_menu.add_command(label="Check files for duplicate entries...", command=self.ouvrir_check_duplicates_dialog)
+        file_menu.add_command(label="Check files for duplicate entries...",
+                               command=self._menu_cmd("pmagfile-dupes", self.ouvrir_check_duplicates_dialog))
         file_menu.add_separator()
-        file_menu.add_command(label="Complete sample information...", command=self.ouvrir_complete_sample_info_dialog)
-        file_menu.add_command(label="export to Magic database", command=self.ouvrir_export_magic_dialog)
+        file_menu.add_command(label="Complete sample information...",
+                               command=self._menu_cmd("pmagfile-complete", self.ouvrir_complete_sample_info_dialog))
+        file_menu.add_command(label="export to Magic database",
+                               command=self._menu_cmd("pmagfile-complete", self.ouvrir_export_magic_dialog))
         file_menu.add_separator()
-        file_menu.add_command(label="export pmag content as a text file", command=self.ouvrir_export_detailed_dialog)
-        file_menu.add_command(label="export results to Stereo_Py...", command=self.ouvrir_export_stereo_dialog)
+        file_menu.add_command(label="export pmag content as a text file",
+                               command=self._menu_cmd("pmagfile-textexport", self.ouvrir_export_detailed_dialog))
+        file_menu.add_command(label="export results to Stereo_Py...",
+                               command=self._menu_cmd("pmagfile-textexport", self.ouvrir_export_stereo_dialog))
         file_menu.add_separator()
-        file_menu.add_command(label=self._labeled("Quit STARpaleomag_Py", "starend"), command=self.root.quit)
+        file_menu.add_command(label=self._labeled("Quit STARpaleomag_Py", "starend"),
+                               command=self._menu_cmd("pmagfile-quit", self.root.quit))
         menubar.add_cascade(label="PmagFile", menu=file_menu)
 
         # Menu Pmag data
         data_menu = tk.Menu(menubar, tearoff=0)
         data_menu.add_command(label=self._labeled("Select data...", "selmes"),
-                               command=self.ouvrir_selection_dialog)
-        data_menu.add_command(label="Select site...", command=self.ouvrir_selection_site_dialog)
+                               command=self._menu_cmd("pmagdata-select", self.ouvrir_selection_dialog))
+        data_menu.add_command(label="Select site...",
+                               command=self._menu_cmd("pmagdata-select", self.ouvrir_selection_site_dialog))
         data_menu.add_command(label=self._labeled("Select header...", "selentete"),
-                               command=self.ouvrir_entete_dialog)
+                               command=self._menu_cmd("pmagdata-select", self.ouvrir_entete_dialog))
         data_menu.add_separator()
         data_menu.add_command(label=self._labeled("Delete some data...", "effmes"),
-                               command=self.ouvrir_effmes_dialog)
+                               command=self._menu_cmd("pmagdata-edit", self.ouvrir_effmes_dialog))
         data_menu.add_command(label=self._labeled("Init list", "initmes"),
-                               command=self.reinitialiser_selection)
-        data_menu.add_command(label=self._labeled("List data", "lismes"), command=self.lister_mesures)
+                               command=self._menu_cmd("pmagdata-edit", self.reinitialiser_selection))
+        data_menu.add_command(label=self._labeled("List data", "lismes"),
+                               command=self._menu_cmd("pmagdata-edit", self.lister_mesures))
         data_menu.add_separator()
-        data_menu.add_command(label="List in XYZ", command=self.lister_xyz)
-        data_menu.add_command(label="List and depth...", command=self.ouvrir_lismesdepth_dialog)
+        data_menu.add_command(label="List in XYZ", command=self._menu_cmd("pmagdata-lists", self.lister_xyz))
+        data_menu.add_command(label="List and depth...",
+                               command=self._menu_cmd("pmagdata-lists", self.ouvrir_lismesdepth_dialog))
         data_menu.add_separator()
         data_menu.add_command(label=self._labeled("Info samples", "infoech"),
-                               command=self.afficher_info_echantillons)
+                               command=self._menu_cmd("pmagdata-info", self.afficher_info_echantillons))
 
         # Radiobuttons directement dans le menu (pas de sous-menu imbrique) :
         # meme raisonnement que ci-dessus, en plus du probleme deja identifie
@@ -551,7 +590,7 @@ class STARpaleomagApp:
             data_menu.add_radiobutton(
                 label=self._labeled(label, ORIENTATION_SHORTCUT_NAMES[value]),
                 variable=self.orientation, value=value,
-                command=lambda v=value: self._set_orientation(v),
+                command=self._menu_cmd("pmagdata-info", lambda v=value: self._set_orientation(v)),
             )
 
         menubar.add_cascade(label="Pmag data", menu=data_menu)
@@ -564,26 +603,35 @@ class STARpaleomagApp:
         # explicitement par l'utilisateur).
         results_menu = tk.Menu(menubar, tearoff=0)
         results_menu.add_command(label=self._labeled("Select results...", "selres"),
-                                  command=self.ouvrir_selres_dialog)
-        results_menu.add_command(label=self._labeled("List results", "lisres"), command=self.lister_resultats)
+                                  command=self._menu_cmd("results-manage", self.ouvrir_selres_dialog))
+        results_menu.add_command(label=self._labeled("List results", "lisres"),
+                                  command=self._menu_cmd("results-manage", self.lister_resultats))
         results_menu.add_command(label=self._labeled("Init results", "initres"),
-                                  command=self.reinitialiser_resultats)
-        results_menu.add_command(label="Delete results...", command=self.ouvrir_delete_results_dialog)
+                                  command=self._menu_cmd("results-manage", self.reinitialiser_resultats))
+        results_menu.add_command(label="Delete results...",
+                                  command=self._menu_cmd("results-manage", self.ouvrir_delete_results_dialog))
         results_menu.add_separator()
         results_menu.add_command(label=self._labeled("best lines...", "ajuslig"),
-                                  command=self.ouvrir_ajuslig_dialog)
-        results_menu.add_command(label="best lines auto", command=self.ouvrir_ajusligauto_dialog)
-        results_menu.add_command(label="best planes...", command=self.ouvrir_ajusplans_dialog)
-        results_menu.add_command(label=self._labeled("best dir Fisher...", "ajusfisher"), command=self.ouvrir_ajusfisher_dialog)
-        results_menu.add_command(label="Best fit from redo file...", command=self.ouvrir_ajusligredo_dialog)
-        results_menu.add_command(label="Auto-interpret (suggest components)...", command=self.ouvrir_autointerpretation_dialog)
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_ajuslig_dialog))
+        results_menu.add_command(label="best lines auto",
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_ajusligauto_dialog))
+        results_menu.add_command(label="best planes...",
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_ajusplans_dialog))
+        results_menu.add_command(label=self._labeled("best dir Fisher...", "ajusfisher"),
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_ajusfisher_dialog))
+        results_menu.add_command(label="Best fit from redo file...",
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_ajusligredo_dialog))
+        results_menu.add_command(label="Auto-interpret (suggest components)...",
+                                  command=self._menu_cmd("results-fitting", self.ouvrir_autointerpretation_dialog))
         results_menu.add_separator()
-        results_menu.add_command(label="Evaluate interpretations...", command=self.evaluer_interpretations)
+        results_menu.add_command(label="Evaluate interpretations...",
+                                  command=self._menu_cmd("results-quality", self.evaluer_interpretations))
         results_menu.add_separator()
-        results_menu.add_command(label=self._labeled("Fisher results", "fishres"), command=self.fisher_resultats)
+        results_menu.add_command(label=self._labeled("Fisher results", "fishres"),
+                                  command=self._menu_cmd("results-fisheritem", self.fisher_resultats))
         results_menu.add_separator()
         results_menu.add_command(label="Import published site means...",
-                                  command=self.ouvrir_import_published_means_dialog)
+                                  command=self._menu_cmd("results-means", self.ouvrir_import_published_means_dialog))
         menubar.add_cascade(label="Results", menu=results_menu)
 
         # Menu Paleointensity (demande explicite utilisateur : "view
@@ -593,20 +641,26 @@ class STARpaleomagApp:
         # menu" - fonctions conservees dans le code, simplement plus
         # exposees par un intitule de menu).
         paleoint_menu = tk.Menu(menubar, tearoff=0)
-        paleoint_menu.add_command(label="Paleointensity interpretation", command=self.afficher_arai)
+        paleoint_menu.add_command(label="Paleointensity interpretation",
+                                   command=self._menu_cmd("paleoint-view", self.afficher_arai))
         paleoint_menu.add_command(label="View batch of Paleoint Results (from .pmagint, read-only)...",
-                                   command=self.ouvrir_view_pmagint_dialog)
+                                   command=self._menu_cmd("paleoint-view", self.ouvrir_view_pmagint_dialog))
         paleoint_menu.add_command(label="Rapid view/recompute from redo file...",
-                                   command=self.ouvrir_openfilepint_dialog)
+                                   command=self._menu_cmd("paleoint-rapid", self.ouvrir_openfilepint_dialog))
         paleoint_menu.add_separator()
-        paleoint_menu.add_command(label="Thellier >> NRM", command=self.ouvrir_convertthelli_dialog)
+        paleoint_menu.add_command(label="Thellier >> NRM",
+                                   command=self._menu_cmd("paleoint-thellier", self.ouvrir_convertthelli_dialog))
         paleoint_menu.add_separator()
-        paleoint_menu.add_command(label="Remove paleointensity step", command=self.ouvrir_removestep_dialog)
-        paleoint_menu.add_command(label="Remove bad-quality (b) steps...", command=self.ouvrir_remove_bad_quality_dialog)
+        paleoint_menu.add_command(label="Remove paleointensity step",
+                                   command=self._menu_cmd("paleoint-remove", self.ouvrir_removestep_dialog))
+        paleoint_menu.add_command(label="Remove bad-quality (b) steps...",
+                                   command=self._menu_cmd("paleoint-remove", self.ouvrir_remove_bad_quality_dialog))
         paleoint_menu.add_separator()
-        paleoint_menu.add_command(label="Cooling rate...", command=self.ouvrir_cooling_rate_dialog)
+        paleoint_menu.add_command(label="Cooling rate...",
+                                   command=self._menu_cmd("paleoint-cooling", self.ouvrir_cooling_rate_dialog))
         paleoint_menu.add_separator()
-        paleoint_menu.add_command(label="export to ThellierTool...", command=self.ouvrir_exportthellier_dialog)
+        paleoint_menu.add_command(label="export to ThellierTool...",
+                                   command=self._menu_cmd("paleoint-export", self.ouvrir_exportthellier_dialog))
         menubar.add_cascade(label="Paleointensity", menu=paleoint_menu)
 
         # Menu Calcul (categorie gardee en francais dans la source elle-meme,
@@ -616,50 +670,73 @@ class STARpaleomagApp:
         # SAUF "Orientation drill cores"/"Orient Core with LowTemp" (lies a
         # l'option Drillcore, retiree de l'appli).
         calcul_menu = tk.Menu(menubar, tearoff=0)
-        calcul_menu.add_command(label=self._labeled("Fisher measures", "fishmes"), command=self.fisher_mesures)
-        calcul_menu.add_command(label=self._labeled("Fisher results", "fishres"), command=self.fisher_resultats)
+        calcul_menu.add_command(label=self._labeled("Fisher measures", "fishmes"),
+                                 command=self._menu_cmd("calcul-fisher", self.fisher_mesures))
+        calcul_menu.add_command(label=self._labeled("Fisher results", "fishres"),
+                                 command=self._menu_cmd("calcul-fisher", self.fisher_resultats))
         calcul_menu.add_separator()
-        calcul_menu.add_command(label=self._labeled("Anisotropy", "anisotropy"), command=self.ouvrir_anisotropy_dialog)
-        calcul_menu.add_command(label="Anisotropy PmagPy...", command=self.ouvrir_anisotropy_pmagpy_dialog)
-        calcul_menu.add_command(label="Holder_ARM...", command=self.ouvrir_holderarm_dialog)
-        calcul_menu.add_command(label="Inverse_ANI_correction...", command=self.ouvrir_inverseani_dialog)
+        calcul_menu.add_command(label=self._labeled("Anisotropy", "anisotropy"),
+                                 command=self._menu_cmd("calcul-aniso", self.ouvrir_anisotropy_dialog))
+        calcul_menu.add_command(label="Anisotropy PmagPy...",
+                                 command=self._menu_cmd("calcul-aniso", self.ouvrir_anisotropy_pmagpy_dialog))
+        calcul_menu.add_command(label="Holder_ARM...",
+                                 command=self._menu_cmd("calcul-aniso", self.ouvrir_holderarm_dialog))
+        calcul_menu.add_command(label="Inverse_ANI_correction...",
+                                 command=self._menu_cmd("calcul-aniso", self.ouvrir_inverseani_dialog))
         calcul_menu.add_separator()
-        calcul_menu.add_command(label="MdF-MdT", command=self.afficher_mdf)
-        calcul_menu.add_command(label=self._labeled("Mean Intensity", "meanint"), command=self.afficher_mean_intensity)
-        calcul_menu.add_command(label="Koenigsberger ratio...", command=self.ouvrir_koenigsberger_dialog)
-        calcul_menu.add_command(label="Mean Inclination", command=self.afficher_mean_inclination)
+        calcul_menu.add_command(label="MdF-MdT", command=self._menu_cmd("calcul-statistiques", self.afficher_mdf))
+        calcul_menu.add_command(label=self._labeled("Mean Intensity", "meanint"),
+                                 command=self._menu_cmd("calcul-statistiques", self.afficher_mean_intensity))
+        calcul_menu.add_command(label="Koenigsberger ratio...",
+                                 command=self._menu_cmd("calcul-statistiques", self.ouvrir_koenigsberger_dialog))
+        calcul_menu.add_command(label="Mean Inclination",
+                                 command=self._menu_cmd("calcul-statistiques", self.afficher_mean_inclination))
         calcul_menu.add_separator()
         # "List data VRM" (self.lister_vrm) deplace ici depuis Pmag data -
         # demande explicite utilisateur ("mettre avec le menu calcul
         # viscosity").
-        calcul_menu.add_command(label="Test viscosity", command=self.appliquer_viscosity_test)
-        calcul_menu.add_command(label="List data VRM", command=self.lister_vrm)
+        calcul_menu.add_command(label="Test viscosity",
+                                 command=self._menu_cmd("calcul-viscosity", self.appliquer_viscosity_test))
+        calcul_menu.add_command(label="List data VRM",
+                                 command=self._menu_cmd("calcul-viscosity", self.lister_vrm))
         calcul_menu.add_separator()
-        calcul_menu.add_command(label="Diff measurements n/n-1", command=self.afficher_diff_measurements)
-        calcul_menu.add_command(label="Subtraction...", command=self.ouvrir_subtraction_dialog)
-        calcul_menu.add_command(label="Autoinverse", command=lambda: self._not_implemented("Autoinverse"))
+        calcul_menu.add_command(label="Diff measurements n/n-1",
+                                 command=self._menu_cmd("calcul-diffsub", self.afficher_diff_measurements))
+        calcul_menu.add_command(label="Subtraction...",
+                                 command=self._menu_cmd("calcul-diffsub", self.ouvrir_subtraction_dialog))
+        calcul_menu.add_command(label="Autoinverse",
+                                 command=self._menu_cmd("calcul-diffsub", lambda: self._not_implemented("Autoinverse")))
         calcul_menu.add_separator()
-        calcul_menu.add_command(label="Detect GRM...", command=self.ouvrir_detect_grm_dialog)
-        calcul_menu.add_command(label="Suppress GRM", command=self.ouvrir_elimine_grm_dialog)
+        calcul_menu.add_command(label="Detect GRM...",
+                                 command=self._menu_cmd("calcul-grm", self.ouvrir_detect_grm_dialog))
+        calcul_menu.add_command(label="Suppress GRM",
+                                 command=self._menu_cmd("calcul-grm", self.ouvrir_elimine_grm_dialog))
         menubar.add_cascade(label="Calcul", menu=calcul_menu)
 
         # Menu Graphics - "Stereo Results"/"data+interpretation" y sont
         # entres depuis Results (liste de menus/raccourcis fournie
         # explicitement par l'utilisateur).
         graph_menu = tk.Menu(menubar, tearoff=0)
-        graph_menu.add_command(label=self._labeled("Zijderveld", "plotzijder"), command=self.afficher_zijderveld)
-        graph_menu.add_command(label="data+interpretation", command=self.afficher_visres)
+        graph_menu.add_command(label=self._labeled("Zijderveld", "plotzijder"),
+                                command=self._menu_cmd("graphics-zijder", self.afficher_zijderveld))
+        graph_menu.add_command(label="data+interpretation",
+                                command=self._menu_cmd("graphics-zijder", self.afficher_visres))
         graph_menu.add_separator()
-        graph_menu.add_command(label=self._labeled("Stereo data", "stereodata"), command=self.afficher_stereo)
-        graph_menu.add_command(label=self._labeled("Stereo Results", "stereores"), command=self.afficher_stereo_results)
+        graph_menu.add_command(label=self._labeled("Stereo data", "stereodata"),
+                                command=self._menu_cmd("graphics-stereo", self.afficher_stereo))
+        graph_menu.add_command(label=self._labeled("Stereo Results", "stereores"),
+                                command=self._menu_cmd("graphics-stereo", self.afficher_stereo_results))
         graph_menu.add_separator()
-        graph_menu.add_command(label=self._labeled("XYgraph", "xygraph"), command=self.afficher_xygraph)
-        graph_menu.add_command(label=self._labeled("Susceptibility", "suscep"), command=self.afficher_susceptibilite)
-        graph_menu.add_command(label="Plot IRM", command=self.afficher_irm)
+        graph_menu.add_command(label=self._labeled("XYgraph", "xygraph"),
+                                command=self._menu_cmd("graphics-plots", self.afficher_xygraph))
+        graph_menu.add_command(label=self._labeled("Susceptibility", "suscep"),
+                                command=self._menu_cmd("graphics-plots", self.afficher_susceptibilite))
+        graph_menu.add_command(label="Plot IRM", command=self._menu_cmd("graphics-plots", self.afficher_irm))
         graph_menu.add_separator()
-        graph_menu.add_command(label="Clear Screen", command=self.clear_screen)
+        graph_menu.add_command(label="Clear Screen",
+                                command=self._menu_cmd("graphics-session", self.clear_screen))
         graph_menu.add_separator()
-        graph_menu.add_command(label="Export SVG...", command=self.exporter_svg)
+        graph_menu.add_command(label="Export SVG...", command=self._menu_cmd("graphics-svg", self.exporter_svg))
         menubar.add_cascade(label="Graphics", menu=graph_menu)
 
         # Aide statique, locale, sans cle API ni cout recurrent (option
@@ -2752,12 +2829,23 @@ class STARpaleomagApp:
         deja redige comme artifact Claude, sans ses scripts de plateforme)
         plutot qu'une aide en direct necessitant reseau/cle/cout recurrent.
         A resynchroniser manuellement avec l'artifact si celui-ci est mis
-        a jour par la suite (pas de lien automatique entre les deux)."""
+        a jour par la suite (pas de lien automatique entre les deux).
+
+        Saute directement au bloc du DERNIER menu de contenu utilise
+        (self._help_anchor, voir _menu_cmd) - demande explicite
+        utilisateur ("plus transparent pour l'utilisateur de cliquer sur
+        seulement le menu help qui de facon transparente irait au menu
+        precis") : ouvre la page d'accueil du guide (aucune ancre) tant
+        qu'aucun item de menu de contenu n'a encore ete invoque dans cette
+        session."""
         guide_path = _resource_path("help", "STARpaleomag_Py_Guide.html")
         if not os.path.exists(guide_path):
             self._showerror("Error", f"User guide not found:\n{guide_path}")
             return
-        webbrowser.open(f"file://{guide_path}")
+        url = f"file://{guide_path}"
+        if self._help_anchor:
+            url += f"#{self._help_anchor}"
+        webbrowser.open(url)
 
     def afficher_zijderveld(self):
         """Equivalent GUI de la boucle `do i=1,nbech ... call zijder2(...)`

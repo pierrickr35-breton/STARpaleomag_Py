@@ -628,15 +628,15 @@
       <p class="menu-desc">Load data, import from MagIC, export to various formats.</p>
 
       <h3 class="group" id="pmagfile-import">Import</h3>
-      <div class="item">
+      <div class="item" id="pmagfile-open">
         <div class="label">Open Pmag file… <span class="shortcut">Cmd+O</span></div>
         <div class="desc">Loads a <code>.prmag</code> file (or a legacy <code>.ren</code>, read as-is — see <a href="#format">.prmag file format</a>). Resets the selection and locates the associated <code>.pmagres</code> file (results) in the same folder.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-legacy">
         <div class="label">Import Starmac legacy files…</div>
         <div class="desc">Upgrades an old Rennes-format data file — 1, 2 or 3 header lines per specimen, even mixed within the same file — straight to the current 3-line header format, then on to <code>.prmag</code>, in a single step (previously two separate commands). An external "complement" table can fill in Site/Formation/Age/Lithology alongside, but it's optional: without one, or for a specimen it doesn't cover, the conversion still proceeds, with <code>Not Specified</code> in the geology fields rather than blocking the import — exactly what <code>Complete sample information…</code> is for afterwards. Each measurement's one- or two-character legacy instrument code is spelled out into a readable <code>instrument</code> field: <code>S</code>→Schonstedt, <code>M…</code>→Molspin spinner, <code>C1</code>→2G magnetometer one position, <code>C4</code>→2G magnetometer 4 positions, <code>J</code>/<code>J?</code>→Agico Spinner, <code>J5</code>/<code>J6</code>→Agico Spinner Jr5/Jr6 (distinct from <code>JA</code>/<code>J2</code>, which name the measurement <em>protocol</em> — automatic vs. 2-position — not the instrument model).</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-formats">
         <div class="label">Import MagIC contribution to .prmag format…</div>
         <div class="desc">Converts a <strong>combined</strong> MagIC contribution file (as downloaded from earthref.org — all tables in a single <code>.txt</code>) into a <code>.prmag</code> file. Site/Formation/Age/Lithology fields (and, when present, <code>stratigraphic_height</code>) are decoded automatically and remain available on each specimen. Several companion files are generated in the same pass, whenever the contribution actually carries the corresponding data: the <a href="#pmagres">.pmagres</a> file (already-interpreted directions from <code>specimens.txt</code>/<code>sites.txt</code>, re-fit through STARpaleomag_Py's own native fit rather than copied as-is, plus site means archived as given), a <code>redo_pint_contribution_&lt;num&gt;.txt</code> file — one <code>specimen tmin tmax cooling aniso_corr</code> line per quality-<code>g</code> paleointensity determination found in <code>specimens.txt</code> (method_codes carrying <code>LP-PI-TRM</code>, or the generic <code>LP-PI</code> tag some contributions use instead for the very same thermal Thellier/IZZI protocol), directly usable with <code>View batch of Paleoint Results…</code> to replay every paleointensity interval the contribution already reports — and, when <code>specimens.txt</code> already carries a pre-computed anisotropy tensor (<code>aniso_s</code>, from an ATRM/AARM/AMS experiment run by any lab or software, not just this one), a matching <a href="#pmagani">.pmagani</a> row (<code>A0</code> for TRM, <code>AA</code> for ARM, <code>N0</code> for susceptibility).</div>
       </div>
@@ -645,6 +645,14 @@
         <div class="desc">Converts one or more <code>.col</code> files from <a href="https://paleomagnetism.org">paleomagnetism.org</a>'s PMAG2 tool (Utrecht University — JSON despite the extension) into a single combined <code>.prmag</code>, plus a companion <code>.pmagres</code> for any interpretations PMAG2 already computed. See <a href="#intro">Data formats</a> above for the conventions this conversion relies on (site naming, core-orientation formula, magnetization units) and how well they've been verified against real data.</div>
       </div>
       <div class="item">
+        <div class="label">Import IPGP measurements/results to .prmag format… <span class="badge-new">new</span></div>
+        <div class="desc">Converts raw specimen-orientation measurement files from IPGP (Johan Guyodo's format, and the closely related CryoMag/PaleoMac <code>.pmd</code> export) and/or a separate "Results" CSV of already-interpreted directions (Dragomir Dragomirov's format) into <code>.prmag</code>/<code>.pmagres</code>. Core azimuth/dip conventions are verified numerically against the file's own Dg/Ig/Ds/Is columns rather than assumed; AF vs. thermal demagnetization is read straight from a step-label prefix (<code>T…</code>/<code>A…</code>) when present, falling back to a majority-of-steps heuristic otherwise.</div>
+      </div>
+      <div class="item">
+        <div class="label">Import Montpellier .montpellier to .prmag format… <span class="badge-new">new</span></div>
+        <div class="desc">Converts the flat Montpellier table format (one row per measurement: <code>Sample Step Intensity Dec Inc Azimuth Plunge Strike Dip</code>) to <code>.prmag</code>. Column semantics were cross-checked against an independently-verified Utrecht/PMAG2 import of the same specimen collection rather than guessed. This format carries no per-specimen volume, so a default (10.8 cm³, the same standard core-plug value used elsewhere in this app) is assumed and can be overridden at import time — it only affects the displayed absolute intensity, never the fitted directions.</div>
+      </div>
+      <div class="item" id="pmagfile-orient">
         <div class="label">Orientation: field notes orientation to prmag file… <span class="badge-new">new</span></div>
         <div class="desc">Turns a raw field-orientation notebook — one line per core, with a magnetic-compass azimuth and, whenever a sun sight was also taken, a sun-compass azimuth and the clock time it was read at — into a ready <code>.prmag</code> (no measurements yet, an instrument hasn't touched these cores), a single <code>.ged</code> file combining every site for AGICO instruments, and a per-core diagnostic report. An empty companion <code>.pmagani</code> (header only) is created alongside the <code>.prmag</code> if one doesn't already exist — ready to archive AMS data into (AMS_Py's <code>Archive ASC into .pmagani…</code>) as soon as it's measured, without waiting for that first archive to bring the file into existence.</div>
       </div>
@@ -658,7 +666,7 @@
         <div class="label">Create prmag from AGICO .ged file… <span class="badge-new">new</span></div>
         <div class="desc">An alternative starting point when only a <code>.ged</code> is available — received from a colleague, or produced by the AGICO instrument's own software — rather than the raw field-orientation notebook above. Reads each specimen's id, core azimuth/dip and bedding strike/dip straight from the <code>.ged</code>'s fixed-column layout and writes a <code>.prmag</code> with no measurements yet; site, date, geology, volume/mass are left as <code>n.d</code>/defaults (fill them in afterwards with <code>Complete sample information…</code>). Same empty companion <code>.pmagani</code> creation as the field-notes import above. The natural next step is <code>Archive new laboratory measurements</code> below, which attaches the instrument's real measurements to these specimens — it requires them to already exist in the target <code>.prmag</code>, which is exactly what this command prepares.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-complete">
         <div class="label">Complete sample information…</div>
         <div class="desc">Patches geology, coordinates and stratigraphic position into a <code>.prmag</code> already loaded, from an external tab-separated table — filled in progressively as more becomes known, in as many passes as you like, rather than requiring everything up front at import time or re-doing the original import. Three modes, keyed by site, specimen or sample (see below). Only patches the raw text of the four header lines directly: whatever isn't in the table (measurements, <code>method_codes</code>, formatting of untouched values) stays byte-for-byte as it was. A <code>.bak</code> backup of the whole file is written once, the first time this command changes anything — never overwritten afterwards, so it always holds the state from before the very first completion pass. Reports, in a companion <code>_completion_report.txt</code> file (the full list, not truncated), both the specimens that had no matching row in the table and — separately — any specimen that still has at least one field left at <code>n.d</code> after this pass, whether from a missing match or a table that only supplied some of its columns.</div>
       </div>
@@ -688,9 +696,13 @@
       <div class="callout">
         <strong>The single most valuable step before a MagIC export.</strong> <code>export to Magic database</code> (below) can only export what the <code>.prmag</code> already knows — a site with no <code>formation</code>/<code>age</code>/<code>lithologies</code>, or a specimen with no <code>stratigraphic_height</code>, exports exactly that gap into MagIC. Since none of this metadata has to be known at import time (see <a href="#format">"Nothing has to be filled in"</a>), <code>Complete sample information…</code> is what actually closes those gaps afterwards, from whatever table you can put together — field notebooks, a spreadsheet from a colleague, literature values for a formation's age — without re-importing anything or hand-editing the <code>.prmag</code> text. Run it as many times as new information arrives, right up until the export.
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-archive">
         <div class="label">Archive new laboratory measurements</div>
         <div class="desc">Attaches measurements acquired <em>after</em> a <code>.prmag</code> was already created — the same specimens went back on the magnetometer, or the JR6 spinner, for another round — without rebuilding the file from scratch. Accepts either a new legacy Rennes-format file or a raw JR6 file (one or several at once, merged before archiving); a measurement whose (step, cod1, cod2) already exists for that specimen is skipped rather than duplicated, so re-running the import on a file that partly overlaps earlier data is safe. A specimen in the new data with no match in the target <code>.prmag</code> is logged and left out — this command only ever adds measurements to specimens that already exist, never creates new ones. Patches the file in place (new lines only ever appended at the end of the right specimen's block; a <code>.bak</code> backup is written once, the first time).</div>
+      </div>
+      <div class="item" id="pmagfile-dupes">
+        <div class="label">Check files for duplicate entries… <span class="badge-new">new</span></div>
+        <div class="desc">Scans the loaded <code>.prmag</code> and its companion <code>.pmagres</code>/<code>.pmagani</code>/<code>.pmagint</code> files for duplicate rows (same specimen/step for measurements, same specimen for an archived result or anisotropy tensor) — a common symptom of re-running an import or archive step twice. Reports what it finds; nothing is deleted automatically.</div>
       </div>
 
       <h3 class="group" id="pmagfile-export">Export</h3>
@@ -698,19 +710,15 @@
         <div class="label">export to Magic database</div>
         <div class="desc">Generates the MagIC tables (<code>sites</code>, <code>samples</code>, <code>specimens</code>, <code>measurements</code>, <code>locations</code>) from the current selection and saved results. Each <code>sites</code> row gets one line per archived mean (in situ <em>and</em> tilt-corrected, if both were saved), and its <code>specimens</code> column lists the real specimen names contributing to that mean — see <a href="#results-manage">Select results…</a> for how that list is resolved, and why <em>site</em> mode is the more exact choice on a legacy file. Any <code>.pmagani</code> specimen or site-mean tensor marked <code>export=N</code> (see <a href="#pmagani-columns">.pmagani columns</a>) is skipped here — the curated selection made in AMS_Py's own <strong>Mark selection for MagIC export…</strong> is respected without needing an intermediate file.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-textexport">
         <div class="label">export pmag content as a text file</div>
         <div class="desc">Detailed text file: a full parameter block per specimen (site, orientation, age, geology…) followed by the measurement table in all three frames (specimen / in-situ / after tilt correction). Includes each specimen's magnetostratigraphic height whenever it's known — from <code>stratigraphic_height</code> in the <code>.prmag</code> when any selected specimen has it set, otherwise (older files) by asking "with magnetostratigraphic data" and offering a one-off sample/height file, same as before.</div>
-      </div>
-      <div class="item">
-        <div class="label">export pmag content as a LaTeX file</div>
-        <div class="desc">Same content as the detailed export, laid out as a LaTeX document with a hyperlinked table of contents by site/specimen and the ChRM fit summary where applicable. Picks up magnetostratigraphic height the same way as <code>export pmag content as a text file</code> above.</div>
       </div>
       <div class="item">
         <div class="label">export results to Stereo_Py…</div>
         <div class="desc">Writes two files, in two <em>different</em> formats, both directly usable by <a href="#pmagani-ams">StereoUtils_Py</a> rather than a generic text dump: a "Project" file — the saved fits, grouped by site — loadable as-is via StereoUtils_Py's own <code>Project → Load Project…</code> (a site-level Fisher mean can then be recomputed there via "Fisher Project"); and a companion <code>_poles</code> file carrying site means as VGPs (with their dp/dm confidence ellipse) in the "Data input" format expected by <code>Plot VGPs on Map</code> — a pole isn't a local direction, so it needs its own file and format, not the Project one.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagfile-quit">
         <div class="label">Quit STARpaleomag_Py <span class="shortcut">Cmd+Ctrl+X</span></div>
         <div class="desc">Closes the application.</div>
       </div>
@@ -722,7 +730,7 @@
       <p class="menu-desc">Choose which specimens/measurements are active for the Results, Paleointensity, Calcul and Graphics menus, and in which orientation they are displayed.</p>
 
       <h3 class="group" id="pmagdata-selection">Selection</h3>
-      <div class="item">
+      <div class="item" id="pmagdata-select">
         <div class="label">Select data… <span class="shortcut">Cmd+E</span></div>
         <div class="desc">Filters by specimen number (<code>*</code>/<code>?</code> wildcards), demagnetization code, and step range. <strong>Adds</strong> to the existing selection rather than replacing it — use <code>Init list</code> to start over. The demagnetization code is asked <em>before</em> the step range so the Step min/max prompts can label and accept the right unit: <code>mT</code> for an AF code (<code>A</code>/<code>F</code>), <code>degC</code> for a thermal code (<code>D</code>/<code>S</code>/<code>T</code>/<code>K</code>) — type the same value you'd see in <code>List data</code>, no conversion needed on your end.</div>
       </div>
@@ -734,7 +742,7 @@
         <div class="label">Select header… <span class="shortcut">Cmd+Ctrl+E</span></div>
         <div class="desc">Sets a prefix automatically applied to every specimen number subsequently entered in <code>Select data…</code>.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagdata-edit">
         <div class="label">Delete some data… <span class="shortcut">Cmd+D</span></div>
         <div class="desc">Removes specific measurements from the current selection (by step/range), without touching the loaded file. Same demag-code-first, unit-aware Step min/max prompts as <code>Select data…</code>.</div>
       </div>
@@ -748,19 +756,15 @@
         <div class="label">List data <span class="shortcut">Cmd+L</span></div>
         <div class="desc">Text table of the selection's measurements: specimen, step (with its unit — °C thermal, mT AF — and treatment code), total moment, a single intensity column normalized by volume (A/m) or mass (Am2/kg) — whichever the selection actually uses, not both with a placeholder for the one that doesn't apply — declination/inclination, quality, instrument, and susceptibility (<code>K</code>, unit following the same volume/mass choice).</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagdata-lists">
         <div class="label">List in XYZ</div>
         <div class="desc">Same measurements, presented in raw X/Y/Z Cartesian coordinates (normalized by volume or mass — whichever the selection uses — with the resulting unit stated once, next to Z, rather than repeated per column).</div>
-      </div>
-      <div class="item">
-        <div class="label">List data VRM</div>
-        <div class="desc">Viscous remanent magnetization (VRM)-oriented list — variation between consecutive measurements, plus elapsed hours since the specimen's first measurement.</div>
       </div>
       <div class="item">
         <div class="label">List and depth…</div>
         <div class="desc">Lists measurements against each specimen's position in the section — the angle to an expected site direction included, for stratigraphic-section or drill-core studies. Uses the <code>.prmag</code> <a href="#format-structure"><code>stratigraphic_height:</code></a> field directly whenever at least one selected specimen has it set; only asks for an external specimen/depth file as a fallback for older files that don't have it yet.</div>
       </div>
-      <div class="item">
+      <div class="item" id="pmagdata-info">
         <div class="label">Info samples <span class="shortcut">Cmd+J</span></div>
         <div class="desc">Summary sheet per specimen: steps, lithology, orientation, volume/mass, site coordinates — plus <strong>Decli_IGRF</strong> and <strong>Decli_local</strong>. <code>Decli_IGRF</code> is the geomagnetic model's declination at that specimen's site and sampling date; <code>Decli_local</code> is the declination actually measured on-site from the magnetic- and sun-compass azimuth pair recorded for that core (see <a href="#pmagfile-import">Orientation: field notes…</a>) — <code>n.d</code> whenever no sun sight was taken. The two columns sitting side by side make a specimen where they disagree by more than a few degrees easy to spot at a glance.</div>
       </div>
@@ -840,9 +844,13 @@
         <div class="label">Evaluate interpretations… <span class="badge-new">new</span></div>
         <div class="desc">Audits every line/plane fit currently in the results list (same set <code>List results</code> shows): recomputes each one directly from the live measurements and reports on its quality (MAD recomputed, anchored/free angle for lines, a linearity ratio) rather than trusting the numbers as saved. Site means ("mean:") are skipped — there's no line/plane fit to re-evaluate for those.</div>
       </div>
-      <div class="item">
+      <div class="item" id="results-fisheritem">
         <div class="label">Fisher results <span class="shortcut">Cmd+Ctrl+F</span></div>
         <div class="desc">Fisher mean over already-saved results (line-type fits).</div>
+      </div>
+      <div class="item" id="results-means">
+        <div class="label">Import published site means…</div>
+        <div class="desc">Archives a site-level Fisher mean directly, from a table of already-published directions (dec/inc, N, k or a95) rather than raw specimen measurements — for a site whose original data is lost but whose result appeared in a paper, or a legacy dataset being consolidated into a single <code>.pmagres</code>.</div>
       </div>
     </section>
 
@@ -851,19 +859,23 @@
       <h2>Paleointensity <span class="menu-tag">Thellier/IZZI</span></h2>
       <p class="menu-desc">Arai-diagram interpretation, batch replay, and the data-preparation steps a Thellier/IZZI sequence sometimes needs first.</p>
 
-      <div class="item">
+      <div class="item" id="paleoint-view">
         <div class="label">Paleointensity interpretation</div>
         <div class="desc">Arai diagram (remaining NRM / acquired TRM), N/R/V/P convention, with interactive slope fitting. Anchored and free directions are shown before <em>and</em> after anisotropy correction when a tensor is available, alongside a parallel PmagPy/MagIC computation (MAD, DANG, FRAC, f<sub>vds</sub>, gap_max…). Every reviewed interval is appended to the specimen's <a href="#pmagint">.pmagint</a> file.</div>
       </div>
       <div class="item">
-        <div class="label">View batch of Paleoint Results…</div>
-        <div class="desc">Batch replay from a list file <code>specimen Tmin Tmax [cooling] [aniso factor]</code> — same PmagPy statistics and <a href="#pmagint">.pmagint</a> archiving as <code>Paleointensity interpretation</code>. The optional 4th/5th columns are the MagIC <code>int_corr_cooling_rate</code>/<code>int_corr_aniso</code> factors, written automatically into the redo file by <code>Import MagIC contribution to .prmag format…</code> when the source contribution already carries them: the cooling factor is always applied as a final multiplier on H, while the anisotropy factor is used only as a <em>fallback</em>, when this specimen has no native <a href="#pmagani">.pmagani</a> A0 tensor of its own to correct with — never both, to avoid correcting the same effect twice.</div>
+        <div class="label">View batch of Paleoint Results (from .pmagint, read-only)…</div>
+        <div class="desc">Reviews determinations <strong>already archived</strong> in the specimen's <a href="#pmagint">.pmagint</a> file, one by one — the stored f/g/q/H/MAD/DANG/… values are shown exactly as saved, never recomputed, and nothing is written back. The Arai/Zijderveld/stereo diagram is still redrawn from the raw measurements (the point series itself isn't stored in <code>.pmagint</code>), using the archived Tmin/Tmax/Hlab — a deterministic replay of the same inputs, not a new interpretation.</div>
       </div>
-      <div class="item">
+      <div class="item" id="paleoint-rapid">
+        <div class="label">Rapid view/recompute from redo file…</div>
+        <div class="desc">The other batch workflow: replays a list file <code>specimen Tmin Tmax [cooling] [aniso factor]</code>, <strong>recomputing</strong> each determination from the raw measurements and appending the result to <code>.pmagint</code> — use this one to actually redo/update an interpretation, the read-only view above to just look at what's already there. The optional 4th/5th columns are the MagIC <code>int_corr_cooling_rate</code>/<code>int_corr_aniso</code> factors, written automatically into the redo file by <code>Import MagIC contribution to .prmag format…</code> when the source contribution already carries them: the cooling factor is always applied as a final multiplier on H, while the anisotropy factor is used only as a <em>fallback</em>, when this specimen has no native <a href="#pmagani">.pmagani</a> A0 tensor of its own to correct with — never both, to avoid correcting the same effect twice.</div>
+      </div>
+      <div class="item" id="paleoint-thellier">
         <div class="label">Thellier &gt;&gt; NRM</div>
         <div class="desc">Converts a Thellier sequence (N/R/V/P… codes) into a simple NRM/demag sequence, combining R+V pairs to extract the remaining NRM — useful when a specimen's directional behavior needs to be looked at with the ordinary Zijderveld/stereo tools rather than the Arai diagram.</div>
       </div>
-      <div class="item">
+      <div class="item" id="paleoint-remove">
         <div class="label">Remove paleointensity step</div>
         <div class="desc">Removes all measurements for a given step of a specimen, and renumbers the remaining R/V/P codes.</div>
       </div>
@@ -871,13 +883,13 @@
         <div class="label">Remove bad-quality (b) steps… <span class="badge-new">new</span></div>
         <div class="desc">Scans every specimen in the current selection for steps flagged quality <code>b</code> (the per-measurement <code>quality</code> column — see <a href="#format-structure">measurement table</a>) and removes them in one pass across the whole selection, with the same R/V/P renumbering as <code>Remove paleointensity step</code> and the same cascading removal of a pTRM check that referred to the rejected step. Built for the case that motivated it: a whole batch of specimens affected by the same furnace problem, not just one specimen at a time.</div>
       </div>
-      <div class="item">
-        <div class="label">export to ThellierTool…</div>
-        <div class="desc">Exports a <code>.tdt</code> file per selected specimen, in the format read by ThellierTool.</div>
-      </div>
-      <div class="item">
+      <div class="item" id="paleoint-cooling">
         <div class="label">Cooling rate…</div>
         <div class="desc">Cooling-rate correction (paleointensity): automatic ATR pattern detection or manual entry of the relevant lines.</div>
+      </div>
+      <div class="item" id="paleoint-export">
+        <div class="label">export to ThellierTool…</div>
+        <div class="desc">Exports a <code>.tdt</code> file per selected specimen, in the format read by ThellierTool.</div>
       </div>
     </section>
 
@@ -915,14 +927,18 @@
       </div>
 
       <h3 class="group" id="calcul-corrections">Corrections &amp; tools</h3>
-      <div class="item">
+      <div class="item" id="calcul-viscosity">
         <div class="label">Test viscosity</div>
         <div class="desc">Requires the specimen's first two measurements to be coded <code>N+</code>/<code>N-</code>. Replaces the first with their mean vector (the residual NRM, cod2 set to <code>0</code>) and the second with their difference vector (the acquired VRM, cod2 set to <code>v</code>), both divided by 2 — a viscosity index, <code>100 × |difference| / |mean|</code> (%), is stored in the second measurement's quality field. Irreversible for the session, confirmation requested.</div>
+      </div>
+      <div class="item">
+        <div class="label">List data VRM</div>
+        <div class="desc">Viscous remanent magnetization (VRM)-oriented list — variation between consecutive measurements, plus elapsed hours since the specimen's first measurement. Grouped here with <code>Test viscosity</code> rather than the Pmag data listing commands, since both are about the same VRM concern.</div>
       </div>
       <div class="callout">
         <strong>Émilie Thellier's viscosity test, and why it's worth reviving.</strong> This is the test Émilie Thellier defined in the 1950s: leave the specimens for a set period — with X aligned north — then, after two weeks or a month, rotate them 180° about the Y axis and measure again. The <code>N+</code>/<code>N-</code> code pair records exactly that pair of measurements. Averaging the two isolates the residual NRM (any VRM acquired during the wait cancels between the two opposite orientations); their difference isolates the VRM itself, the magnetization actually picked up over that month or two weeks. The test was routine practice at Rennes in the early 1980s, then fell out of use in recent decades as it became rare across the paleomagnetism community generally — very likely a mistake (see Westerweel et al., 2025, GSL Special Publication).
       </div>
-      <div class="item">
+      <div class="item" id="calcul-diffsub">
         <div class="label">Diff measurements n/n-1</div>
         <div class="desc">Lists the difference vectors between consecutive measurements (GRM/noise diagnostic).</div>
       </div>
@@ -934,7 +950,7 @@
         <div class="label">Autoinverse <span class="badge-todo">not yet ported</span></div>
         <div class="desc">Automatic reverse-polarity correction — not yet implemented in this port.</div>
       </div>
-      <div class="item">
+      <div class="item" id="calcul-aniso">
         <div class="label">Anisotropy <span class="badge-new">new</span></div>
         <div class="desc">Detects the 6 TRM/ARM positions automatically, writes all 15 tensor variants (A0 main, plus 14 jackknife estimates) to the specimen's <code>.pmagani</code> file, and runs a parallel PmagPy Hext F-test — if the result is not statistically significant, you're asked whether to save it anyway.</div>
       </div>
@@ -962,7 +978,7 @@
         <div class="label">Inverse_ANI_correction…</div>
         <div class="desc">Applies the inverse of a chosen anisotropy tensor — TRM (<code>A0</code>), ARM (<code>F0</code>), susceptibility (<code>N0</code>), or an ARM tensor imported from a MagIC contribution (<code>AA</code>, see <a href="#pmagani">.pmagani</a>) — from the specimen's <code>.pmagani</code> file, to all its measurements, and lists the corrected directions.</div>
       </div>
-      <div class="item">
+      <div class="item" id="calcul-grm">
         <div class="label">Detect GRM… <span class="badge-new">new</span></div>
         <div class="desc">Screens the selection for likely GRM (gyroremanent magnetization) contamination during AF demagnetization: fits a line through the usable AF steps, checks whether each step's residual from that line sits perpendicular to the <em>last</em> coil axis used at that step, and whether that perpendicular component grows with the applied AF field — the geometric and temporal signature of a real GRM, as opposed to noise or a second component. A diagnostic only, meant to flag specimens for a visual (Zijderveld) check — it changes nothing in the data.</div>
       </div>
@@ -992,15 +1008,15 @@
       <p class="menu-desc">Demagnetization plots and saved-result plots.</p>
 
       <h3 class="group" id="graphics-traces">Plots</h3>
-      <div class="item">
+      <div class="item" id="graphics-zijder">
         <div class="label">Zijderveld <span class="shortcut">Cmd+Ctrl+Z</span></div>
         <div class="desc">Orthogonal demagnetization diagram, with the specimen's line/plane fits overlaid. Click a point (either projection) to print its step in the console — the treatment code and temperature/field, not just its position on the plot.</div>
       </div>
-      <div class="item">
+      <div class="item" id="graphics-stereo">
         <div class="label">Stereo data</div>
         <div class="desc">Stereographic projection of the selection's measured directions.</div>
       </div>
-      <div class="item">
+      <div class="item" id="graphics-plots">
         <div class="label">XYgraph <span class="shortcut">Cmd+Ctrl+Y</span></div>
         <div class="desc">Normalized demagnetization curve (M/M₀). If the selection mixes AF and thermal steps, two stacked sub-plots are shown (incompatible scales: mT vs °C) rather than a single confused plot. If a specimen's own curve spikes above 2× its first point at some later step — a bad measurement, not a real intensity increase — that specimen is renormalized to its own maximum instead of its first point, so one outlier doesn't compress every other specimen's curve onto the same shared axis.</div>
       </div>
@@ -1026,7 +1042,7 @@
         <div class="label">Clear Screen</div>
         <div class="desc">Clears the displayed plot.</div>
       </div>
-      <div class="item">
+      <div class="item" id="graphics-svg">
         <div class="label">Export SVG…</div>
         <div class="desc">Exports the currently displayed plot to SVG format. Works mid-loop: nothing stops you from using it while a batch replay (<code>View batch of Paleoint Results…</code>, <code>data+interpretation</code>…) is paused waiting for your next Return/input — the menu stays fully clickable, so you can export the specimen currently on screen without breaking out of the batch first. The Fortran original couldn't do this: its keyboard-driven prompt loop blocked the whole program, menus included, until you answered it.</div>
       </div>
