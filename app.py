@@ -1029,9 +1029,17 @@ class STARpaleomagApp:
             )
 
             for sample in self.donnees:
+                # "Dip" (pas "Inc") - demande explicite utilisateur : ce
+                # champ est sample.cin (le pendage de la carotte, DIFF_
+                # WITH_MAGIC), jamais une inclinaison paleomagnetique -
+                # "Inc" pretait a confusion. Colonnes alignees (ID/
+                # Measurements/Dip/Az a largeur fixe) - police Courier de
+                # text_area (monospace), demande explicite utilisateur
+                # ("align the columns").
                 self.text_area.insert(
                     tk.END,
-                    f"ID: {sample.id} | Measurements: {sample.nbmes} | Inc: {sample.cin} | Az: {sample.caz}\n"
+                    f"ID: {sample.id:<12} | Measurements: {sample.nbmes:>3} | "
+                    f"Dip: {sample.cin:>6.1f} | Az: {sample.caz:>6.1f}\n"
                 )
 
             # Controle de coherence .pmagani <-> .prmag DES L'OUVERTURE
