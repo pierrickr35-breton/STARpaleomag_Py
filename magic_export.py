@@ -160,6 +160,14 @@ _SITES_HEADER = [
     "aniso_type", "aniso_tilt_correction", "aniso_v1", "aniso_v2", "aniso_v3",
     "aniso_p", "aniso_pp", "aniso_t", "aniso_l", "aniso_f",
     "aniso_perc", "aniso_total", "aniso_ll", "aniso_ff", "aniso_vg", "aniso_fl",
+    # ecart avec AMS_Py.ams_stats.magic_site_aniso_fields comble ici (voir
+    # anisotropy_site_magic_fields plus bas) : AMS_Py ecrit cette mise en
+    # garde eta/zeta directement dans la colonne `description` de son
+    # export sites.txt natif, ce que ce module ne faisait pas encore -
+    # sans cette colonne, l'avertissement ne restait que dans le
+    # docstring du code, invisible pour qui exporte depuis
+    # STARpaleomag_Py plutot que depuis AMS_Py.
+    "description",
 ]
 
 _LOCATIONS_HEADER = [
@@ -833,6 +841,18 @@ def anisotropy_site_magic_fields(mean: AniMeanTensor) -> Dict[str, str]:
         fields["aniso_l"] = f"{mean.L:.6f}"
     if mean.F is not None:
         fields["aniso_f"] = f"{mean.F:.6f}"
+    # Meme colonne `description` que AMS_Py.ams_stats.magic_site_aniso_fields
+    # (verifiee manquante ici, voir _SITES_HEADER) : documente dans le
+    # fichier MagIC lui-meme (pas seulement dans ce docstring) la
+    # simplification eta/zeta partagee par pmagpy.ipmag ET AMS_Py -
+    # demande explicite utilisateur ("porter cette colonne description
+    # manquante vers STARpaleomag_Py").
+    fields["description"] = (
+        "eta/zeta point toward the other two eigenvectors with Jelinek (1978) "
+        "confidence semi-angles (alpha1_N/alpha2_N from the .pmagani mean "
+        "tensor), not Hext (1963) pairwise e12/e13/e23 - see "
+        "anisotropy_site_magic_fields docstring"
+    )
     return fields
 
 # Colonnes MagIC v3 (table "specimens", groupe paleointensite) construites
