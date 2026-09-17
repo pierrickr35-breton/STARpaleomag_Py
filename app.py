@@ -1583,7 +1583,7 @@ class STARpaleomagApp:
                 # choisit explicitement laquelle des deux conventions
                 # connues correspond a ce fichier.
                 choice = self._console_input(
-                    "Take the dip as-is (1: dip in .prmag = dip in MagIC file) or "
+                    "Take the dip as-is (1: dip in .prmag = dip in MagIC file) or\n"
                     "the Utrecht convention (2: dip in .prmag = 90 - dip in MagIC "
                     "file)? 1/2: ", "1")
                 if choice is None:
