@@ -483,6 +483,11 @@ class STARpaleomagApp:
         # commandes ne charge quoi que ce soit dans la session, meme
         # "Import..." : toutes ecrivent un nouveau fichier sur disque),
         # puis exports/rapports.
+        # Blocs reorganises a la demande explicite utilisateur ("est-ce
+        # possible de reorganiser les lignes de separations dans les
+        # menus"), liste triee fournie par l'utilisateur - chaque bloc
+        # separe par une ligne devient l'unite d'aide contextuelle (voir
+        # _mi/_help_anchor plus bas).
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label=self._labeled("Open Pmag file...", "importpc"),
                                command=self.ouvrir_fichier_ren)
@@ -502,11 +507,12 @@ class STARpaleomagApp:
                                command=self.ouvrir_field_notes_dialog)
         file_menu.add_command(label="Create prmag from AGICO .ged file...",
                                command=self.ouvrir_ged_to_prmag_dialog)
-        file_menu.add_command(label="Complete sample information...", command=self.ouvrir_complete_sample_info_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="Archive new laboratory measurements", command=self.ouvrir_archive_new_data_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="Check files for duplicate entries...", command=self.ouvrir_check_duplicates_dialog)
         file_menu.add_separator()
+        file_menu.add_command(label="Complete sample information...", command=self.ouvrir_complete_sample_info_dialog)
         file_menu.add_command(label="export to Magic database", command=self.ouvrir_export_magic_dialog)
         file_menu.add_separator()
         file_menu.add_command(label="export pmag content as a text file", command=self.ouvrir_export_detailed_dialog)
@@ -520,7 +526,6 @@ class STARpaleomagApp:
         data_menu.add_command(label=self._labeled("Select data...", "selmes"),
                                command=self.ouvrir_selection_dialog)
         data_menu.add_command(label="Select site...", command=self.ouvrir_selection_site_dialog)
-        data_menu.add_separator()
         data_menu.add_command(label=self._labeled("Select header...", "selentete"),
                                command=self.ouvrir_entete_dialog)
         data_menu.add_separator()
@@ -528,19 +533,20 @@ class STARpaleomagApp:
                                command=self.ouvrir_effmes_dialog)
         data_menu.add_command(label=self._labeled("Init list", "initmes"),
                                command=self.reinitialiser_selection)
-        data_menu.add_separator()
         data_menu.add_command(label=self._labeled("List data", "lismes"), command=self.lister_mesures)
+        data_menu.add_separator()
         data_menu.add_command(label="List in XYZ", command=self.lister_xyz)
-        data_menu.add_command(label="List data VRM", command=self.lister_vrm)
         data_menu.add_command(label="List and depth...", command=self.ouvrir_lismesdepth_dialog)
         data_menu.add_separator()
         data_menu.add_command(label=self._labeled("Info samples", "infoech"),
                                command=self.afficher_info_echantillons)
-        data_menu.add_separator()
 
         # Radiobuttons directement dans le menu (pas de sous-menu imbrique) :
         # meme raisonnement que ci-dessus, en plus du probleme deja identifie
-        # avec les sous-menus en cascade.
+        # avec les sous-menus en cascade. "List data VRM" (self.lister_vrm)
+        # est deplace dans Calcul, aux cotes de "Test viscosity" - demande
+        # explicite utilisateur ("!!!! mettre avec le menu calcul
+        # viscosity").
         for label, value in ORIENTATIONS.items():
             data_menu.add_radiobutton(
                 label=self._labeled(label, ORIENTATION_SHORTCUT_NAMES[value]),
@@ -563,8 +569,6 @@ class STARpaleomagApp:
         results_menu.add_command(label=self._labeled("Init results", "initres"),
                                   command=self.reinitialiser_resultats)
         results_menu.add_command(label="Delete results...", command=self.ouvrir_delete_results_dialog)
-        results_menu.add_command(label="Import published site means...",
-                                  command=self.ouvrir_import_published_means_dialog)
         results_menu.add_separator()
         results_menu.add_command(label=self._labeled("best lines...", "ajuslig"),
                                   command=self.ouvrir_ajuslig_dialog)
@@ -575,7 +579,11 @@ class STARpaleomagApp:
         results_menu.add_command(label="Auto-interpret (suggest components)...", command=self.ouvrir_autointerpretation_dialog)
         results_menu.add_separator()
         results_menu.add_command(label="Evaluate interpretations...", command=self.evaluer_interpretations)
+        results_menu.add_separator()
         results_menu.add_command(label=self._labeled("Fisher results", "fishres"), command=self.fisher_resultats)
+        results_menu.add_separator()
+        results_menu.add_command(label="Import published site means...",
+                                  command=self.ouvrir_import_published_means_dialog)
         menubar.add_cascade(label="Results", menu=results_menu)
 
         # Menu Paleointensity (demande explicite utilisateur : "view
@@ -592,11 +600,13 @@ class STARpaleomagApp:
                                    command=self.ouvrir_openfilepint_dialog)
         paleoint_menu.add_separator()
         paleoint_menu.add_command(label="Thellier >> NRM", command=self.ouvrir_convertthelli_dialog)
+        paleoint_menu.add_separator()
         paleoint_menu.add_command(label="Remove paleointensity step", command=self.ouvrir_removestep_dialog)
         paleoint_menu.add_command(label="Remove bad-quality (b) steps...", command=self.ouvrir_remove_bad_quality_dialog)
-        paleoint_menu.add_command(label="export to ThellierTool...", command=self.ouvrir_exportthellier_dialog)
         paleoint_menu.add_separator()
         paleoint_menu.add_command(label="Cooling rate...", command=self.ouvrir_cooling_rate_dialog)
+        paleoint_menu.add_separator()
+        paleoint_menu.add_command(label="export to ThellierTool...", command=self.ouvrir_exportthellier_dialog)
         menubar.add_cascade(label="Paleointensity", menu=paleoint_menu)
 
         # Menu Calcul (categorie gardee en francais dans la source elle-meme,
@@ -609,21 +619,25 @@ class STARpaleomagApp:
         calcul_menu.add_command(label=self._labeled("Fisher measures", "fishmes"), command=self.fisher_mesures)
         calcul_menu.add_command(label=self._labeled("Fisher results", "fishres"), command=self.fisher_resultats)
         calcul_menu.add_separator()
-        calcul_menu.add_command(label="MdF-MdT", command=self.afficher_mdf)
-        calcul_menu.add_command(label=self._labeled("Mean Intensity", "meanint"), command=self.afficher_mean_intensity)
-        calcul_menu.add_command(label="Koenigsberger ratio...", command=self.ouvrir_koenigsberger_dialog)
-        calcul_menu.add_separator()
-        calcul_menu.add_command(label="Mean Inclination", command=self.afficher_mean_inclination)
-        calcul_menu.add_separator()
-        calcul_menu.add_command(label="Test viscosity", command=self.appliquer_viscosity_test)
-        calcul_menu.add_command(label="Diff measurements n/n-1", command=self.afficher_diff_measurements)
-        calcul_menu.add_command(label="Subtraction...", command=self.ouvrir_subtraction_dialog)
-        calcul_menu.add_command(label="Autoinverse", command=lambda: self._not_implemented("Autoinverse"))
-        calcul_menu.add_separator()
         calcul_menu.add_command(label=self._labeled("Anisotropy", "anisotropy"), command=self.ouvrir_anisotropy_dialog)
         calcul_menu.add_command(label="Anisotropy PmagPy...", command=self.ouvrir_anisotropy_pmagpy_dialog)
         calcul_menu.add_command(label="Holder_ARM...", command=self.ouvrir_holderarm_dialog)
         calcul_menu.add_command(label="Inverse_ANI_correction...", command=self.ouvrir_inverseani_dialog)
+        calcul_menu.add_separator()
+        calcul_menu.add_command(label="MdF-MdT", command=self.afficher_mdf)
+        calcul_menu.add_command(label=self._labeled("Mean Intensity", "meanint"), command=self.afficher_mean_intensity)
+        calcul_menu.add_command(label="Koenigsberger ratio...", command=self.ouvrir_koenigsberger_dialog)
+        calcul_menu.add_command(label="Mean Inclination", command=self.afficher_mean_inclination)
+        calcul_menu.add_separator()
+        # "List data VRM" (self.lister_vrm) deplace ici depuis Pmag data -
+        # demande explicite utilisateur ("mettre avec le menu calcul
+        # viscosity").
+        calcul_menu.add_command(label="Test viscosity", command=self.appliquer_viscosity_test)
+        calcul_menu.add_command(label="List data VRM", command=self.lister_vrm)
+        calcul_menu.add_separator()
+        calcul_menu.add_command(label="Diff measurements n/n-1", command=self.afficher_diff_measurements)
+        calcul_menu.add_command(label="Subtraction...", command=self.ouvrir_subtraction_dialog)
+        calcul_menu.add_command(label="Autoinverse", command=lambda: self._not_implemented("Autoinverse"))
         calcul_menu.add_separator()
         calcul_menu.add_command(label="Detect GRM...", command=self.ouvrir_detect_grm_dialog)
         calcul_menu.add_command(label="Suppress GRM", command=self.ouvrir_elimine_grm_dialog)
@@ -634,13 +648,14 @@ class STARpaleomagApp:
         # explicitement par l'utilisateur).
         graph_menu = tk.Menu(menubar, tearoff=0)
         graph_menu.add_command(label=self._labeled("Zijderveld", "plotzijder"), command=self.afficher_zijderveld)
+        graph_menu.add_command(label="data+interpretation", command=self.afficher_visres)
+        graph_menu.add_separator()
         graph_menu.add_command(label=self._labeled("Stereo data", "stereodata"), command=self.afficher_stereo)
+        graph_menu.add_command(label=self._labeled("Stereo Results", "stereores"), command=self.afficher_stereo_results)
+        graph_menu.add_separator()
         graph_menu.add_command(label=self._labeled("XYgraph", "xygraph"), command=self.afficher_xygraph)
         graph_menu.add_command(label=self._labeled("Susceptibility", "suscep"), command=self.afficher_susceptibilite)
         graph_menu.add_command(label="Plot IRM", command=self.afficher_irm)
-        graph_menu.add_separator()
-        graph_menu.add_command(label=self._labeled("Stereo Results", "stereores"), command=self.afficher_stereo_results)
-        graph_menu.add_command(label="data+interpretation", command=self.afficher_visres)
         graph_menu.add_separator()
         graph_menu.add_command(label="Clear Screen", command=self.clear_screen)
         graph_menu.add_separator()
