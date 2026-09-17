@@ -1561,6 +1561,23 @@ class STARpaleomagApp:
                 "dip in the STARpaleomag_Py convention (cin) instead of the raw MagIC "
                 "one.\n"
             )
+            # Signature Utrecht - demande explicite utilisateur ("I was
+            # right to suspect the Utrecht flaw... the few negative
+            # values in this magic files are explained exactly by the
+            # Utrecht convention. Usually with a portable drill... we
+            # drill from vertical down to horizontal and in some case up
+            # to 10 to 20 degrees up... it is almost impossible to drill
+            # 45 degrees upward") : voir scan_dip_sign.looks_like_utrecht.
+            # Seulement une SUGGESTION affichee/pre-selectionnee - jamais
+            # choisie a la place de l'utilisateur.
+            if dip_scan["looks_like_utrecht"]:
+                dip_warning_note += (
+                    f"\nThe {dip_scan['n_negative']} negative value(s) found are all "
+                    f"small (max {dip_scan['max_abs_negative']:.0f} degrees) - this "
+                    "matches the Utrecht convention (a portable drill goes from "
+                    "vertical down to horizontal, rarely a few degrees past it, "
+                    "almost never near 45 degrees upward).\n"
+                )
             # Affiche IMMEDIATEMENT (tag "warn", voir WARN_MARK) pour donner
             # le contexte de la question qui suit - MAIS ce console sera
             # entierement efface par _load_data_file plus bas
@@ -1581,11 +1598,14 @@ class STARpaleomagApp:
                 # Deux alternatives (demande explicite utilisateur) - PAS
                 # de repli silencieux sur "raw" par defaut, l'utilisateur
                 # choisit explicitement laquelle des deux conventions
-                # connues correspond a ce fichier.
+                # connues correspond a ce fichier. Defaut pre-selectionne
+                # sur "2" (Utrecht) si la signature ci-dessus matche,
+                # "1" (raw) sinon - une suggestion, pas un choix impose.
+                default_choice = "2" if dip_scan["looks_like_utrecht"] else "1"
                 choice = self._console_input(
                     "Take the dip as-is (1: dip in .prmag = dip in MagIC file) or\n"
                     "the Utrecht convention (2: dip in .prmag = 90 - dip in MagIC "
-                    "file)? 1/2: ", "1")
+                    "file)? 1/2: ", default_choice)
                 if choice is None:
                     return
                 dip_mode = "utrecht" if choice.strip() == "2" else "raw"

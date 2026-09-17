@@ -190,22 +190,41 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
     priorite, sample-level en repli (voir _orientation_source).
 
     Retourne {"n_total", "n_positive", "n_negative", "n_zero",
-    "n_from_specimen", "majority_positive"}. "majority_positive" est le
-    signal d'alerte - REGLE METIER donnee explicitement par l'utilisateur
-    ("en pratique on ne devrait avoir que des valeurs negatives <= a 0
-    pour le dip donc quand la majorite des echantillons ont un dip >= a
-    0 c'est qu'il y a un probleme") : PAS une condition d'unanimite
-    (une premiere version exigeait "tous positifs" ou "tous negatifs",
-    qui manquait exactement le cas reel signale par l'utilisateur -
-    magic_contribution_20476.txt, 848 positifs sur 886, donc PAS "tous"
-    mais bien la VASTE MAJORITE - "still not right for the sign when the
-    magic has all the wrong positive dip"). Un dip brut MagIC positif
-    est TOUJOURS anormal en pratique (jamais juste "un signe parmi
-    d'autres") ; le seuil est donc simplement n_positive > n_total/2,
-    jamais une histoire d'uniformite. Un dip negatif ou nul est SAIN,
-    jamais signale (contrairement a une premiere version qui traitait
-    aussi "tous negatifs" comme suspect - a tort, c'est le cas normal
-    attendu)."""
+    "n_from_specimen", "max_abs_negative", "majority_positive",
+    "looks_like_utrecht"}. "majority_positive" est le signal d'alerte -
+    REGLE METIER donnee explicitement par l'utilisateur ("en pratique on
+    ne devrait avoir que des valeurs negatives <= a 0 pour le dip donc
+    quand la majorite des echantillons ont un dip >= a 0 c'est qu'il y a
+    un probleme") : PAS une condition d'unanimite (une premiere version
+    exigeait "tous positifs" ou "tous negatifs", qui manquait exactement
+    le cas reel signale par l'utilisateur - magic_contribution_20476.txt,
+    848 positifs sur 886, donc PAS "tous" mais bien la VASTE MAJORITE -
+    "still not right for the sign when the magic has all the wrong
+    positive dip"). Un dip brut MagIC positif est TOUJOURS anormal en
+    pratique (jamais juste "un signe parmi d'autres") ; le seuil est donc
+    simplement n_positive > n_total/2, jamais une histoire d'uniformite.
+    Un dip negatif ou nul est SAIN, jamais signale (contrairement a une
+    premiere version qui traitait aussi "tous negatifs" comme suspect -
+    a tort, c'est le cas normal attendu).
+
+    "looks_like_utrecht" : signature physique donnee explicitement par
+    l'utilisateur pour distinguer la convention Utrecht (dip .prmag =
+    90 - dip MagIC) du cas "raw" - avec un forage portable sur le
+    terrain, "we drill from vertical down to horizontal and in some case
+    up to 10 to 20 degrees up... it is almost impossible to drill 45
+    degrees upward". Sous la convention Utrecht, "vertical vers
+    horizontal" donne un dip LARGEMENT POSITIF (0 a 90, la tres grande
+    majorite des specimens), et le forage plus rare "au-dela de
+    l'horizontale" donne un dip NEGATIF mais TOUJOURS DE FAIBLE
+    AMPLITUDE (quelques degres a ~20, jamais pres de 45) - confirme
+    numeriquement sur magic_contribution_20476.txt (32 valeurs negatives,
+    de -1 a -15, toutes < 20 en valeur absolue, contre des positifs
+    allant jusqu'a 90). Seuil de 30 (marge au-dela des ~20 pratiques,
+    bien en-dessous des 45 "presque impossibles") : majority_positive ET
+    toutes les valeurs negatives ont |valeur| <= 30 -> signature
+    coherente avec Utrecht, PROPOSEE a l'utilisateur (voir
+    ouvrir_convert_magic_to_r_dialog) mais jamais choisie automatiquement
+    a sa place."""
     tables = parse_magic_contribution(path_in)
     samples = _index_by(tables.get("samples", []), "sample")
     specimens = _index_by(tables.get("specimens", []), "specimen")
@@ -213,6 +232,7 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
     converted_ids.discard("")
 
     n_total = n_positive = n_negative = n_zero = n_from_specimen = 0
+    max_abs_negative = None
     for specimen_id in converted_ids:
         spec_row = specimens.get(specimen_id)
         sample_row = samples.get(spec_row.get("sample", "")) if spec_row else None
@@ -226,16 +246,22 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
             n_positive += 1
         elif dip_raw < 0:
             n_negative += 1
+            max_abs_negative = max(max_abs_negative or 0.0, -dip_raw)
         else:
             n_zero += 1
 
+    majority_positive = n_total >= 2 and n_positive > n_total / 2.0
     return {
         "n_total": n_total,
         "n_positive": n_positive,
         "n_negative": n_negative,
         "n_zero": n_zero,
         "n_from_specimen": n_from_specimen,
-        "majority_positive": n_total >= 2 and n_positive > n_total / 2.0,
+        "max_abs_negative": max_abs_negative,
+        "majority_positive": majority_positive,
+        "looks_like_utrecht": (
+            majority_positive and n_negative > 0 and max_abs_negative <= 30.0
+        ),
     }
 
 
