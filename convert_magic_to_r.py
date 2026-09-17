@@ -190,15 +190,22 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
     priorite, sample-level en repli (voir _orientation_source).
 
     Retourne {"n_total", "n_positive", "n_negative", "n_zero",
-    "n_from_specimen", "all_positive", "all_negative"} - "all_positive"/
-    "all_negative" (True seulement si n_total>=2, un seul specimen ne
-    permet aucune conclusion) signalent un jeu de donnees suspect : un
-    vrai carottage montre generalement un melange de signes, un signe
-    UNIFORME peut indiquer que cette contribution a deja enregistre le
-    dip dans la convention STARpaleomag_Py (cin) plutot que la convention
-    MagIC brute (X de la carotte depuis l'horizontale) - a confirmer par
-    l'utilisateur, jamais suppose (voir ouvrir_convert_magic_to_r_dialog,
-    qui affiche un avertissement fort et demande avant de negate)."""
+    "n_from_specimen", "majority_positive"}. "majority_positive" est le
+    signal d'alerte - REGLE METIER donnee explicitement par l'utilisateur
+    ("en pratique on ne devrait avoir que des valeurs negatives <= a 0
+    pour le dip donc quand la majorite des echantillons ont un dip >= a
+    0 c'est qu'il y a un probleme") : PAS une condition d'unanimite
+    (une premiere version exigeait "tous positifs" ou "tous negatifs",
+    qui manquait exactement le cas reel signale par l'utilisateur -
+    magic_contribution_20476.txt, 848 positifs sur 886, donc PAS "tous"
+    mais bien la VASTE MAJORITE - "still not right for the sign when the
+    magic has all the wrong positive dip"). Un dip brut MagIC positif
+    est TOUJOURS anormal en pratique (jamais juste "un signe parmi
+    d'autres") ; le seuil est donc simplement n_positive > n_total/2,
+    jamais une histoire d'uniformite. Un dip negatif ou nul est SAIN,
+    jamais signale (contrairement a une premiere version qui traitait
+    aussi "tous negatifs" comme suspect - a tort, c'est le cas normal
+    attendu)."""
     tables = parse_magic_contribution(path_in)
     samples = _index_by(tables.get("samples", []), "sample")
     specimens = _index_by(tables.get("specimens", []), "specimen")
@@ -228,8 +235,7 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
         "n_negative": n_negative,
         "n_zero": n_zero,
         "n_from_specimen": n_from_specimen,
-        "all_positive": n_total >= 2 and n_positive == n_total,
-        "all_negative": n_total >= 2 and n_negative == n_total,
+        "majority_positive": n_total >= 2 and n_positive > n_total / 2.0,
     }
 
 
@@ -854,13 +860,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     out = args.output or os.path.splitext(args.magic_file)[0] + ".prmag"
     dip_scan = scan_dip_sign(args.magic_file)
-    if dip_scan["all_positive"] or dip_scan["all_negative"]:
-        sign_word = "positive" if dip_scan["all_positive"] else "negative"
+    if dip_scan["majority_positive"]:
+        pct = 100.0 * dip_scan["n_positive"] / dip_scan["n_total"]
         print(
-            f"WARNING: all {dip_scan['n_total']} dip value(s) in this file are "
-            f"{sign_word} ({dip_scan['n_from_specimen']} from specimen-level "
-            "orientation) - check --keep-dip-sign if this contribution already used "
-            "the STARpaleomag_Py convention.\n"
+            f"WARNING: {dip_scan['n_positive']}/{dip_scan['n_total']} dip value(s) "
+            f"({pct:.0f}%) in this file are positive ({dip_scan['n_from_specimen']} "
+            "from specimen-level orientation) - in practice raw MagIC dip should only "
+            "ever be negative or zero. Check --keep-dip-sign if this contribution "
+            "already used the STARpaleomag_Py convention.\n"
         )
     n, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
         args.magic_file, out, negate_dip=not args.keep_dip_sign)

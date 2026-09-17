@@ -1544,18 +1544,18 @@ class STARpaleomagApp:
 
         negate_dip = True
         dip_warning_note = ""
-        if dip_scan["all_positive"] or dip_scan["all_negative"]:
-            sign_word = "positive" if dip_scan["all_positive"] else "negative"
+        if dip_scan["majority_positive"]:
+            pct = 100.0 * dip_scan["n_positive"] / dip_scan["n_total"]
             dip_warning_note = (
-                f"WARNING: all {dip_scan['n_total']} dip value(s) found in this file are "
-                f"{sign_word} ({dip_scan['n_from_specimen']} from specimen-level "
-                f"orientation, the rest from sample-level).\n"
-                "In MagIC, the dip of the core is the angle of the X axis from the "
-                "horizontal - the standard import negates it to match the STARpaleomag_Py "
-                "convention (cin). A real drilled data set normally shows a mix of "
-                "positive and negative dip values; a uniform sign like this one may mean "
-                "this contribution already recorded dip in the STARpaleomag_Py convention "
-                "instead of the raw MagIC one.\n"
+                f"WARNING: {dip_scan['n_positive']}/{dip_scan['n_total']} dip value(s) "
+                f"({pct:.0f}%) found in this file are positive "
+                f"({dip_scan['n_from_specimen']} from specimen-level orientation, the "
+                f"rest from sample-level).\n"
+                "In practice, the raw MagIC dip (angle of the core's X axis from the "
+                "horizontal) should only ever be negative or zero - a positive value "
+                "signals a problem, most likely that this contribution already recorded "
+                "dip in the STARpaleomag_Py convention (cin) instead of the raw MagIC "
+                "one.\n"
             )
             # Affiche IMMEDIATEMENT (tag "warn", voir WARN_MARK) pour donner
             # le contexte de la question qui suit - MAIS ce console sera
