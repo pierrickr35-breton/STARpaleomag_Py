@@ -105,7 +105,6 @@ from paleointensity import (
     angle_between_vectors,
     nrm0_vector,
     compute_rf1_rf2,
-    parse_com_field,
     detect_method_and_hlab,
     compute_crm,
     arai_curvature,
@@ -2892,6 +2891,13 @@ class STARpaleomagApp:
             # codes"). Repli sur l'ancien parsing du commentaire si aucune
             # mesure ne porte de treat_dc_field (.ren).
             method_auto, ichamp_auto = detect_method_and_hlab(ech.mesures, ech.com)
+            # Ligne vide + Id du specimen avant chaque nouveau passage de
+            # la boucle - demande explicite utilisateur ("ajouter une
+            # ligne blanche et le nom du specimen pour bien montrer qu'on
+            # passe a un autre specimen") : sans elle, le prompt
+            # "method=..." de deux specimens consecutifs se suivait sans
+            # aucune separation visuelle dans la console.
+            self._afficher(f"\nId: {ech.id}\n")
             confirm = self._console_input(
                 f" method={method_auto}, lab field detected = {ichamp_auto:g} uT "
                 f"(comment=[{ech.com}]) - is this OK Y/n : ", "Y")
@@ -2919,12 +2925,12 @@ class STARpaleomagApp:
                 return
 
             if ichamp != 0:
+                # Plus d'affichage "ech:.../field of.../month:.../year:..."
+                # ici - demande explicite utilisateur ("cette ligne n'a
+                # plus d'interet") : le specimen et le champ sont deja
+                # visibles dans l'en-tete "Id: ..."/le prompt "method=..."
+                # ci-dessus, mois/annee n'etaient que purement informatifs.
                 hlab = float(ichamp)
-                parsed = parse_com_field(ech.com)  # imois/iannee : purement informatif
-                self._afficher(
-                    f" ech:{ech.id:<12}  field of {ichamp}t "
-                    f"month:{parsed['imois']}year:{parsed['iannee']}\n"
-                )
             else:
                 hlab_s = self._console_input(
                     "  intensity of the laboratory field (in microteslas): ", "0")
