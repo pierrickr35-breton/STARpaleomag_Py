@@ -2070,7 +2070,20 @@ class STARpaleomagApp:
         naturelle est `Archive new laboratory measurements` pour y
         attacher les mesures reelles de l'instrument (qui exige des
         specimens DEJA presents dans le fichier cible - exactement ce que
-        ce menu prepare)."""
+        ce menu prepare).
+
+        Rappel d'orientation TOUJOURS affiche (pas seulement si un
+        probleme est detecte) - demande explicite utilisateur ("il faut
+        qu'on mette plus de warning concernant l'orientation des
+        echantillons, surtout lors de l'importation d'anciens fichiers
+        par de nouveaux utilisateurs. La plupart des utilisateurs ne font
+        pas suffisamment attention, comme on l'a vu avec les exportations
+        d'Utrecht vers Magic") : le vrai risque n'est pas seulement une
+        valeur de parametre AGICO detectee comme inhabituelle (voir
+        parse_ged_file, qui avertit deja dans ce cas precis), mais le fait
+        qu'un nouvel utilisateur ne pense simplement JAMAIS a verifier la
+        convention d'un .ged recu d'ailleurs - d'ou un rappel permanent,
+        pas seulement conditionnel."""
         self.text_area.insert(tk.END, "\n--- Create prmag from AGICO .ged file (Escape to cancel) ---\n", "prompt")
         ged_path = filedialog.askopenfilename(
             title="Select the AGICO .ged file",
@@ -2080,7 +2093,7 @@ class STARpaleomagApp:
             return
 
         try:
-            records = parse_ged_file(ged_path)
+            records, ori_warnings = parse_ged_file(ged_path)
         except Exception as e:
             self._showerror("Error", f"Could not read the .ged file:\n{e}")
             return
@@ -2098,7 +2111,20 @@ class STARpaleomagApp:
             "from the .ged - site, date, geology, volume/mass are left as "
             "'n.d'/defaults (fill in later with Complete sample "
             "information...).\n"
-            "Next step: PmagFile -> Archive new laboratory measurements, to "
+            "ORIENTATION: this .ged declares its own AGICO P1/P2/P3/P4 "
+            "convention (REMA6W manual, 12.2) - if this file wasn't produced "
+            "by this app (received from a colleague, or exported directly by "
+            "the AGICO software), double-check that convention against the "
+            "manual before trusting azimuth/dip, especially for an older "
+            "file. Not verifying this is exactly what caused real errors "
+            "before (Utrecht -> MagIC).\n"
+        )
+        if ori_warnings:
+            msg += f"\n{len(ori_warnings)} orientation warning(s) detected automatically:\n"
+            for w in ori_warnings:
+                msg += f"  - {w}\n"
+        msg += (
+            "\nNext step: PmagFile -> Archive new laboratory measurements, to "
             "attach the instrument's actual measurements to these specimens.\n"
         )
         self._load_data_file(prmag_path, announce=False)

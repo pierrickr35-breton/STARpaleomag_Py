@@ -684,7 +684,7 @@ def write_ged_file(sites: List[FieldSite], ispec: int, out_path: str) -> int:
     return len(lines)
 
 
-def parse_ged_file(path: str, encoding: str = "utf-8") -> List[Pmag]:
+def parse_ged_file(path: str, encoding: str = "utf-8") -> Tuple[List[Pmag], List[str]]:
     """Lit un fichier .ged AGICO (colonnes fixes - voir write_ged_file
     ci-dessus pour le format exact, cette fonction en est l'inverse) et
     construit une liste de specimens .prmag SANS mesure - demande
@@ -704,15 +704,37 @@ def parse_ged_file(path: str, encoding: str = "utf-8") -> List[Pmag]:
     la ligne d'entete (une seule paire pour tout le fichier, meme limite
     que `write_ged_file` en mode combine) - 0.0/0.0 si absents/illisibles.
 
-    Le `.prmag` ainsi cree n'a PAS de mesures : l'etape suivante est
-    d'utiliser `Archive new laboratory measurements` (import_new_data.
-    archive_new_measurements) pour y attacher les mesures reelles de
-    l'instrument, qui exige des specimens DEJA presents dans le .prmag
-    cible - exactement ce que cette fonction prepare."""
+    Parametres d'orientation P1/P2/P3/P4 (AGICO REMA6W User Manual 12.2,
+    voir Agico_Orientation.pdf) - demande explicite utilisateur ("il faut
+    donc verifier lors de la creation des .prmag a partir des .ged ou
+    .asc de la transformation adequat des conventions utilisees", suite a
+    une inquietude concrete sur des erreurs d'orientation deja survenues,
+    "comme on l'a vu avec les exportations d'Utrecht") : lus dans
+    l'en-tete (positionnes juste apres 4 groupes "xxx " toujours vides
+    dans les .ged ecrits par write_ged_file - verifie contre de vrais
+    fichiers .ged reels de ce laboratoire, tous "12 0  3  90" a cette
+    position). Seuls P2/P3 affectent caz/cin (meme transformation que
+    ams_asc.parse_asc_file, MEME convention AGICO, verifiee independamment
+    des deux cotes) et P4 affecte plane_strike ; P1 (direction de la
+    fleche) n'est PAS applique par cette transformation (jamais rencontre
+    different de 12 dans un fichier reel, formule non confirmee pour un
+    autre cas) - une valeur differente produit un avertissement plutot
+    qu'un silence, le specimen restant importe TEL QUEL (a verifier a la
+    main). Une en-tete sans segment P1-P4 lisible (fichier tronque, ou
+    genere par un logiciel/version different) retombe sur la convention
+    par defaut (12,0,3,90) avec un avertissement explicite, plutot que de
+    pretendre une certitude absente.
+
+    Retourne (records, warnings) - un .prmag ainsi cree n'a PAS de
+    mesures : l'etape suivante est d'utiliser `Archive new laboratory
+    measurements` (import_new_data.archive_new_measurements) pour y
+    attacher les mesures reelles de l'instrument, qui exige des specimens
+    DEJA presents dans le .prmag cible - exactement ce que cette fonction
+    prepare."""
     with open(path, "r", encoding=encoding, errors="replace") as f:
         lines = [raw.rstrip("\n") for raw in f if raw.strip()]
     if len(lines) < 2:
-        return []
+        return [], []
 
     header = lines[0]
     try:
@@ -721,25 +743,72 @@ def parse_ged_file(path: str, encoding: str = "utf-8") -> List[Pmag]:
     except (ValueError, IndexError):
         lat = rlong = 0.0
 
+    warnings: List[str] = []
+    p1 = p2 = p3 = p4 = None
+    try:
+        op_toks = header[50:].split()
+        if len(op_toks) < 4:
+            raise ValueError("orientation parameter segment missing or incomplete")
+        p1, p2, p3, p4 = (int(t) for t in op_toks[:4])
+    except (ValueError, IndexError):
+        p1, p2, p3, p4 = 12, 0, 3, 90
+        warnings.append(
+            "header: could not read orientation parameters P1/P2/P3/P4 "
+            "(AGICO REMA6W convention, see Agico_Orientation.pdf) - assumed "
+            "the default (12, 0, 3, 90); if this .ged came from a colleague "
+            "or straight from the AGICO software rather than this app, "
+            "verify the actual orientation convention used by hand"
+        )
+    if p1 != 12:
+        warnings.append(
+            f"header: file declares orientation parameter P1={p1} (expected "
+            "12, upslope arrow) - this parser only verifies/transforms "
+            "P2/P3/P4, never P1 - every specimen imported as-is, but double-"
+            "check azimuths by hand"
+        )
+    if p3 not in (3, 6, 9, 12):
+        warnings.append(f"header: unrecognized orientation parameter P3={p3} (expected 3/6/9/12) - assuming 3")
+        p3 = 3
+    elif p3 == 9:
+        warnings.append(
+            "header: orientation parameter P3=9 (Left-handed Strike) is not "
+            "implemented - never encountered in a verified real .ged file, "
+            "azimuth formula unconfirmed (see Agico_Orientation.pdf, REMA6W "
+            "12.2) - every specimen's azimuth may be wrong, verify by hand "
+            "before trusting this import"
+        )
+
     records: List[Pmag] = []
     for line in lines[1:]:
         specimen_id = line[0:12].strip()
         if not specimen_id:
             continue
         try:
-            caz = float(line[12:16])
-            cin = float(line[16:20])
-            plane_strike = float(line[24:28])
+            raw_caz = float(line[12:16])
+            raw_cin = float(line[16:20])
+            raw_strike = float(line[24:28])
             plane_dip = float(line[28:32])
         except (ValueError, IndexError):
             continue
+        # Meme transformation que ams_asc.parse_asc_file (voir sa docstring
+        # pour le detail P2/P3/P4) - P2=90 mesure le plongee complementaire
+        # plutot que le pendage direct, P3 relie l'azimuth mesure a caz, P4
+        # relie la direction mesuree de la strate a plane_strike.
+        cin = (90.0 - raw_cin) if p2 == 90 else raw_cin
+        if p3 == 6:
+            caz = raw_caz - 90.0
+        elif p3 == 12:
+            caz = raw_caz + 90.0
+        else:  # p3 == 3 (defaut, seul cas verifie contre de vrais fichiers)
+            caz = raw_caz
+        plane_strike = (raw_strike - 90.0) if p4 == 0 else raw_strike
         records.append(Pmag(
             id=specimen_id, cin=cin, caz=caz,
             dip=plane_dip, str_=plane_strike,
             norme="v", vol=_DEFAULT_VOLUME,
             lat=lat, rlong=rlong,
         ))
-    return records
+    return records, warnings
 
 
 def write_diagnostics_report(sites: List[FieldSite], out_path: str) -> int:
