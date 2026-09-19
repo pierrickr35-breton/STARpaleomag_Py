@@ -2167,18 +2167,29 @@ class STARpaleomagApp:
            exportee pour revue - suivie d'une confirmation "Are the
            specimen metadata OK" et, seulement si la reponse est non,
            d'un prompt pour completer via un fichier complement. Ce bloc
-           entier a d'abord ete place juste apres le bilan de
-           disponibilite (1), PUIS deplace en TOUTE DERNIERE etape
-           interactive - demande explicite utilisateur, une fois le
-           premier comportement teste en pratique ("can you ask these
-           questions at the end just before writing the files") : il
-           s'execute desormais juste avant l'appel a export_to_magic,
-           apres le choix du dossier de sortie - plus aucune autre
-           decision a prendre entre cette question et l'ecriture reelle
-           des fichiers. Le fichier ecrit (write_site_metadata_preview)
-           utilise EXACTEMENT les memes noms de colonnes que
-           load_site_metadata_table : on peut le completer a la main
-           puis le redonner tel quel au prompt du fichier complement."""
+           entier a change de place DEUX FOIS au fil de demandes
+           explicites utilisateur successives : place juste apres le
+           bilan de disponibilite (1) a l'origine, puis deplace en TOUTE
+           DERNIERE etape interactive ("can you ask these questions at
+           the end just before writing the files"), puis - une fois ce
+           second comportement teste en pratique - RAMENE ici, juste
+           apres le bilan (1), a nouveau en PREMIER ("is it possible to
+           have this last question at the beginning of the export") :
+           savoir si les metadonnees de site sont a completer avant de
+           repondre a toutes les autres questions (resultats/
+           paleointensite/anisotropie a inclure, analystes, dossier de
+           sortie...) evite de les parcourir en vain si l'export doit de
+           toute facon etre interrompu pour completer un site. Utilise
+           `self.selection` directement (pas encore `export_samples`,
+           qui n'existe qu'une fois le choix "inclure l'anisotropie"
+           connu plus bas et peut s'etendre avec des specimens AMS-only)
+           - un site qui n'apparaitrait QUE via un tel specimen AMS-only
+           n'est donc pas encore visible ici, limite deja acceptee la
+           premiere fois que ce bloc vivait a cet endroit. Le fichier
+           ecrit (write_site_metadata_preview) utilise EXACTEMENT les
+           memes noms de colonnes que load_site_metadata_table : on peut
+           le completer a la main puis le redonner tel quel au prompt du
+           fichier complement."""
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
@@ -2220,6 +2231,118 @@ class STARpaleomagApp:
             "measurement in the current selection is reported below, never "
             "included in the export.)\n"
         )
+
+        # Table d'apercu des metadonnees de site (voir docstring, point
+        # 2) - demande explicite utilisateur ("is it possible to have
+        # this last question at the beginning of the export"), REVENANT
+        # sur un placement precedent ("can you ask these questions at
+        # the end just before writing the files") une fois celui-ci
+        # teste en pratique : ce bloc entier (bilan, export de la table,
+        # confirmation, fichier complement) redevient la PREMIERE etape
+        # interactive, juste apres le bilan de disponibilite ci-dessus -
+        # avant de repondre a toutes les autres questions (resultats/
+        # paleointensite/anisotropie a inclure, analystes...), l'utilisateur
+        # sait si les metadonnees de site sont a completer. Utilise
+        # `self.selection` directement (pas encore `export_samples`, qui
+        # n'existe qu'une fois `want_aniso` connu plus bas et peut
+        # s'etendre avec des specimens AMS-only) : un site qui
+        # n'apparaitrait QUE via un tel specimen AMS-only n'est donc pas
+        # encore visible ici - limite deja acceptee du temps ou ce bloc
+        # vivait a cet endroit, avant d'etre deplace a la fin.
+        preview_rows = build_site_metadata_preview_rows(list(self.selection))
+        missing_sites = [
+            r for r in preview_rows
+            if not r["lat"] or not r["geologic_classes"] or not r["geologic_types"] or not r["lithologies"]
+        ]
+        preview_path = None
+        if preview_rows:
+            self._afficher(
+                "\nMagIC requires site-level metadata (coordinates + geologic "
+                "classification) for a valid contribution.\n"
+                f"Site metadata check: {len(preview_rows)} site(s) in this export, "
+                f"{len(missing_sites)} with at least one missing field\n"
+                "(lat/lon, geologic classes, geologic types, or lithology).\n"
+            )
+            export_preview = self._console_input(
+                "Export a site metadata table (site/lat/lon/geologic_classes/"
+                "geologic_types/lithologies/formation)\n"
+                "to review/complete before continuing? Y/n: ", "Y" if missing_sites else "n")
+            if export_preview is None:
+                return
+            if export_preview.strip().lower() != "n":
+                preview_path = filedialog.asksaveasfilename(
+                    title="Save site metadata table as",
+                    defaultextension=".txt",
+                    initialfile="site_metadata_preview.txt",
+                    # Dossier du .prmag charge par defaut - demande
+                    # explicite utilisateur ("where is it saved?") : sans
+                    # initialdir, la boite de dialogue s'ouvrait sur le
+                    # dernier dossier utilise par macOS (souvent sans
+                    # rapport), ne laissant aucun indice visible d'ou le
+                    # fichier finirait par etre ecrit.
+                    initialdir=os.path.dirname(self.results_path) if self.results_path else None,
+                    filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+                )
+                if preview_path:
+                    write_site_metadata_preview(preview_path, preview_rows)
+                    self._afficher(
+                        f"Site metadata table written to {preview_path}.\n"
+                        "Edit it now if needed, then use it as the complement table "
+                        "below - the column names already match.\n"
+                    )
+
+        # Confirmation explicite AVANT de proposer un fichier complement -
+        # demande explicite utilisateur : plutot que de toujours poser la
+        # question "Fill in... from a complement table", demande d'abord
+        # si les metadonnees sont bonnes telles quelles (l'utilisateur a
+        # pu les completer a la main entre-temps, dans le fichier
+        # exporte ci-dessus ou directement dans le .prmag) - la question
+        # du fichier complement n'est plus posee du tout si la reponse
+        # est oui. Defaut "n" (pas OK) si des champs manquaient au bilan
+        # ci-dessus, "Y" sinon.
+        metadata_ok = True
+        if preview_rows:
+            ok_answer = self._console_input(
+                "Are the specimen metadata OK (Y/n): ", "n" if missing_sites else "Y")
+            if ok_answer is None:
+                return
+            metadata_ok = ok_answer.strip().lower() != "n"
+
+        # Metadonnees de site (formation/lithologies/geologic_classes/
+        # geologic_types/age) depuis une table externe - demande
+        # explicite utilisateur ("can we also let the site-only path
+        # pull from a complement table... so those fields aren't just
+        # blank") : ne COMBLE que les champs encore vides (voir
+        # magic_export._apply_site_metadata) - utile en particulier pour
+        # un site archive uniquement via sa moyenne (aucun specimen
+        # charge, voir build_sites_rows), mais s'applique aussi aux
+        # sites avec specimens dont un champ n'a jamais ete renseigne.
+        # Pose desormais QUE si `metadata_ok` est faux ci-dessus. Defaut
+        # "y" (et fichier pre-selectionne) si la table d'apercu ci-dessus
+        # vient d'etre exportee - cas d'usage attendu : l'utilisateur
+        # vient de la completer a la main.
+        site_metadata = None
+        add_meta = "n"
+        if not metadata_ok:
+            add_meta = self._console_input(
+                "Fill in missing site formation/lithology/age\n"
+                "from an updated complement table (e.g. the table "
+                "just exported above)? y/N: ", "y" if preview_path else "n")
+            if add_meta is None:
+                return
+        if add_meta.strip().lower() == "y":
+            meta_path = filedialog.askopenfilename(
+                title="Select the site metadata table",
+                initialdir=os.path.dirname(preview_path) if preview_path else None,
+                initialfile=os.path.basename(preview_path) if preview_path else "",
+                filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+            )
+            if meta_path:
+                try:
+                    site_metadata = load_site_metadata_table(meta_path)
+                except Exception as e:
+                    self._showerror("Error", f"Could not load site metadata table:\n{e}")
+                    return
 
         want_results = False
         if n_results:
@@ -2520,109 +2643,6 @@ class STARpaleomagApp:
         out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
         if not out_dir:
             return
-
-        # Table d'apercu des metadonnees de site (voir docstring, point
-        # 2) - demande explicite utilisateur ("can you ask these
-        # questions at the end just before writing the files") : ce bloc
-        # entier (bilan, export de la table, confirmation, fichier
-        # complement) est desormais la DERNIERE etape interactive, juste
-        # avant l'appel a export_to_magic ci-dessous - plus rien d'autre
-        # a decider entre cette question et l'ecriture reelle des
-        # fichiers.
-        preview_rows = build_site_metadata_preview_rows(export_samples)
-        missing_sites = [
-            r for r in preview_rows
-            if not r["lat"] or not r["geologic_classes"] or not r["geologic_types"] or not r["lithologies"]
-        ]
-        preview_path = None
-        if preview_rows:
-            self._afficher(
-                "\nMagIC requires site-level metadata (coordinates + geologic "
-                "classification) for a valid contribution.\n"
-                f"Site metadata check: {len(preview_rows)} site(s) in this export, "
-                f"{len(missing_sites)} with at least one missing field\n"
-                "(lat/lon, geologic classes, geologic types, or lithology).\n"
-            )
-            export_preview = self._console_input(
-                "Export a site metadata table (site/lat/lon/geologic_classes/"
-                "geologic_types/lithologies/formation)\n"
-                "to review/complete before continuing? Y/n: ", "Y" if missing_sites else "n")
-            if export_preview is None:
-                return
-            if export_preview.strip().lower() != "n":
-                preview_path = filedialog.asksaveasfilename(
-                    title="Save site metadata table as",
-                    defaultextension=".txt",
-                    initialfile="site_metadata_preview.txt",
-                    # Dossier du .prmag charge par defaut - demande
-                    # explicite utilisateur ("where is it saved?") : sans
-                    # initialdir, la boite de dialogue s'ouvrait sur le
-                    # dernier dossier utilise par macOS (souvent sans
-                    # rapport), ne laissant aucun indice visible d'ou le
-                    # fichier finirait par etre ecrit.
-                    initialdir=os.path.dirname(self.results_path) if self.results_path else None,
-                    filetypes=[("Text", "*.txt"), ("All files", "*.*")],
-                )
-                if preview_path:
-                    write_site_metadata_preview(preview_path, preview_rows)
-                    self._afficher(
-                        f"Site metadata table written to {preview_path}.\n"
-                        "Edit it now if needed, then use it as the complement table "
-                        "below - the column names already match.\n"
-                    )
-
-        # Confirmation explicite AVANT de proposer un fichier complement -
-        # demande explicite utilisateur : plutot que de toujours poser la
-        # question "Fill in... from a complement table", demande d'abord
-        # si les metadonnees sont bonnes telles quelles (l'utilisateur a
-        # pu les completer a la main entre-temps, dans le fichier
-        # exporte ci-dessus ou directement dans le .prmag) - la question
-        # du fichier complement n'est plus posee du tout si la reponse
-        # est oui. Defaut "n" (pas OK) si des champs manquaient au bilan
-        # ci-dessus, "Y" sinon.
-        metadata_ok = True
-        if preview_rows:
-            ok_answer = self._console_input(
-                "Are the specimen metadata OK (Y/n): ", "n" if missing_sites else "Y")
-            if ok_answer is None:
-                return
-            metadata_ok = ok_answer.strip().lower() != "n"
-
-        # Metadonnees de site (formation/lithologies/geologic_classes/
-        # geologic_types/age) depuis une table externe - demande
-        # explicite utilisateur ("can we also let the site-only path
-        # pull from a complement table... so those fields aren't just
-        # blank") : ne COMBLE que les champs encore vides (voir
-        # magic_export._apply_site_metadata) - utile en particulier pour
-        # un site archive uniquement via sa moyenne (aucun specimen
-        # charge, voir build_sites_rows), mais s'applique aussi aux
-        # sites avec specimens dont un champ n'a jamais ete renseigne.
-        # Pose desormais QUE si `metadata_ok` est faux ci-dessus. Defaut
-        # "y" (et fichier pre-selectionne) si la table d'apercu ci-dessus
-        # vient d'etre exportee - cas d'usage attendu : l'utilisateur
-        # vient de la completer a la main.
-        site_metadata = None
-        add_meta = "n"
-        if not metadata_ok:
-            add_meta = self._console_input(
-                "Fill in missing site formation/lithology/age\n"
-                "from an updated complement table (e.g. the table "
-                "just exported above)? y/N: ", "y" if preview_path else "n")
-            if add_meta is None:
-                return
-        if add_meta.strip().lower() == "y":
-            meta_path = filedialog.askopenfilename(
-                title="Select the site metadata table",
-                initialdir=os.path.dirname(preview_path) if preview_path else None,
-                initialfile=os.path.basename(preview_path) if preview_path else "",
-                filetypes=[("Text", "*.txt"), ("All files", "*.*")],
-            )
-            if meta_path:
-                try:
-                    site_metadata = load_site_metadata_table(meta_path)
-                except Exception as e:
-                    self._showerror("Error", f"Could not load site metadata table:\n{e}")
-                    return
 
         try:
             result = export_to_magic(
