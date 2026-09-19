@@ -2223,16 +2223,46 @@ class STARpaleomagApp:
 
         want_results = False
         if n_results:
-            ans = self._console_input(f"Include directional results ({n_results} specimen(s))? Y/n: ", "Y")
+            # Meme correctif que pour want_pmagint ci-dessous : n_results
+            # compte TOUT self.results (voir son commentaire), pas
+            # seulement la selection courante - annoncer ce nombre ici
+            # induirait la meme confusion sur ce qu'un "Y" va reellement
+            # inclure (build_specimens_rows ne regarde que les specimens
+            # de la selection).
+            n_results_selected = len(
+                {r.id for r in self.results if r.cat1 in ("L", "P", "f", "F")}
+                & {ech.id for ech in self.selection}
+            )
+            ans = self._console_input(
+                f"Include directional results for {n_results_selected} specimen(s) in "
+                f"the current selection ({n_results} specimen(s) total in memory)? Y/n: ", "Y")
             if ans is None:
                 return
             want_results = ans.strip().lower() != "n"
 
         want_pmagint = False
         if pmagint_available:
+            # Le bilan ci-dessus annonce delibrement le total du FICHIER
+            # (voir son commentaire) mais CETTE question porte sur ce
+            # qu'un "Y" va reellement inclure : le nombre du fichier
+            # induisait en erreur des qu'il depassait celui de la
+            # selection courante (n_results/pmagint_available comptent
+            # TOUT le fichier, pas seulement la selection) - demande
+            # explicite utilisateur, ayant vu "Include paleointensity
+            # results for 6 specimen(s)" alors que la selection n'en
+            # contenait qu'un ("ne pas exporter les resultats pour des
+            # echantillons non selectionnes") : c'etait deja le
+            # comportement reel (build_specimens_rows ne regarde QUE les
+            # specimens de la selection, voir son docstring), seul le
+            # NOMBRE affiche ici etait trompeur - corrige pour annoncer
+            # l'intersection reelle plutot que le total du fichier.
+            n_pmagint_selected = len(
+                {ech.id for ech in self.selection} & set(pmagint_available.keys())
+            )
             ans = self._console_input(
-                f"Include paleointensity results for {len(pmagint_available)} specimen(s) "
-                f"(from {os.path.basename(pmagint_path)})? Y/n: ", "Y")
+                f"Include paleointensity results for {n_pmagint_selected} specimen(s) in "
+                f"the current selection (from {os.path.basename(pmagint_path)}, "
+                f"{len(pmagint_available)} specimen(s) total in the file)? Y/n: ", "Y")
             if ans is None:
                 return
             want_pmagint = ans.strip().lower() != "n"
