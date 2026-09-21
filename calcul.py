@@ -3410,6 +3410,7 @@ def _position_deviation_deg(vec: Tuple[float, float, float], expected: Tuple[flo
 
 def _find_misoriented_positions(
     positions: Dict[str, Measurement], holder: Optional["ArmHolderBackground"],
+    nrm_mean: Optional[Tuple[float, float, float]] = None,
 ) -> List[Tuple[str, float]]:
     """Verifie les 6 positions (pas seulement X/Y comme _check_position_
     inversion) contre leur direction attendue - retourne [(position,
@@ -3422,6 +3423,16 @@ def _find_misoriented_positions(
     warnings = []
     for key, expected in _EXPECTED_POSITION_DIRECTION.items():
         vec = _position_vector(positions, key, idx_of[key], holder)
+        # BUG CORRIGE (signale par l'utilisateur, "i do not understand
+        # this warning" - specimen BAT511A1A : avertissement Y- a 48 deg
+        # alors que la TRM affichee "Mean NRM subtracted" est a 3 deg de
+        # l'axe) : c'est la TRM (mesure MOINS la NRM residuelle commune)
+        # qui doit s'aligner sur l'axe du champ applique, PAS la mesure
+        # brute - une NRM comparable a la TRM (ici 9e-4 pour 1.2e-3 Am2/kg)
+        # fait deriver la mesure brute de 25-48 deg de l'axe meme pour un
+        # echantillon parfaitement oriente.
+        if nrm_mean is not None:
+            vec = tuple(vec[c] - nrm_mean[c] for c in range(3))
         dev = _position_deviation_deg(vec, expected)
         if dev > _POSITION_DEVIATION_WARNING_DEG:
             warnings.append((key, dev))
@@ -3766,7 +3777,7 @@ def compute_anisotropy_tensor(
     )
     tensor = all_tensors[0]  # 'A0', identique a l'ancien calcul direct ci-dessus
     raw = ((ani011, ani012, ani013), (ani021, ani022, ani023), (ani031, ani032, ani033))
-    misoriented_positions = _find_misoriented_positions(positions, holder)
+    misoriented_positions = _find_misoriented_positions(positions, holder, nrm_mean)
     return AnisotropyComputation(
         tensor=tensor, all_tensors=all_tensors, raw=raw, positions=positions,
         holder_used=holder is not None,
