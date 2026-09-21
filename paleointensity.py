@@ -1225,11 +1225,18 @@ def draw_arai(
     checks_by_k: dict = {}
     for c in checks:
         checks_by_k.setdefault(c.k, []).append(c)
-    for p in points:
+    for n_point, p in enumerate(points, start=1):
         u = p.yp * dimplot
         v = -p.xp * dimplot / phi
         ctx.newpen(3)
         symbo1(u, v, dimtext / 25.0, 5, 270.0, -1)
+        # Point cliquable (invisible) : donne l'etape et le NUMERO dans le
+        # tableau des pas (meme numerotation `enumerate(points, start=1)`
+        # que le tableau imprime, voir app._arai_step_tables) - demande
+        # explicite utilisateur ("cliquer sur les points du diagramme
+        # d'Arai pour connaitre l'etape et le numero dans le tableau").
+        # symbo1 permute/nie (x,y) -> ctx.symbol(-y, x) : meme position.
+        ctx.pick_point(-v, u, "arai_point", [(n_point, p, arno, ech.norme)])
         ctx.newpen(5)
         for c in checks_by_k.get(p.k, [])[:2]:
             a_ = c.yt * dimplot
@@ -1240,6 +1247,7 @@ def draw_arai(
                 plott(u, b_, 3)
             plott(u, b_, 2)
             symbo1(a_, b_, dimtext / 25.0, 2, 270.0, -2)
+            ctx.pick_point(-b_, a_, "arai_check", [(c, p.temp, arno)])
 
     # id echantillon - ligne 916-919
     ctx.newpen(1)
