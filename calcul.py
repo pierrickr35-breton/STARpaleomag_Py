@@ -3515,6 +3515,73 @@ class AnisotropyComputation:
     # ("mettre un warning lorsque le code ne correspond pas à la vraie
     # direction enregistrée par l'échantillon").
     misoriented_positions: List[Tuple[str, float]]
+    # Correction lineaire de l'evolution de la capacite d'acquisition de TRM
+    # (voir _correct_trm_evolution) : True si appliquee ; `evolution_factors`
+    # = capacite relative appliquee a chaque position (1.0 pour Z+/R, E pour
+    # une mesure situee au niveau de ZB) ; `uncorrected_positions` = les 6
+    # positions AVANT correction (a reutiliser pour reconstruire une
+    # position par symetrie sans corriger deux fois).
+    evolution_corrected: bool = False
+    evolution_factors: Dict[str, float] = field(default_factory=dict)
+    uncorrected_positions: Optional[Dict[str, Measurement]] = None
+
+
+def _position_sequence_index(ech: "SelectedSample", m: Measurement) -> Optional[int]:
+    """Rang de `m` dans ech.mesures (cle etape+cod1+cod2, pas l'identite :
+    une position reconstruite par symetrie est une copie synthetique)."""
+    for i, x in enumerate(ech.mesures):
+        if x.etape == m.etape and x.cod1 == m.cod1 and x.cod2 == m.cod2:
+            return i
+    return None
+
+
+def _correct_trm_evolution(
+    ech: "SelectedSample", positions: Dict[str, Measurement], zb: Measurement,
+    trmevol: float, holder: Optional[ArmHolderBackground],
+) -> Optional[Tuple[Dict[str, Measurement], Dict[str, float]]]:
+    """Corrige l'evolution de la capacite d'acquisition de TRM mesuree par
+    la repetition ZB de la position Z+ - demande explicite utilisateur
+    ("lorsqu'il y a une mesure ZB, l'utiliser pour calculer une evolution
+    de la capacite d'acquisition d'ATR entre R et ZB et ensuite appliquer
+    la correction sur l'ATR acquise au cours des 6 etapes suivant l'etape
+    R : 1/6 pour V jusqu'a 6/6 pour ZB, et recalculer le tenseur corrige").
+
+    `trmevol` (voir _check_trm_evolution) = TRM acquise a ZB / TRM acquise
+    a Z+ (R) = capacite relative en fin de sequence. Hypothese : la
+    capacite varie LINEAIREMENT avec le rang de la mesure entre R (1) et
+    ZB (trmevol) - f_k = 1 + (trmevol-1) * (i_k - i_R)/(i_ZB - i_R), soit
+    1/6 (V) ... 6/6 (ZB) quand les 6 etapes se suivent. Chaque mesure est
+    NRM + TRM_k ; seule la TRM est divisee par f_k : v'_k = nrm + (v_k -
+    nrm)/f_k. La NRM residuelle commune doit etre celle des vecteurs
+    CORRIGES (moyenne des 3 paires = moyenne des 6 vecteurs, comme
+    _nrm_mean_and_diag) ; la condition se resout directement (pas
+    d'iteration) : nrm = sum(v_k/f_k) / sum(1/f_k). Retourne (nouvelles
+    positions synthetiques, facteurs f_k), ou None si la correction n'est
+    pas definie (ZB non posterieure a R, capacite <= 0)."""
+    if not (trmevol > 0.0) or math.isinf(trmevol):
+        return None
+    i_ref = _position_sequence_index(ech, positions["Z+"])
+    i_zb = _position_sequence_index(ech, zb)
+    if i_ref is None or i_zb is None or i_zb <= i_ref:
+        return None
+    idx_of = {"X+": 0, "X-": 1, "Y+": 2, "Y-": 3, "Z+": 4, "Z-": 5}
+    factors: Dict[str, float] = {}
+    for key in _ANI_POSITION_KEYS:
+        i = _position_sequence_index(ech, positions[key])
+        frac = 0.0 if (key == "Z+" or i is None) else min(1.0, max(0.0, (i - i_ref) / (i_zb - i_ref)))
+        factors[key] = 1.0 + (trmevol - 1.0) * frac
+    vecs = {k: _position_vector(positions, k, idx_of[k], holder) for k in _ANI_POSITION_KEYS}
+    w = {k: 1.0 / factors[k] for k in _ANI_POSITION_KEYS}
+    wsum = sum(w.values())
+    nrm = tuple(sum(w[k] * vecs[k][c] for k in _ANI_POSITION_KEYS) / wsum for c in range(3))
+    new_positions: Dict[str, Measurement] = {}
+    for key in _ANI_POSITION_KEYS:
+        corr = tuple(nrm[c] + w[key] * (vecs[key][c] - nrm[c]) for c in range(3))
+        if holder is not None:
+            i = idx_of[key]
+            corr = (corr[0] + holder.x[i], corr[1] + holder.y[i], corr[2] + holder.z[i])
+        new_positions[key] = replace(positions[key], x=corr[0], y=corr[1], z=corr[2])
+    return new_positions, factors
 
 
 def _all_ani_variants(
@@ -3607,6 +3674,7 @@ def compute_anisotropy_tensor(
     ech: "SelectedSample", holder: Optional[ArmHolderBackground] = None,
     use_zb_on_evolution: bool = False,
     positions: Optional[Dict[str, Measurement]] = None,
+    correct_evolution: bool = False,
 ) -> Optional[AnisotropyComputation]:
     """Tenseur 'A0' (equivalent de la branche de base d'anisot/anisoauto,
     calcul.f:4005-4595) : detecte les 6 positions (detect_six_positions) -
@@ -3627,7 +3695,14 @@ def compute_anisotropy_tensor(
 
     `use_zb_on_evolution` correspond au choix demande UNE FOIS pour tout
     le lot dans le Fortran ("using ZB instead of R for a > + or - 5%
-    evolution ? y/N"), pas par echantillon."""
+    evolution ? y/N"), pas par echantillon.
+
+    `correct_evolution` (PAS dans le Fortran, demande utilisateur - voir
+    _correct_trm_evolution) : quand une mesure ZB existe, corrige
+    lineairement la TRM acquise pendant les 6 etapes qui suivent R par
+    l'evolution de capacite mesuree entre R et ZB, puis recalcule le
+    tenseur ; prioritaire sur `use_zb_on_evolution` (la substitution
+    Z+ -> ZB n'a plus d'objet une fois l'evolution corrigee)."""
     if positions is None:
         positions = detect_six_positions(ech)
         if positions is None:
@@ -3650,12 +3725,21 @@ def compute_anisotropy_tensor(
 
     trm_evolution_pct: Optional[float] = None
     zb_used = False
+    evolution_corrected = False
+    evolution_factors: Dict[str, float] = {}
+    uncorrected_positions = positions
     item_rv = positions["X+"].etape
     zb = _find_zb(ech, item_rv)
     if zb is not None:
         trmevol = _check_trm_evolution(positions, zb, holder)
         trm_evolution_pct = (trmevol - 1.0) * 100.0
-        if use_zb_on_evolution and (trmevol > 1.05 or trmevol < 0.95):
+        corrected = _correct_trm_evolution(ech, positions, zb, trmevol, holder) if correct_evolution else None
+        if corrected is not None:
+            positions, evolution_factors = corrected
+            evolution_corrected = True
+            nrm_mean, diags, deviation_pct, raw_components, pair_nrm, nrm_mean_diag = _nrm_mean_and_diag(
+                positions, holder, ech.norme, ech.vol)
+        elif use_zb_on_evolution and (trmevol > 1.05 or trmevol < 0.95):
             reclassified = detect_six_positions(ech, force_zplus_label=zb.cod1 + zb.cod2)
             if reclassified is not None:
                 positions = reclassified
@@ -3690,6 +3774,8 @@ def compute_anisotropy_tensor(
         swapped_axes=swapped_axes, trm_evolution_pct=trm_evolution_pct, zb_used=zb_used,
         pair_nrm=pair_nrm, nrm_mean_diag=nrm_mean_diag,
         misoriented_positions=misoriented_positions,
+        evolution_corrected=evolution_corrected, evolution_factors=evolution_factors,
+        uncorrected_positions=uncorrected_positions,
     )
 
 
@@ -3877,7 +3963,7 @@ def create_empty_pmagani_if_missing(path: str) -> bool:
 def _format_pmagani_line(
     specimen_id: str, tensor: AniTensor, etape: int,
     zplus_label: str, zminus_label: str, trm_evolution_pct: float, deviation_pct: float,
-    info_text: Optional[str] = None,
+    info_text: Optional[str] = None, evolution_corrected: bool = False,
 ) -> str:
     """`info_text` : override total du texte informatif habituel (etape/
     positions/evolution TRM) - utilise par write_ani_tensors_from_magic
@@ -3890,6 +3976,8 @@ def _format_pmagani_line(
             f"TRM evo: {trm_evolution_pct:5.1f} deviation:{deviation_pct:5.1f}"
             f"  steps: X+ X- Y+ Y- {zplus_label} {zminus_label}"
         )
+        if evolution_corrected:
+            info_text += " - TRM evolution R->ZB corrected (linear)"
     if tensor.quality == "g":
         info_text += " - PmagPy Hext F-test: significant anisotropy (satisfactory)"
     elif tensor.quality == "b":
@@ -4132,6 +4220,7 @@ def write_ani_tensors(
     path: str, ech: "SelectedSample", tensors: List[AniTensor],
     positions: Optional[Dict[str, Measurement]] = None,
     trm_evolution_pct: float = 0.0, deviation_pct: float = 0.0,
+    evolution_corrected: bool = False,
 ) -> None:
     """Ecrit UNE ligne par tensor de `tensors` (typiquement les 15
     variantes de AnisotropyComputation.all_tensors - A0/A+/A-/A1/B1/A2/
@@ -4149,7 +4238,8 @@ def write_ani_tensors(
     zminus_label = positions["Z-"].cod1 + positions["Z-"].cod2 if positions else ""
     for tensor in tensors:
         _insert_pmagani_line(path, _format_pmagani_line(
-            ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct),
+            ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct,
+            evolution_corrected=evolution_corrected),
             is_mean=False)
 
 
