@@ -402,7 +402,21 @@ def _experiment_signature(method_codes: str) -> str:
     for prefix in _OUT_OF_SCOPE_PROTOCOLS:
         if prefix in method_codes:
             return f"SKIP:{prefix}"
+    if _is_thellier_atrm_position(method_codes):
+        return "PI"
     return "AN-TRM" if "LP-AN-TRM" in method_codes else "PI"
+
+
+def _is_thellier_atrm_position(codes: str) -> bool:
+    """Pas en champ de la methode Thellier classique (LP-PI-II, R/V =
+    champ en Z puis Z-) etiquete AUSSI LP-AN-TRM parce qu'il sert de
+    position Z+/Z- de l'ATRM a ce palier (voir magic_export.
+    build_measurements_rows). Doit rester un pas de paleointensite R/V a
+    l'import (les deux roles sont deja geres cote natif :
+    calcul.detect_six_positions substitue R/V pour Z+/Z- a l'etape X) -
+    sinon il deviendrait Z+/Z- et le point (R+V)/2 de ce palier
+    disparaitrait de la sequence de paleointensite."""
+    return "LP-AN-TRM" in codes and "LT-T-I" in codes and "LP-PI-II" in codes
 
 
 def _experiment_groups(meas_rows: List[Dict[str, str]]):
@@ -495,7 +509,7 @@ def _derive_cod(row: Dict[str, str], letters: Dict[int, str], prev_cod2: str):
     temp = _temp_k(row)
     letter = letters.get(id(row), "")
 
-    if "LP-AN-TRM" in codes:
+    if "LP-AN-TRM" in codes and not _is_thellier_atrm_position(codes):
         # ATRM : baseline zero-field -> 'D' (code Rennes deja existant,
         # magic_export.py cod1=='D'), pas en champ -> axe/signe X/Y/Z
         # +/- derives du phi/theta DE CETTE LIGNE (main step ou controle

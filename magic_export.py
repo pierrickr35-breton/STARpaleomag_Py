@@ -376,8 +376,17 @@ def build_sites_rows(
     samples: List[SelectedSample], results: List[FitResult],
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
+    include_site_only_means: bool = True,
 ) -> List[List[str]]:
-    """`site_metadata` (voir load_site_metadata_table) : ne COMBLE que les
+    """`include_site_only_means` : False quand l'utilisateur n'exporte
+    qu'une PARTIE du fichier - la seconde boucle plus bas (sites connus
+    seulement par une moyenne "mean:", sans specimen dans `samples`)
+    ajoutait sinon la moyenne de TOUS les sites du .pmagres, meme ceux
+    hors de la selection (signale par l'utilisateur : "meme si on ne
+    selectionne que qq echantillons, l'export de magic tente d'exporter
+    tout le fichier").
+
+    `site_metadata` (voir load_site_metadata_table) : ne COMBLE que les
     champs formation/lithologies/geologic_classes/geologic_types/age_low/
     age_high/age_unit/location encore VIDES (voir _apply_site_metadata) -
     utile pour un site SANS specimen (aucune autre source, voir plus bas
@@ -452,7 +461,7 @@ def build_sites_rows(
     # AUCUNE source specimen - viennent UNIQUEMENT de `site_metadata` si
     # fourni (voir load_site_metadata_table/_apply_site_metadata),
     # restent vides sinon plutot que d'inventer une valeur.
-    for r in results:
+    for r in (results if include_site_only_means else []):
         if r.id[:5] != "mean:":
             continue
         site = r.id[6:].strip()
@@ -596,16 +605,39 @@ def build_locations_rows(
 # samples.txt
 # ---------------------------------------------------------------------------
 
+# Vitesses de refroidissement de l'experience de vitesse de refroidissement
+# (pas 'L' lent, 'Q' rapide) - valeurs fournies par l'utilisateur ("vitesse
+# lente en laboratoire 1 K/min, rapide 10 K/min, pour la vitesse geologique
+# mettre la meme vitesse que la lente au labo mais par Myr"). thellier_gui
+# (PmagPy) ne calcule sa correction de vitesse de refroidissement que s'il
+# trouve "<vitesse>:K/min" dans la description des mesures ET la vitesse
+# ancienne (K/Ma, colonne `cooling_rate` de samples.txt).
+_LAB_SLOW_COOLING_K_PER_MIN = 1.0
+_LAB_FAST_COOLING_K_PER_MIN = 10.0
+# Vitesse "geologique" = la vitesse LENTE de laboratoire exprimee en K/Ma
+# (refroidissement de fours archeologiques, du meme ordre que le refroidissement
+# lent de labo) : correction demandee par l'utilisateur ("transformer la
+# vitesse lente en equivalent par /Ma" - la premiere version mettait 1 K/Ma,
+# soit un rapport ~5e11 avec le labo). Meme conversion que thellier_gui
+# (get_data : K/Ma / (1e6*365*24*60) = K/min), donc le rapport
+# labo/geologique vaut exactement 1 pour la vitesse lente.
+_GEOLOGICAL_COOLING_K_PER_MYR = _LAB_SLOW_COOLING_K_PER_MIN * (1.0e6 * 365.0 * 24.0 * 60.0)
+
 _SAMPLES_HEADER = [
     "citations", "sample", "site", "geologic_classes", "lithologies",
     "geologic_types", "lat", "lon", "height", "timestamp", "orientation_quality",
     "azimuth", "dip", "bed_dip_direction", "bed_dip", "method_codes",
+    "cooling_rate",
 ]
 
 
 def build_samples_rows(samples: List[SelectedSample]) -> List[List[str]]:
     rows = []
     seen = []
+    cooling_samples = {
+        (e.magic_sample.strip() or e.id)
+        for e in samples if any(m.cod1 in ("L", "Q") for m in e.mesures)
+    }
     for ech in samples:
         # Bloc "specimen: n.d / sample: n.d" (testlect les lit comme id=""
         # - voir "specimen: n.d" dans le .prmag), sans aucune mesure : PAS
@@ -640,6 +672,7 @@ def build_samples_rows(samples: List[SelectedSample]) -> List[List[str]]:
             _timestamp(ech), "g", _num(azimuth, 1), _num(-ech.cin, 1),
             _num(_bed_dip_direction(ech.str_, ech.dip), 1), _num(ech.dip, 1),
             method_codes,
+            f"{_GEOLOGICAL_COOLING_K_PER_MYR:.6g}" if sample in cooling_samples else "",
         ]
         rows.append(row)
     return rows
@@ -705,9 +738,13 @@ def anisotropy_specimen_magic_fields(tensor: AniTensor) -> Dict[str, str]:
         "aniso_type": aniso_type,
         "aniso_s": f"{s1:.6f}:{s2:.6f}:{s3:.6f}:{s4:.6f}:{s5:.6f}:{s6:.6f}",
         "aniso_tilt_correction": "-1",
+        "description": f"{aniso_type} tensor from STARpaleomag_Py, specimen coordinates",
     }
-    if tensor.n_positions is not None:
-        out["aniso_s_n_measurements"] = str(tensor.n_positions)
+    n_pos = tensor.n_positions
+    if n_pos is None and tensor.code2 == "A0":
+        n_pos = 6  # ATRM natif = methode a 6 positions (detect_six_positions)
+    if n_pos is not None:
+        out["aniso_s_n_measurements"] = str(n_pos)
     if tensor.sigma is not None:
         out["aniso_s_sigma"] = f"{tensor.sigma:.6g}"
     if tensor.ftest is not None:
@@ -899,6 +936,21 @@ def paleointensity_magic_fields(row: Dict[str, str]) -> Dict[str, str]:
     fcor, fcor_cool = f("fcor"), f("fcorCool")
 
     out: Dict[str, str] = {}
+    # meas_step_min/max/unit MANQUAIENT ici (bug signale par l'utilisateur -
+    # "le meas_temp_min et le meas_tem_max ne sont pas entres dans le
+    # fichier specimens.txt") : deja renseignes pour un resultat
+    # DIRECTIONNEL (_dir_rows_for_specimen, ci-dessus) mais jamais pour un
+    # resultat de PALEOINTENSITE, seul cas ou `paleointensity_magic_fields`
+    # est utilisee - `t1`/`t2` (colonnes .pmagint, voir _PMAGINT_HEADER)
+    # sont la temperature du premier/dernier pas retenu dans l'intervalle
+    # de fit (write_pmagint_line: `points[n1-1].temp`/`points[n2-1].temp`),
+    # en degC comme `etape`/`FitResult.step_first/last` - meme conversion
+    # +273/"K" que le cas thermique de `_dir_rows_for_specimen`.
+    t1, t2 = f("t1"), f("t2")
+    if t1 is not None and t2 is not None:
+        out["meas_step_min"] = _num(min(t1, t2) + 273, 4)
+        out["meas_step_max"] = _num(max(t1, t2) + 273, 4)
+        out["meas_step_unit"] = "K"
     if h_final is not None:
         out["int_abs"] = _num_sci(h_final * 1.0e-6)
     if hlab is not None and b is not None and sb is not None:
@@ -1197,6 +1249,7 @@ def classify_anisotropy_experiment(mesures: List[Measurement]) -> Optional[str]:
 
 def _measurement_treatment(
     m: Measurement, prev: List[Measurement], ifield: float, anisotropy_kind: str = "trm",
+    is_paleointensity: bool = False, is_pure_ii_protocol: bool = False,
 ) -> Tuple[str, float, float, float, float, float]:
     """Equivalent du `select case (mes(j).cod1)` de export2magic (voir §4
     du rapport d'exploration) : retourne (method_codes, treat_temp,
@@ -1291,8 +1344,46 @@ def _measurement_treatment(
             codes = "LT-AF-Z:LT-AF-Z-TUMB"
     elif m.cod1 == "N":
         temp = etape + 273
-        codes = "LT-NO"
-        if m.cod2 == "P":
+        # BUG CORRIGE ici (crash reel confirme : thellier_gui de PmagPy
+        # plante avec "IndexError: list index out of range" dans get_data,
+        # a la ligne `NRM = zijdblock[0][3]`, en ouvrant un export MagIC
+        # produit par ce fichier). Cause: pour data_model==3, thellier_gui
+        # filtre TOUTES les lignes de measurements.txt qui ne contiennent
+        # aucun de LP-PI-TRM/LP-TRM/LP-PI-M/LP-AN/LP-CR-TRM AVANT de trier
+        # les blocs par specimen - une ligne LT-NO seule (sans LP-PI-TRM)
+        # est donc supprimee entierement, y compris pour son role de pas
+        # zero-field initial (zijdblock), meme si sortarai lui-meme
+        # n'exige aucun suffixe ZI/IZ/BT-IZZI particulier sur ce pas.
+        # Reproduit et verifie directement en executant get_data() de
+        # thellier_gui.py (tag v4.5.0 de PmagPy/PmagPy) sur un export reel
+        # (specimen 15SO131604C) : son pas N s'exportait en "LT-NO" nu,
+        # contrairement a un fichier MagIC de reference fonctionnel ou le
+        # pas NRM porte toujours "LT-NO:LP-PI-TRM:...". Corrige seulement
+        # pour les specimens ou un pas R/V/P/S (paleointensite genuine) est
+        # present ailleurs - ne pas re-etiqueter un NRM d'un specimen
+        # purement directionnel.
+        codes = "LT-NO:LP-PI-TRM" if is_paleointensity else "LT-NO"
+        if m.cod2 == "P" or (is_paleointensity and is_pure_ii_protocol):
+            # Specimen R/V/P sans aucun pas 'S' (pas de vrai zero-field -
+            # voir le commentaire au cas cod1=='R' ci-dessous : "R et V
+            # sont TOUS LES DEUX en-champ ... seule LA MOYENNE (R+V)/2
+            # annule le pTRM"). BUG CORRIGE ici (deuxieme, distinct du
+            # "LT-NO nu" ci-dessus) : sans ce tag "LP-PI-II" sur le pas N,
+            # thellier_gui de PmagPy (get_data) ne construit JAMAIS de
+            # vrai Zijderveld multi-points pour ce protocole - son
+            # scan ordinaire ne retient que les pas LT-NO/LT-T-Z/LT-M-Z/
+            # LT-AF-Z (aucun ici, R/V sont tagues LT-T-I), et son
+            # branchement special de reconstruction via araiblock (qui,
+            # lui, gere bien le cas R/V par soustraction vectorielle)
+            # n'est active QUE si `Data[s]['datablock'][0]` (le premier
+            # pas du specimen ayant LP-PI-TRM/LP-PI-M, donc le pas N
+            # lui-meme depuis le fix precedent) porte LP-PI-II/
+            # LP-PI-M-II/LP-PI-T-II - jamais le cas jusqu'ici puisque
+            # seul le pas V (jamais le premier) le portait. Verifie par
+            # reproduction directe (specimen 15SO131604C, meme
+            # get_data() extrait du tag v4.5.0 de PmagPy) : Zijderveld a
+            # 1 seul point (le NRM) sans ce tag, correctement reconstruit
+            # (1 point par temperature) avec.
             codes = "LT-NO:LP-PI-TRM:LP-PI-II:LP-PI-ALT"
     elif m.cod1 == "D":
         temp = etape + 273
@@ -1319,7 +1410,21 @@ def _measurement_treatment(
         temp = etape + 273
         theta = 90.0
         dc_field = ifield * 1.0e-6
-        codes = "LT-T-I:LP-PI-TRM-ZI:LP-PI-TRM:LP-PI-ALT-PTRM:LP-PI-BT-IZZI"
+        if is_pure_ii_protocol:
+            # Thellier classique (R/V/P sans 'S') : le champ est TOUJOURS
+            # applique, il n'y a ni alternance zero-champ/en-champ ni
+            # sequence IZZI - "LP-PI-TRM-ZI" et "LP-PI-BT-IZZI" (et
+            # "LP-PI-ALT-PTRM", specifique au protocole IZZI) n'ont aucun
+            # sens ici (demande explicite utilisateur : "LP-PI-TRM-ZI est
+            # inutile en Thellier classic de meme que LP-PI-BT-IZZI").
+            # Meme jeu que le pas V (deja "champ en Z puis Z-", protocole
+            # LP-PI-II) - R et V sont les deux mesures en champ d'un meme
+            # palier. Verifie que thellier_gui (sortarai) n'utilise ces
+            # tags ZI/IZZI que pour apparier un pas zero-champ (LT-T-Z),
+            # jamais present ici.
+            codes = "LT-T-I:LP-PI-TRM:LP-PI-II:LP-PI-ALT"
+        else:
+            codes = "LT-T-I:LP-PI-TRM-ZI:LP-PI-TRM:LP-PI-ALT-PTRM:LP-PI-BT-IZZI"
     elif m.cod1 == "V":
         temp = etape + 273
         theta = -90.0
@@ -1385,6 +1490,12 @@ def _measurement_treatment(
             codes = "LT-IRM:LP-AN-IRM"
         else:
             temp = etape + 273
+            # LT-T-I = pas EN CHAMP : le champ labo etait applique mais
+            # treat_dc_field restait vide - thellier_gui/pmagpy lisent ce
+            # champ (et phi/theta, ecrits meme a 0 des qu'un champ est
+            # applique) pour ranger chaque pas ATRM dans l'une des 6
+            # positions +/-X,Y,Z.
+            dc_field = ifield * 1.0e-6
             codes = "LT-T-I:LP-AN-TRM"
     elif m.cod1 in ("L", "Q"):
         temp = etape + 273
@@ -1456,6 +1567,24 @@ def build_measurements_rows(
         izzi_tags = _izzi_order_tags(ech.mesures)
         skip_anisotropy = ech.id in anisotropy_skip
         anisotropy_kind = anisotropy_kind_by_specimen.get(ech.id, "trm")
+        is_paleointensity = any(m.cod1 in _PALEOINT_COMPANION_COD1 for m in ech.mesures)
+        is_pure_ii_protocol = is_paleointensity and not any(m.cod1 == "S" for m in ech.mesures)
+        # Thellier classique : au palier ou l'ATRM est mesuree (pas X/Y),
+        # les pas R et V SONT les positions Z+ et Z- (voir
+        # calcul.detect_six_positions, qui les utilise deja comme
+        # substituts) - demande explicite utilisateur : "ajouter
+        # LP-AN-TRM a la meme etape pour R et V". Limite au protocole
+        # classique (R et V existent tous deux) et a l'ATRM (pas d'IRM,
+        # pas d'anisotropie ecartee par l'utilisateur).
+        # thellier_gui exige, des 3 lignes LP-CR-TRM ou plus, une ligne
+        # LT-PTRM-I (controle d'alteration = refroidissement rapide
+        # repete) sinon IndexError sur alteration_check[0] - la DERNIERE
+        # ligne L/Q d'un specimen qui en a >= 3 joue ce role.
+        cooling_idx = [j for j, m in enumerate(ech.mesures) if m.cod1 in ("L", "Q")]
+        alteration_check_idx = cooling_idx[-1] if len(cooling_idx) >= 3 else None
+        atrm_etapes = set()
+        if is_pure_ii_protocol and not skip_anisotropy and anisotropy_kind == "trm":
+            atrm_etapes = {m.etape for m in ech.mesures if m.cod1 in ("X", "Y")}
 
         for j, m in enumerate(ech.mesures):
             if skip_anisotropy and m.cod1 in ("X", "Y", "Z"):
@@ -1474,11 +1603,13 @@ def build_measurements_rows(
                 chi_mass = ""
 
             codes, temp, af_field, dc_field, phi, theta = _measurement_treatment(
-                m, ech.mesures[:j], ifield, anisotropy_kind)
+                m, ech.mesures[:j], ifield, anisotropy_kind, is_paleointensity, is_pure_ii_protocol)
             if j in izzi_tags:
                 parts = [p for p in codes.split(":") if p not in ("LP-PI-TRM-IZ", "LP-PI-TRM-ZI")]
                 parts.append(izzi_tags[j])
                 codes = ":".join(parts)
+            if m.cod1 in ("R", "V") and m.etape in atrm_etapes and "LP-AN-TRM" not in codes:
+                codes += ":LP-AN-TRM"
 
             # dir_csd derive de m.q ("error") - demande explicite
             # utilisateur ("lors de l'importation, lorsque l'instrument
@@ -1492,7 +1623,16 @@ def build_measurements_rows(
             ins_short = (m.ins or "").strip()
             csd = None if ins_short == "S" else 0.1 + math.degrees(math.atan2(m.q / 100.0, 1.0))
             ins_desc = _instrument(m.ins)
-            description = "slow cooling" if m.cod1 == "L" else ("fast cooling" if m.cod1 == "Q" else "")
+            # "<vitesse>:K/min" : format lu par thellier_gui (get_data, bloc
+            # cooling rate : `description.split(":")`, valeur juste avant
+            # "K/min") ; le texte qualitatif reste en tete.
+            description = ""
+            if m.cod1 == "L":
+                description = f"slow cooling:{_LAB_SLOW_COOLING_K_PER_MIN:g}:K/min"
+            elif m.cod1 == "Q":
+                description = f"fast cooling:{_LAB_FAST_COOLING_K_PER_MIN:g}:K/min"
+            if j == alteration_check_idx:
+                codes = "LT-PTRM-I:LP-CR-TRM"
 
             row = [
                 "This study", lab_analysts, ech.id, f"{ech.id}_Rem_Mag",
@@ -1501,8 +1641,15 @@ def build_measurements_rows(
                 _num(temp, 1) if temp else "",
                 _num(af_field, 6) if af_field else "",
                 _num(dc_field, 6) if dc_field else "",
-                _num(phi, 1) if phi else "",
-                _num(theta, 1) if theta else "",
+                # phi/theta = 0 est une VRAIE valeur des qu'un champ est
+                # applique (dc_field != 0) - pas "inconnu". Ecrit "" pour 0,
+                # _write_tsv supprimait la colonne entiere quand aucune
+                # ligne n'avait phi != 0 (aucun pas d'anisotropie X/Y dans
+                # l'export) et thellier_gui plantait avec KeyError
+                # 'treatment_dc_field_phi' (get_data lit phi/theta sur CHAQUE
+                # pas en champ LT-T-I/LT-PTRM-I) - signale par l'utilisateur.
+                _num(phi, 1) if (phi or dc_field) else "",
+                _num(theta, 1) if (theta or dc_field) else "",
                 "293",
                 _num(inc, 1), _num(dec, 1),
                 _num_sci(mag),
@@ -1527,6 +1674,12 @@ class MagicExportResult:
     counts: Dict[str, int] = field(default_factory=dict)
 
 
+_THELLIER_GUI_ANISO_COLUMNS = (
+    "aniso_s", "aniso_ftest", "aniso_ftest12", "aniso_s_n_measurements",
+    "aniso_s_sigma", "aniso_type", "description",
+)
+
+
 def _write_tsv(path: str, table_name: str, header: List[str], rows: List[List[str]]) -> None:
     # Colonnes ENTIEREMENT vides sur TOUTES les lignes (ex. aucune donnee
     # de paleointensite dans tout l'export) supprimees avant ecriture -
@@ -1541,6 +1694,12 @@ def _write_tsv(path: str, table_name: str, header: List[str], rows: List[List[st
     # rare, reste une vraie donnee - jamais retiree).
     if rows:
         keep = [i for i in range(len(header)) if any(str(row[i]).strip() for row in rows)]
+        # thellier_gui n'utilise un tenseur de specimens.txt que si TOUTES
+        # ces colonnes existent (sinon "Incomplete anisotropy data ...
+        # Ignoring anisotropy data") - gardees ensemble des qu'un tenseur
+        # est exporte, meme si certaines valeurs (sigma, F-test) sont vides.
+        if table_name == "specimens" and "aniso_s" in [header[i] for i in keep]:
+            keep = sorted(set(keep) | {header.index(c) for c in _THELLIER_GUI_ANISO_COLUMNS if c in header})
     else:
         keep = list(range(len(header)))
     if len(keep) != len(header):
@@ -1565,6 +1724,7 @@ def export_to_magic(
     aniso_tensors: Optional[Dict[str, AniTensor]] = None,
     aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
+    include_site_only_means: bool = True,
 ) -> MagicExportResult:
     """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
     les resultats de paleointensite deja archives dans .pmagint
@@ -1595,7 +1755,8 @@ def export_to_magic(
     os.makedirs(out_dir, exist_ok=True)
 
     sites_rows = build_sites_rows(
-        ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors)
+        ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors,
+        include_site_only_means=include_site_only_means)
     locations_rows = build_locations_rows(ordered, continent_ocean, country, region)
     samples_rows = build_samples_rows(ordered)
     specimens_rows = build_specimens_rows(
