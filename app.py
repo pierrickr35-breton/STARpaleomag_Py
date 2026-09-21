@@ -31,6 +31,7 @@ from selection import (
     list_measurements_depth,
     sample_info,
     _build_selected_sample,
+    polere,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
 from auto_interpretation import propose_components, propose_components_for_site, format_suggestions
@@ -955,13 +956,44 @@ class STARpaleomagApp:
 
         if kind == "zijderveld_step":
             m = item
-            self._afficher(f"[Zijderveld] step {_step_token(m)}\n")
+            self._show_pick_info(f"[Zijderveld] step {_step_token(m)}\n")
         elif kind == "stereo_specimen":
-            self._afficher(f"[Stereo Results] {item}\n")
+            self._show_pick_info(f"[Stereo Results] {item}\n")
         elif kind == "xygraph_specimen":
-            self._afficher(f"[XY graph] {item}\n")
+            self._show_pick_info(f"[XY graph] {item}\n")
         elif kind == "irm_specimen":
-            self._afficher(f"[IRM] {item}\n")
+            self._show_pick_info(f"[IRM] {item}\n")
+        elif kind == "arai_point":
+            # Memes colonnes/unites que le tableau imprime (voir
+            # _arai_step_tables) : "n" = numero de la ligne du tableau.
+            n_point, pt, arno, norme = item
+            mom = pt.xp * arno * (1.0e-3 if norme == "m" else 1.0)
+            self._show_pick_info(
+                f"[Arai] n={n_point}  step {pt.temp:.0f} degC  arn={pt.yp:.3E}  atr={pt.xp:.3E}  "
+                f"mom.atr={mom:.3E}  NRM dec={pt.decl:.1f} inc={pt.aincl:.1f}  "
+                f"pTRM dec={pt.dec:.1f} inc={pt.winc:.1f}\n")
+        elif kind == "arai_check":
+            chk, done_at, arno = item
+            ecart = chk.xt - chk.xtptrm
+            ratio = ecart / chk.xtptrm if chk.xtptrm else 0.0
+            self._show_pick_info(
+                f"[Arai pTRM check] done at {done_at:.0f}, target {chk.temp:.0f} degC  "
+                f"mom={chk.xt * arno:.3E}  %atr={chk.xt:.2f}  ecart/atrt={ecart:.2f}  "
+                f"ecart/atrp={ratio:.2f}\n")
+
+    def _show_pick_info(self, text):
+        """Affiche l'information d'un point clique. Pendant une saisie
+        (`_console_input` en attente) le texte est insere AU-DESSUS du
+        prompt, sans toucher a ce qui est tape ; sinon, comme une sortie
+        normale."""
+        if getattr(self, "_console_input_active", False):
+            self.text_area.insert("prompt_start", text)
+            # avance le repere apres le texte insere : les clics successifs
+            # restent dans l'ordre chronologique, au-dessus du prompt.
+            self.text_area.mark_set("prompt_start", f"prompt_start+{len(text)}c")
+            self.text_area.see(tk.END)
+        else:
+            self._afficher(text)
 
     def _redraw_canvas(self):
         """Agrandit le CONTENANT (volet gauche du PanedWindow + fenetre)
@@ -1453,16 +1485,37 @@ class STARpaleomagApp:
             return
 
         self.text_area.insert(tk.END, "\n--- Check files for duplicate entries ---\n", "prompt")
-        report = []
+        report, _n_dup = self._duplicate_report(self.donnees)
+        self._afficher("\n".join(report) + "\n")
 
-        dup_mesures = find_duplicate_measurements(self.donnees)
+    def _duplicate_report(self, measure_source, only_ids=None):
+        """Lignes de rapport + nombre total de doublons. `measure_source` :
+        liste d'objets a `.id`/`.mesures` (Pmag pour le .prmag entier,
+        SelectedSample pour une selection). `only_ids` (ensemble de
+        specimens) restreint AUSSI les compagnons .pmagres/.pmagint/
+        .pmagani a ces specimens - utilise par l'export MagIC, qui ne
+        doit signaler que ce qu'il va reellement ecrire ; None = tout le
+        fichier (menu "Check files for duplicate entries")."""
+        def scoped(warnings):
+            if only_ids is None:
+                return warnings
+            return [w for w in warnings if w.split(":", 1)[0] in only_ids]
+
+        report = []
+        n_dup = 0
+
+        dup_mesures = find_duplicate_measurements(measure_source)
+        n_dup += len(dup_mesures)
         report.append(f"[.prmag] {len(dup_mesures)} duplicate measurement(s):" if dup_mesures
                        else "[.prmag] no duplicate measurement found.")
         report.extend(f"  {w}" for w in dup_mesures)
 
         if self.results_path and os.path.exists(self.results_path):
             file_results = list(_iter_result_lines(self.results_path))
+            if only_ids is not None:
+                file_results = [r for r in file_results if r.id in only_ids]
             dup_results = find_duplicate_results(file_results)
+            n_dup += len(dup_results)
             report.append(
                 f"[.pmagres] {len(dup_results)} duplicate result(s) in "
                 f"{os.path.basename(self.results_path)}:" if dup_results
@@ -1474,7 +1527,8 @@ class STARpaleomagApp:
 
         pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
         if pmagint_path and os.path.exists(pmagint_path):
-            dup_pmagint = find_duplicate_pmagint_rows(pmagint_path)
+            dup_pmagint = scoped(find_duplicate_pmagint_rows(pmagint_path))
+            n_dup += len(dup_pmagint)
             report.append(
                 f"[.pmagint] {len(dup_pmagint)} duplicate interpretation(s):" if dup_pmagint
                 else "[.pmagint] no duplicate interpretation found."
@@ -1485,7 +1539,8 @@ class STARpaleomagApp:
 
         ani_path = self._find_ani_path()
         if ani_path:
-            dup_ani = find_duplicate_ani_tensors(ani_path)
+            dup_ani = scoped(find_duplicate_ani_tensors(ani_path))
+            n_dup += len(dup_ani)
             report.append(
                 f"[.pmagani] {len(dup_ani)} duplicate tensor(s):" if dup_ani
                 else "[.pmagani] no duplicate tensor found."
@@ -1493,8 +1548,7 @@ class STARpaleomagApp:
             report.extend(f"  {w}" for w in dup_ani)
         else:
             report.append("[.pmagani] no anisotropy file found - skipped.")
-
-        self._afficher("\n".join(report) + "\n")
+        return report, n_dup
 
     def ouvrir_archive_new_data_dialog(self):
         """Archive de nouvelles mesures (acquises APRES la creation du
@@ -2213,6 +2267,18 @@ class STARpaleomagApp:
         # paleointensite. C'est different pour l'AMS car on peut faire
         # une mesure d'AMS sur des specimens non traites en remanence."
         n_results = len({r.id for r in self.results if r.cat1 in ("L", "P", "f", "F")})
+        # Selection COMPLETE = tous les specimens du .prmag ayant des
+        # mesures sont selectionnes. Sinon (partie du fichier seulement) :
+        # ni les moyennes de site "orphelines" ni les specimens AMS-only
+        # d'AUTRES sites ne sont ajoutes a l'export - sans cela l'export
+        # sortait TOUT le .pmagres/.pmagani meme pour quelques specimens
+        # (signale par l'utilisateur).
+        sel_ids_upper = {ech.id.strip().upper() for ech in self.selection}
+        selection_is_complete = all(
+            p.id.strip().upper() in sel_ids_upper
+            for p in self.donnees if p.id.strip() and p.mesures
+        )
+        sel_sites = {ech.magic_site.strip() for ech in self.selection if ech.magic_site.strip()}
         pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
         pmagint_available = (
             dict(read_pmagint(pmagint_path)) if pmagint_path and os.path.exists(pmagint_path) else {}
@@ -2231,6 +2297,27 @@ class STARpaleomagApp:
             "measurement in the current selection is reported below, never "
             "included in the export.)\n"
         )
+
+        # Controle automatique des doublons sur la selection a exporter -
+        # demande explicite utilisateur ("quand on appelle export to Magic,
+        # il vaut mieux appeler automatiquement check for duplicate in the
+        # list of selected samples. Ca permettra aux utilisateurs de
+        # retirer les mesures susceptibles d'etre mal interpretees") :
+        # meme routine que le menu "Check files for duplicate entries",
+        # mais limitee aux specimens selectionnes (mesures RETENUES de la
+        # selection, pas tout le .prmag). Simple avertissement : on peut
+        # poursuivre tel quel ou annuler pour nettoyer d'abord (ex. via
+        # "Remove step") puis relancer l'export.
+        report, n_dup = self._duplicate_report(
+            self.selection, only_ids={ech.id for ech in self.selection})
+        self._afficher("Duplicate check on the selected specimens:\n" + "\n".join(report) + "\n")
+        if n_dup:
+            ans = self._console_input(
+                f"{n_dup} duplicate entr{'y' if n_dup == 1 else 'ies'} found - continue the export "
+                "anyway (Y) or cancel to clean them first (n)? ", "Y")
+            if ans is None or ans.strip().lower() == "n":
+                self._afficher("Export cancelled.\n")
+                return
 
         # Table d'apercu des metadonnees de site (voir docstring, point
         # 2) - demande explicite utilisateur ("is it possible to have
@@ -2362,6 +2449,18 @@ class STARpaleomagApp:
             if ans is None:
                 return
             want_results = ans.strip().lower() != "n"
+
+        if want_results and not selection_is_complete:
+            skipped_means = sorted({
+                r.id[6:].strip() for r in self.results
+                if r.id[:5] == "mean:" and r.id[6:].strip()
+                and r.id[6:].strip() not in sel_sites
+            })
+            if skipped_means:
+                self._afficher(
+                    f"Partial selection: {len(skipped_means)} site mean(s) outside the "
+                    f"selected sites will NOT be exported.\n"
+                )
 
         want_pmagint = False
         if pmagint_available:
@@ -2582,14 +2681,32 @@ class STARpaleomagApp:
             })
             donnees_by_id = {p.id.strip().upper(): p for p in self.donnees}
             n_from_prmag = 0
+            n_outside_selection = 0
             orphan_ids = []
             for extra_id in extra_ids:
                 p = donnees_by_id.get(extra_id.upper())
                 if p is not None:
+                    # Selection PARTIELLE : un specimen AMS-only n'est ajoute
+                    # que s'il n'a AUCUNE mesure dans le .prmag (un specimen
+                    # avec des mesures absent de la selection a ete ecarte
+                    # volontairement) ET appartient a un site deja
+                    # selectionne.
+                    if not selection_is_complete and (
+                        p.mesures or not (p.magic_site or "").strip()
+                        or p.magic_site.strip() not in sel_sites
+                    ):
+                        n_outside_selection += 1
+                        continue
                     export_samples.append(_build_selected_sample(p, p.mesures))
                     n_from_prmag += 1
                 else:
                     orphan_ids.append(extra_id)
+            if n_outside_selection:
+                self._afficher(
+                    f"[Export to MagIC] {n_outside_selection} specimen(s) of the .pmagani "
+                    f"outside the current selection were NOT added (select them, or "
+                    f"select everything, to export their anisotropy).\n"
+                )
             if n_from_prmag:
                 self._afficher(
                     f"[Export to MagIC] {n_from_prmag} specimen(s) with AMS data only "
@@ -2655,6 +2772,7 @@ class STARpaleomagApp:
                 aniso_tensors=aniso_tensors,
                 aniso_mean_tensors=aniso_mean_tensors,
                 site_metadata=site_metadata,
+                include_site_only_means=selection_is_complete,
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")
@@ -3022,6 +3140,239 @@ class STARpaleomagApp:
         self._current_graphic = ("irm", None)
         self._refresh_current_graphic()
 
+    def _anchored_direction_fit_result(self, ech, direction, points, n1, n2):
+        """Construit le FitResult (composante "A") pour la direction ANCREE
+        deja calculee par `fit_arai_direction` sur le meme intervalle
+        n1..n2 que le fit de paleointensite - demande explicite
+        utilisateur ("dans la version originale en Fortran, la direction
+        caracteristique dans le meme intervalle etait enregistree dans le
+        point .r" - `.pmagres` est le nom actuel de ce meme fichier
+        '.r', voir calcul.results_path_for - "serait-ce possible de
+        l'enregistrer... comme comp A et de l'exporter aussi dans
+        Magic"). `component="A"` est deja la valeur par defaut de
+        FitResult - PAS une nouvelle convention, exactement celle deja
+        utilisee pour un ajustement Zijderveld ordinaire (ajuslig).
+
+        `dec`/`inc` : reconstruits depuis `direction.anchored_specimen_
+        frame` (le vecteur AVANT rotation d'orientation) via `polere`, PAS
+        depuis `direction.anchored_dec/anchored_inc` (deja tournes par
+        `apply_orientation` dans `fit_arai_direction`) - FitResult.dec/inc
+        doit rester BRUT/repere echantillon (meme convention que
+        `calcul.fit_line`), sinon `_dir_rows_for_specimen` appliquerait
+        une seconde rotation (corfor/corpen) sur une valeur deja tournee.
+
+        `demag` : cod1 reel de la mesure "champ" (N/R/V/S, jamais un
+        controle 'P') a la temperature du DERNIER point de l'intervalle
+        (points[n2-1].temp) - meme role que `fit_line`'s
+        `demag=subset[-1].cod1` (seul effet fonctionnel actuel : distingue
+        AF/'F' de thermique pour la conversion Kelvin de meas_step_min/max
+        a l'export, voir _dir_rows_for_specimen) ; secours 'R' si
+        introuvable (ne devrait pas arriver - points[n2-1].temp vient
+        forcement d'une mesure de champ reelle)."""
+        if direction.anchored_dec is None or direction.anchored_specimen_frame is None:
+            return None
+        _, dec, inc = polere(*direction.anchored_specimen_frame)
+        t2 = points[n2 - 1].temp
+        demag = next(
+            (m.cod1 for m in reversed(ech.mesures)
+             if m.cod1 in ("N", "R", "V", "S") and m.etape == t2),
+            "R",
+        )
+        return FitResult(
+            id=ech.id, cin=ech.cin, caz=ech.caz, dip=ech.dip, str_=ech.str_,
+            cat1="L", cat2=" ", orig="o", demag=demag, numcomp=1,
+            component="A", nb=direction.nb, dec=dec, inc=inc,
+            mad=direction.anchored_mad,
+            step_first=points[n1 - 1].temp, step_last=t2,
+        )
+
+    def _offer_save_anchored_direction(self, ech, direction, points, n1, n2):
+        """Propose d'archiver la direction ancree (voir
+        _anchored_direction_fit_result) dans .pmagres - meme convention
+        Y/n/defaut-Y que les autres sauvegardes interactives de resultat
+        (ex. ouvrir_ajusfisher_dialog: "Save the single direction (Y/n)"),
+        PAS un ajout automatique/sans confirmation comme write_pmagint_line
+        (.pmagint se de-duplique par specimen a la lecture - voir
+        read_pmagint - alors que .pmagres ACCUMULE un nouvel identifiant
+        anti-collision a chaque appel de _save_result ; sans confirmation,
+        les multiples essais d'intervalle d'une revue interactive
+        pollueraient .pmagres de doublons)."""
+        fit = self._anchored_direction_fit_result(ech, direction, points, n1, n2)
+        if fit is None:
+            return
+        decision = self._console_input(
+            f"[{ech.id}] Save the anchored direction (dec={fit.dec:.1f} inc={fit.inc:.1f} "
+            f"mad={fit.mad:.1f}) to .pmagres as component A (Y/n)? ", "Y")
+        if decision is None or decision.strip().lower() == "n":
+            return
+        self._save_result(fit)
+        self._afficher(f"Anchored direction saved to .pmagres as component A: {len(self.results)}\n")
+
+    def _arai_step_tables(self, ech, points, checks, arno):
+        """Tableau des pas NRM/TRM + tableau des controles pTRM (texte) -
+        extrait tel quel de afficher_arai pour etre partage avec le dialogue
+        de revue/redo (ouvrir_openfilepint_dialog) - demande explicite
+        utilisateur (afficher tous les details, en particulier ce tableau,
+        aussi lors des redo)."""
+        volumasse = 1.0e-3 if ech.norme == "m" else 1.0
+
+        out = io.StringIO()
+        out.write(" paleointensity diagram NRM-TRM\n")
+        out.write(f"  numero: {ech.id}\n\n")
+        out.write("    n  temp.    arn     dec    inc      atr      mom.atr    dec    inc\n\n")
+        for i, p in enumerate(points, start=1):
+            mom = p.xp * arno * volumasse
+            out.write(
+                f"  {i:3d}  {p.temp:4.0f}   {p.yp:9.3E}  {p.decl:7.2f} {p.aincl:7.2f}   "
+                f"{p.xp:9.3E}   {mom:9.3E}   {p.dec:7.1f} {p.winc:7.1f}\n"
+            )
+        if checks:
+            pt_by_k = {p.k: p for p in points}
+            out.write("\n   results of the ptrm checks\n")
+            # 2 colonnes de temperature distinctes - demande explicite
+            # utilisateur ("you also miss the step at which the ptrm
+            # is done") : `done_at` = pas COURANT ou le controle a ete
+            # physiquement effectue (c.k, voir compute_arai), `target`
+            # = pas revisite par le controle (c.temp) - auparavant
+            # affichees identiques par erreur (les deux calculees a
+            # partir du meme "target").
+            out.write("   done_at  target     mom       %atr   ecart/atrt  ecart/atrp\n")
+            for c in checks:
+                done_at = pt_by_k[c.k].temp if c.k in pt_by_k else c.temp
+                mom = c.xt * arno
+                ecart = c.xt - c.xtptrm
+                ratio = ecart / c.xtptrm if c.xtptrm else 0.0
+                out.write(
+                    f"   {done_at:5.0f}  {c.temp:5.0f}   {mom:9.3E}   {c.xt:6.2f}   "
+                    f"{ecart:6.2f}      {ratio:6.2f}\n"
+                )
+        return out.getvalue()
+
+    def _arai_fit_report(
+        self, ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
+        fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm,
+    ):
+        """Rapport detaille d'un calcul de pente n1..n2 (cercle de
+        Paterson, directions ancree/libre + DANG, avant/apres correction
+        d'anisotropie, rf1/rf2, tableau CRM, statistiques de Coe, ligne de
+        resultats) - extrait tel quel de afficher_arai, partage avec le
+        dialogue de revue/redo."""
+        res = io.StringIO()
+        res.write(f"\n calculation of the slope between steps ni,nj :{n1} {n2}\n\n")
+        res.write(" -----------------------------------\n")
+        res.write(
+            f" circle Parameter for initialization after Taubin: {curv0.taubin_a:9.6f} "
+            f"{curv0.taubin_b:9.6f} {curv0.taubin_r:8.5f}\n"
+        )
+        res.write(
+            f" circle Parameter (a,b,r) after LMA: {curv0.lma_a:9.6f} "
+            f"{curv0.lma_b:9.6f} {curv0.lma_r:8.5f}\n"
+        )
+        res.write(" curvature calculated from point (0,1) to n2\n")
+        res.write(f" parameter k (1/r) : {curv0.k:7.4f}  error SSE :{curv0.sse:7.5f}\n")
+        res.write("\n -----------------------------------\n")
+        res.write(
+            f" circle Parameter for initialization after Taubin: {curv1.taubin_a:9.6f} "
+            f"{curv1.taubin_b:9.6f} {curv1.taubin_r:8.5f}\n"
+        )
+        res.write(
+            f" circle Parameter (a,b,r) after LMA: {curv1.lma_a:9.6f} "
+            f"{curv1.lma_b:9.6f} {curv1.lma_r:8.5f}\n"
+        )
+        res.write(" curvature calculated from point n1 to n2\n")
+        res.write(f" parameter k (1/r) : {curv1.k:7.4f}  error SSE :{curv1.sse:7.5f}\n")
+        res.write("\n -----------------------------------\n\n")
+        if direction.anchored_dec is not None:
+            res.write(
+                f" anchored direction: dec={direction.anchored_dec:6.1f}  "
+                f"inc={direction.anchored_inc:6.1f}  mad={direction.anchored_mad:5.1f}  "
+                f"nb points: {direction.nb}\n"
+            )
+        if direction.free_dec is not None:
+            res.write(
+                f"free direction:  dec={direction.free_dec:6.1f}  "
+                f"inc={direction.free_inc:6.1f}  mad={direction.free_mad:5.1f}  "
+                f"nb points: {direction.nb}\n"
+            )
+        if direction.dang is not None:
+            res.write(f"\n Lisa Tauxe DANG {direction.dang:6.1f}\n")
+
+        # Directions AVANT/APRES correction d'anisotropie - demande
+        # explicite utilisateur ("ce serait bien d'afficher les
+        # directions (anchored not anchored) avant et apres
+        # correction d'anisotropie ; ça donne une idée de la
+        # déviation des directions du champ par l'anisotropie de
+        # la roche"). Seulement si un tenseur A0 a reellement ete
+        # utilise (aniso_tensor non None - donc PAS si le
+        # specimen est deja flaganiso, ni si l'utilisateur a
+        # decline "not satisfactory... anyway?").
+        if aniso_tensor is not None:
+            corrected_direction = fit_arai_direction_corrected(
+                points, n1, n2, ech, aniso_tensor, orientation=1)
+            res.write("\n --- after anisotropy correction (tensor 'A0') ---\n")
+            if corrected_direction.anchored_dec is not None:
+                res.write(
+                    f" anchored direction: dec={corrected_direction.anchored_dec:6.1f}  "
+                    f"inc={corrected_direction.anchored_inc:6.1f}  "
+                    f"mad={corrected_direction.anchored_mad:5.1f}\n"
+                )
+            if corrected_direction.free_dec is not None:
+                res.write(
+                    f"free direction:  dec={corrected_direction.free_dec:6.1f}  "
+                    f"inc={corrected_direction.free_inc:6.1f}  "
+                    f"mad={corrected_direction.free_mad:5.1f}\n"
+                )
+            dev_anchored = angle_between_vectors(
+                direction.anchored_specimen_frame, corrected_direction.anchored_specimen_frame)
+            dev_free = angle_between_vectors(
+                direction.free_specimen_frame, corrected_direction.free_specimen_frame)
+            if dev_anchored is not None:
+                res.write(f" deviation from anisotropy (anchored): {dev_anchored:5.1f} deg\n")
+            if dev_free is not None:
+                res.write(f" deviation from anisotropy (free):     {dev_free:5.1f} deg\n")
+
+        if rf1 is not None:
+            res.write(f" rf1 - rf2 : {rf1:5.2f}  {rf2:5.2f}\n")
+        if crm is not None:
+            res.write("\n temp   mom.crm       temp   mom.2,6       temp   mom.crm\n")
+            ks = list(range(n1, n2 + 1))
+            k = n1
+            while k <= n2:
+                kkj = min(k + 2, n2)
+                cols = []
+                for j in range(k, kkj + 1):
+                    cols.append(f"{points[j-1].temp:4.0f}   {crm.values[j]:10.4E}")
+                res.write("  " + "     ".join(cols) + "\n")
+                k += 2
+        res.write(f"\n slope b= {fit.b:8.4f}\n")
+        if fit.sigma:
+            res.write(f"\n sigma = {fit.sigma:7.4f}\n")
+            res.write(f"\n linear correlation coefficient: {fit.ccr:9.5f}\n")
+        if crm is not None:
+            res.write(f"\n crm max ={crm.crmmax:8.4f}    deltatrm={crm.dtrm:8.4f}\n")
+        res.write(
+            f"\n{ech.id:<12}   f={fit.f:7.4f}    g={fit.g:7.4f}    q={fit.qq:7.4f}"
+            f"    ccr={fit.ccr:8.5f}  h={fit.h:8.3f}"
+            + (f"     % rcrm={crm.rcrm:7.3f}\n" if crm is not None else "\n")
+        )
+        if aniso_note:
+            res.write(f"\n{aniso_note}")
+        res.write(
+            "\nNum          t1   t2   N    f       g       q     mad   dang   Hlab"
+            "     b       sb     sb/b     ccr      H      fcor  Hcorani  gamma     k     k_sse\n"
+        )
+        res.write(
+            f"{ech.id:<12} {points[n1-1].temp:4.0f} {points[n2-1].temp:4.0f}  "
+            f"{n2 - n1 + 1:2d}  {fit.f:6.3f}  {fit.g:6.3f}  {fit.qq:6.3f}  "
+            f"{(direction.free_mad or 0.0):5.1f}  {(direction.dang or 0.0):5.1f}  "
+            f"{hlab:5.1f}  {fit.b:7.4f}  {fit.sigma:6.4f}  "
+            f"{(fit.sigma / fit.b if fit.b else 0.0):7.4f}  {fit.ccr:8.5f}  "
+            f"{fit.h:6.2f}  "
+            + (f"{fcor:6.3f}  {hcorani:6.2f}" if fcor is not None else "   -       -  ")
+            + f"  {gamma:5.1f}  {curv0.k:7.4f}  {curv0.sse:7.5f}\n"
+        )
+        return res.getvalue()
+
     def afficher_arai(self):
         """Equivalent GUI de `paleoin` (diagramme d'Arai/Thellier) - reprend
         la sequence interactive du Fortran (plotpaleoint2.f) presque telle
@@ -3121,39 +3472,7 @@ class STARpaleomagApp:
                     self._showerror("Error", "Hlab must be a number.")
                     continue
 
-            volumasse = 1.0e-3 if ech.norme == "m" else 1.0
-
-            out = io.StringIO()
-            out.write(" paleointensity diagram NRM-TRM\n")
-            out.write(f"  numero: {ech.id}\n\n")
-            out.write("    n  temp.    arn     dec    inc      atr      mom.atr    dec    inc\n\n")
-            for i, p in enumerate(points, start=1):
-                mom = p.xp * arno * volumasse
-                out.write(
-                    f"  {i:3d}  {p.temp:4.0f}   {p.yp:9.3E}  {p.decl:7.2f} {p.aincl:7.2f}   "
-                    f"{p.xp:9.3E}   {mom:9.3E}   {p.dec:7.1f} {p.winc:7.1f}\n"
-                )
-            if checks:
-                pt_by_k = {p.k: p for p in points}
-                out.write("\n   results of the ptrm checks\n")
-                # 2 colonnes de temperature distinctes - demande explicite
-                # utilisateur ("you also miss the step at which the ptrm
-                # is done") : `done_at` = pas COURANT ou le controle a ete
-                # physiquement effectue (c.k, voir compute_arai), `target`
-                # = pas revisite par le controle (c.temp) - auparavant
-                # affichees identiques par erreur (les deux calculees a
-                # partir du meme "target").
-                out.write("   done_at  target     mom       %atr   ecart/atrt  ecart/atrp\n")
-                for c in checks:
-                    done_at = pt_by_k[c.k].temp if c.k in pt_by_k else c.temp
-                    mom = c.xt * arno
-                    ecart = c.xt - c.xtptrm
-                    ratio = ecart / c.xtptrm if c.xtptrm else 0.0
-                    out.write(
-                        f"   {done_at:5.0f}  {c.temp:5.0f}   {mom:9.3E}   {c.xt:6.2f}   "
-                        f"{ecart:6.2f}      {ratio:6.2f}\n"
-                    )
-            self._afficher(out.getvalue())
+            self._afficher(self._arai_step_tables(ech, points, checks, arno))
 
             self._arai_state = (ech, points, checks, arno, None, hlab)
             self._current_graphic = ("arai", ech.id)
@@ -3161,8 +3480,8 @@ class STARpaleomagApp:
 
             while True:
                 range_s = self._console_input(
-                    f" calculation of the slope between steps ni,nj (1-{len(points)}, 0 = skip): ",
-                    f"1 {len(points)}")
+                    f" calculation of the slope between steps ni,nj (1-{len(points)}, Return = skip): ",
+                    "0")
                 if range_s is None:
                     return
                 parts = range_s.split()
@@ -3205,121 +3524,9 @@ class STARpaleomagApp:
                 self._arai_state = (ech, points, checks, arno, fit, hlab)
                 self._refresh_current_graphic()
 
-                res = io.StringIO()
-                res.write(f"\n calculation of the slope between steps ni,nj :{n1} {n2}\n\n")
-                res.write(" -----------------------------------\n")
-                res.write(
-                    f" circle Parameter for initialization after Taubin: {curv0.taubin_a:9.6f} "
-                    f"{curv0.taubin_b:9.6f} {curv0.taubin_r:8.5f}\n"
-                )
-                res.write(
-                    f" circle Parameter (a,b,r) after LMA: {curv0.lma_a:9.6f} "
-                    f"{curv0.lma_b:9.6f} {curv0.lma_r:8.5f}\n"
-                )
-                res.write(" curvature calculated from point (0,1) to n2\n")
-                res.write(f" parameter k (1/r) : {curv0.k:7.4f}  error SSE :{curv0.sse:7.5f}\n")
-                res.write("\n -----------------------------------\n")
-                res.write(
-                    f" circle Parameter for initialization after Taubin: {curv1.taubin_a:9.6f} "
-                    f"{curv1.taubin_b:9.6f} {curv1.taubin_r:8.5f}\n"
-                )
-                res.write(
-                    f" circle Parameter (a,b,r) after LMA: {curv1.lma_a:9.6f} "
-                    f"{curv1.lma_b:9.6f} {curv1.lma_r:8.5f}\n"
-                )
-                res.write(" curvature calculated from point n1 to n2\n")
-                res.write(f" parameter k (1/r) : {curv1.k:7.4f}  error SSE :{curv1.sse:7.5f}\n")
-                res.write("\n -----------------------------------\n\n")
-                if direction.anchored_dec is not None:
-                    res.write(
-                        f" anchored direction: dec={direction.anchored_dec:6.1f}  "
-                        f"inc={direction.anchored_inc:6.1f}  mad={direction.anchored_mad:5.1f}  "
-                        f"nb points: {direction.nb}\n"
-                    )
-                if direction.free_dec is not None:
-                    res.write(
-                        f"free direction:  dec={direction.free_dec:6.1f}  "
-                        f"inc={direction.free_inc:6.1f}  mad={direction.free_mad:5.1f}  "
-                        f"nb points: {direction.nb}\n"
-                    )
-                if direction.dang is not None:
-                    res.write(f"\n Lisa Tauxe DANG {direction.dang:6.1f}\n")
-
-                # Directions AVANT/APRES correction d'anisotropie - demande
-                # explicite utilisateur ("ce serait bien d'afficher les
-                # directions (anchored not anchored) avant et apres
-                # correction d'anisotropie ; ça donne une idée de la
-                # déviation des directions du champ par l'anisotropie de
-                # la roche"). Seulement si un tenseur A0 a reellement ete
-                # utilise (aniso_tensor non None - donc PAS si le
-                # specimen est deja flaganiso, ni si l'utilisateur a
-                # decline "not satisfactory... anyway?").
-                if aniso_tensor is not None:
-                    corrected_direction = fit_arai_direction_corrected(
-                        points, n1, n2, ech, aniso_tensor, orientation=1)
-                    res.write("\n --- after anisotropy correction (tensor 'A0') ---\n")
-                    if corrected_direction.anchored_dec is not None:
-                        res.write(
-                            f" anchored direction: dec={corrected_direction.anchored_dec:6.1f}  "
-                            f"inc={corrected_direction.anchored_inc:6.1f}  "
-                            f"mad={corrected_direction.anchored_mad:5.1f}\n"
-                        )
-                    if corrected_direction.free_dec is not None:
-                        res.write(
-                            f"free direction:  dec={corrected_direction.free_dec:6.1f}  "
-                            f"inc={corrected_direction.free_inc:6.1f}  "
-                            f"mad={corrected_direction.free_mad:5.1f}\n"
-                        )
-                    dev_anchored = angle_between_vectors(
-                        direction.anchored_specimen_frame, corrected_direction.anchored_specimen_frame)
-                    dev_free = angle_between_vectors(
-                        direction.free_specimen_frame, corrected_direction.free_specimen_frame)
-                    if dev_anchored is not None:
-                        res.write(f" deviation from anisotropy (anchored): {dev_anchored:5.1f} deg\n")
-                    if dev_free is not None:
-                        res.write(f" deviation from anisotropy (free):     {dev_free:5.1f} deg\n")
-
-                if rf1 is not None:
-                    res.write(f" rf1 - rf2 : {rf1:5.2f}  {rf2:5.2f}\n")
-                if crm is not None:
-                    res.write("\n temp   mom.crm       temp   mom.2,6       temp   mom.crm\n")
-                    ks = list(range(n1, n2 + 1))
-                    k = n1
-                    while k <= n2:
-                        kkj = min(k + 2, n2)
-                        cols = []
-                        for j in range(k, kkj + 1):
-                            cols.append(f"{points[j-1].temp:4.0f}   {crm.values[j]:10.4E}")
-                        res.write("  " + "     ".join(cols) + "\n")
-                        k += 2
-                res.write(f"\n slope b= {fit.b:8.4f}\n")
-                if fit.sigma:
-                    res.write(f"\n sigma = {fit.sigma:7.4f}\n")
-                    res.write(f"\n linear correlation coefficient: {fit.ccr:9.5f}\n")
-                if crm is not None:
-                    res.write(f"\n crm max ={crm.crmmax:8.4f}    deltatrm={crm.dtrm:8.4f}\n")
-                res.write(
-                    f"\n{ech.id:<12}   f={fit.f:7.4f}    g={fit.g:7.4f}    q={fit.qq:7.4f}"
-                    f"    ccr={fit.ccr:8.5f}  h={fit.h:8.3f}"
-                    + (f"     % rcrm={crm.rcrm:7.3f}\n" if crm is not None else "\n")
-                )
-                if aniso_note:
-                    res.write(f"\n{aniso_note}")
-                res.write(
-                    "\nNum          t1   t2   N    f       g       q     mad   dang   Hlab"
-                    "     b       sb     sb/b     ccr      H      fcor  Hcorani  gamma     k     k_sse\n"
-                )
-                res.write(
-                    f"{ech.id:<12} {points[n1-1].temp:4.0f} {points[n2-1].temp:4.0f}  "
-                    f"{n2 - n1 + 1:2d}  {fit.f:6.3f}  {fit.g:6.3f}  {fit.qq:6.3f}  "
-                    f"{(direction.free_mad or 0.0):5.1f}  {(direction.dang or 0.0):5.1f}  "
-                    f"{hlab:5.1f}  {fit.b:7.4f}  {fit.sigma:6.4f}  "
-                    f"{(fit.sigma / fit.b if fit.b else 0.0):7.4f}  {fit.ccr:8.5f}  "
-                    f"{fit.h:6.2f}  "
-                    + (f"{fcor:6.3f}  {hcorani:6.2f}" if fcor is not None else "   -       -  ")
-                    + f"  {gamma:5.1f}  {curv0.k:7.4f}  {curv0.sse:7.5f}\n"
-                )
-                self._afficher(res.getvalue())
+                self._afficher(self._arai_fit_report(
+                    ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
+                    fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm))
 
                 # Meme traitement PmagPy/MagIC parallele que le batch
                 # review (compute_magic_paleointensity) - AJOUTE ici (pas
@@ -3350,6 +3557,8 @@ class STARpaleomagApp:
                         n_ptrm=(magic_result.n_ptrm if magic_result else None),
                         tensor=aniso_tensor, f1=rf1, f2=rf2,
                     )
+
+                self._offer_save_anchored_direction(ech, direction, points, n1, n2)
 
                 decision = self._console_input(
                     "Redo (r) / next sample (Enter): ", "")
@@ -3499,6 +3708,13 @@ class STARpaleomagApp:
             self._current_graphic = ("paleoint_review", sample_id)
             self._refresh_current_graphic()
 
+            # Tableau des pas NRM/TRM + controles pTRM : ce sont les
+            # MESURES (fonction deterministe des donnees brutes, aucune
+            # interpretation recalculee) - demande explicite utilisateur
+            # (details/tableau aussi en revue). Les statistiques restent
+            # celles STOCKEES ci-dessous, jamais recalculees.
+            self._afficher(f"\n{sample_id} : Tmin={tmin:g} Tmax={tmax:g} (stored)\n")
+            self._afficher(self._arai_step_tables(ech, points, checks, arno))
             self._afficher(_format_pmagint_row(sample_id, row))
 
             pause = self._console_input(
@@ -3724,63 +3940,29 @@ class STARpaleomagApp:
             self._current_graphic = ("paleoint_review", ech.id)
             self._refresh_current_graphic()
 
-            res = io.StringIO()
-            res.write(f"\n{ech.id} : Tmin={tmin} Tmax={tmax}\n")
-            if direction.anchored_dec is not None:
-                res.write(
-                    f" anchored direction: dec={direction.anchored_dec:6.1f}  "
-                    f"inc={direction.anchored_inc:6.1f}  mad={direction.anchored_mad:5.1f}\n"
-                )
-            if direction.free_dec is not None:
-                res.write(
-                    f" free direction:     dec={direction.free_dec:6.1f}  "
-                    f"inc={direction.free_inc:6.1f}  mad={direction.free_mad:5.1f}\n"
-                )
-            res.write(
-                f" f={fit.f:.3f}  g={fit.g:.3f}  q={fit.qq:.3f}  ccr={fit.ccr:.3f}  "
-                f"h={fit.h:.2f}  % rcrm={crm.rcrm:.1f}\n"
-            )
-            res.write(
-                f" Hlab={hlab:.1f}µT"
-                + (f"  fcor={fcor:.3f}  Hcorani={hcorani:.1f}µT" if fcor is not None else "")
-                + (f"  fcorCool={cooling:.3f}  HcorCool={h_final:.1f}µT" if cooling else "")
-                + f"  gamma={gamma:.1f}  k={curv0.k:.4f}\n"
-            )
-            if rf1 is not None:
-                res.write(f" rf1 - rf2 : {rf1:5.2f}  {rf2:5.2f}\n")
-            if aniso_note:
-                res.write(aniso_note)
-
-            # Directions AVANT/APRES correction d'anisotropie - meme
-            # demande explicite utilisateur que dans le dialogue Arai
-            # interactif ("afficher les directions... avant et apres
-            # correction d'anisotropie").
-            if aniso_tensor is not None:
-                corrected_direction = fit_arai_direction_corrected(
-                    points, n1, n2, ech, aniso_tensor, orientation=1)
-                res.write(" --- after anisotropy correction (tensor 'A0') ---\n")
-                if corrected_direction.anchored_dec is not None:
-                    res.write(
-                        f" anchored direction: dec={corrected_direction.anchored_dec:6.1f}  "
-                        f"inc={corrected_direction.anchored_inc:6.1f}  "
-                        f"mad={corrected_direction.anchored_mad:5.1f}\n"
-                    )
-                if corrected_direction.free_dec is not None:
-                    res.write(
-                        f" free direction:     dec={corrected_direction.free_dec:6.1f}  "
-                        f"inc={corrected_direction.free_inc:6.1f}  "
-                        f"mad={corrected_direction.free_mad:5.1f}\n"
-                    )
-                dev_anchored = angle_between_vectors(
-                    direction.anchored_specimen_frame, corrected_direction.anchored_specimen_frame)
-                dev_free = angle_between_vectors(
-                    direction.free_specimen_frame, corrected_direction.free_specimen_frame)
-                if dev_anchored is not None:
-                    res.write(f" deviation from anisotropy (anchored): {dev_anchored:5.1f} deg\n")
-                if dev_free is not None:
-                    res.write(f" deviation from anisotropy (free):     {dev_free:5.1f} deg\n")
-
-            self._afficher(res.getvalue())
+            # Tous les details, comme dans le dialogue Arai interactif -
+            # demande explicite utilisateur ("au cours des redo, est-ce
+            # possible de lister dans la fenetre tous les details, en
+            # particulier le tableau, et pas seulement les resultats") :
+            # tableau des pas NRM/TRM + controles pTRM, puis le rapport
+            # complet du calcul de pente (cercle de Paterson, directions
+            # ancree/libre avant/apres anisotropie, tableau CRM, statistiques
+            # de Coe, ligne de resultats) - memes fonctions que
+            # afficher_arai (voir _arai_step_tables/_arai_fit_report).
+            xpat2 = [p.xp for p in points[n1 - 1:n2]]
+            ypat2 = [p.yp for p in points[n1 - 1:n2]]
+            curv1 = arai_curvature(xpat2, ypat2)
+            self._afficher(f"\n{ech.id} : Tmin={tmin} Tmax={tmax}\n")
+            self._afficher(self._arai_step_tables(ech, points, checks, arno))
+            self._afficher(self._arai_fit_report(
+                ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
+                fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm))
+            if cooling:
+                # Facteur de refroidissement (fichier redo) - absent du
+                # rapport partage avec le dialogue interactif.
+                self._afficher(
+                    f" cooling rate correction: fcorCool={cooling:.3f}  "
+                    f"HcorCool={h_final:.1f}µT\n")
 
             # Second traitement, PARALLELE et INDEPENDANT du natif STARpaleomag_Py
             # ci-dessus : appelle le code PmagPy/MagIC reel (pmag.PintPars)
@@ -3816,6 +3998,8 @@ class STARpaleomagApp:
                     n_ptrm=(magic_result.n_ptrm if magic_result else None),
                     tensor=aniso_tensor, f1=rf1, f2=rf2,
                 )
+
+            self._offer_save_anchored_direction(ech, direction, points, n1, n2)
 
             # Pause avant de reafficher la liste numerotee - demande
             # explicite utilisateur ("could you put a pause before to
@@ -4464,8 +4648,17 @@ class STARpaleomagApp:
         last_char = self.text_area.get("end-2c", "end-1c")
         if last_char not in ("", "\n"):
             self.text_area.insert(tk.END, "\n")
+        # Reperes (marks Tk) plutot qu'un index fige : un clic sur un point
+        # d'un graphique pendant la saisie insere son information AU-DESSUS
+        # du prompt (voir _show_pick_info) sans decaler ni polluer le texte
+        # tape.
+        self.text_area.mark_set("prompt_start", "end-1c")
+        self.text_area.mark_gravity("prompt_start", tk.LEFT)
         self.text_area.insert(tk.END, prompt, "prompt")
-        start_index = self.text_area.index("end-1c")
+        self.text_area.mark_set("input_start", "end-1c")
+        self.text_area.mark_gravity("input_start", tk.LEFT)
+        self._console_input_active = True
+        start_index = "input_start"
         self.text_area.mark_set(tk.INSERT, tk.END)
         self.text_area.see(tk.END)
         self.text_area.focus_set()
@@ -4492,6 +4685,9 @@ class STARpaleomagApp:
         self.text_area.wait_variable(done)
         self.text_area.unbind("<Return>", ret_id)
         self.text_area.unbind("<Escape>", esc_id)
+        self._console_input_active = False
+        self.text_area.mark_unset("prompt_start")
+        self.text_area.mark_unset("input_start")
         self.text_area.see(tk.END)
         return outcome["value"]
 
@@ -5482,15 +5678,30 @@ class STARpaleomagApp:
             return
         use_auto = auto_s.strip().lower() == "y"
 
+        # Comparaison SANS puis AVEC la correction lineaire de l'evolution de
+        # capacite d'acquisition de TRM entre R et ZB (voir
+        # calcul._correct_trm_evolution) - demande explicite utilisateur
+        # ("faire le calcul d'anisotropie d'abord sans correction et ensuite
+        # avec la correction lineaire, et indiquer quel est le meilleur
+        # statistiquement avant une eventuelle sauvegarde"). Posee UNE fois
+        # pour le lot ; sans effet pour un specimen sans mesure ZB. Si
+        # acceptee, la substitution Z+ -> ZB ci-dessous n'a plus d'objet.
+        compare_evolution_s = self._console_input(
+            "If ZB exists: also compute with the linear\n"
+            "TRM-evolution correction (R -> ZB) and compare? Y/n: ", "Y")
+        if compare_evolution_s is None:
+            return
+        compare_evolution = compare_evolution_s.strip().lower() != "n"
+
         use_zb = False
-        if use_auto:
+        if use_auto and not compare_evolution:
             use_zb_s = self._console_input(
                 "Using ZB instead of R for a > +/- 5% evolution? y/N: ", "N")
             if use_zb_s is None:
                 return
             use_zb = use_zb_s.strip().lower() == "y"
 
-        done, skipped, declined = [], [], []
+        done, skipped, declined, saved_corrected = [], [], [], []
         for ech in self.selection:
             lines = [f"\n--- {ech.id}: {'automated ' if use_auto else ''}calcul of TRM or ARM anisotropy with 6 positions ---"]
             lines.append(
@@ -5586,10 +5797,12 @@ class STARpaleomagApp:
                     # explicite utilisateur ("mettre un warning lorsque le
                     # code ne correspond pas à la vraie direction
                     # enregistrée par l'échantillon... jamais à + de 45°").
+                    # En rouge (tag "warn", voir WARN_MARK) - demande
+                    # explicite utilisateur ("write the warning in red").
                     out.extend(
-                        f"!! WARNING {key} direction is {dev:.0f}° from the expected axis "
+                        f"{WARN_MARK}!! WARNING {key} direction is {dev:.0f}° from the expected axis "
                         f"for sample {ech.id} - likely mis-oriented in the oven (anisotropy alone "
-                        f"should never deviate a TRM by more than 45°)"
+                        f"should never deviate a TRM by more than 45°){WARN_MARK}"
                         for key, dev in res.misoriented_positions
                     )
                 out.append("NRM residual estimated from each pair (before averaging the 3):")
@@ -5613,12 +5826,29 @@ class STARpaleomagApp:
                     out.append(f"ZB check found - TRM evolution: {res.trm_evolution_pct:5.1f} %")
                     if res.zb_used:
                         out.append("  -> evolution exceeds 5%: Z+ replaced by the ZB control measurement.")
+                    if res.evolution_corrected:
+                        out.append(
+                            "  -> TRM acquisition capacity corrected linearly from R (1.000) to ZB "
+                            f"({1.0 + res.trm_evolution_pct / 100.0:.3f}); factors applied to the TRM: "
+                            + "  ".join(f"{k} {res.evolution_factors[k]:.3f}"
+                                        for k in ("Z+", "Z-", "X+", "X-", "Y+", "Y-"))
+                            + " - the tensor below is the corrected one.")
                 else:
                     out.append("No ZB control measurement found (no pTRM-check available).")
                 return out
 
             self._afficher("\n".join(lines + _position_diag_lines(result)) + "\n")
             lines = []
+            # Pause apres l'avertissement de position mal orientee, pour
+            # qu'il ne defile pas avant d'etre lu - demande explicite
+            # utilisateur ("even pause after the warning"). Echap = arreter
+            # le lot (meme convention que le prompt des numeros de ligne).
+            if result.misoriented_positions:
+                pause = self._console_input(
+                    f"[{ech.id}] Mis-oriented position warning - "
+                    "press Return to continue (Escape to stop): ", "")
+                if pause is None:
+                    break
 
             # Equivalent GUI de la question DESACTIVEE dans le Fortran
             # d'origine ("voulez-vous supprimer une des 6 mesures ?
@@ -5723,6 +5953,33 @@ class STARpaleomagApp:
             self._afficher("\n".join(lines) + "\n")
             lines = []
 
+            # --- Comparaison avec la correction lineaire de l'evolution R->ZB ---
+            alt = None
+            if compare_evolution:
+                alt = self._evolution_alternative(ech, result, pmagpy_result, _position_diag_lines)
+            if alt is not None:
+                choice = self._console_input(
+                    f"[{ech.id}] Save to .pmagani:\n"
+                    "1 = uncorrected, 2 = evolution-corrected,\n"
+                    f"n = do not save (recommended by default: {alt['recommended']}): ",
+                    str(alt["recommended"]))
+                if choice is None or choice.strip().lower() == "n":
+                    declined.append(ech.id)
+                    self._afficher(f"{ech.id}: not saved (declined).\n")
+                    continue
+                if choice.strip() == "2":
+                    result = alt["result"]
+                write_ani_tensors(
+                    ani_path, ech, result.all_tensors, positions=result.positions,
+                    trm_evolution_pct=result.trm_evolution_pct or 0.0,
+                    deviation_pct=result.deviation_pct,
+                    evolution_corrected=result.evolution_corrected,
+                )
+                done.append(ech.id)
+                if result.evolution_corrected:
+                    saved_corrected.append(ech.id)
+                continue
+
             # Pause TOUJOURS ici, quelle que soit `quality` - demande
             # explicite utilisateur ("is it possible to still pause at the
             # save to pmagani waiting for the validation by a return. The
@@ -5756,18 +6013,104 @@ class STARpaleomagApp:
                 ani_path, ech, result.all_tensors, positions=result.positions,
                 trm_evolution_pct=result.trm_evolution_pct or 0.0,
                 deviation_pct=result.deviation_pct,
+                evolution_corrected=result.evolution_corrected,
             )
             done.append(ech.id)
+            if result.evolution_corrected:
+                saved_corrected.append(ech.id)
 
         summary = (
             f"15 tensor variants (A0/A+/A-/A1/B1/A2/B2/A3/B3/A4/B4/A5/B5/A6/B6, "
             f"'A0' being the main one) written for {len(done)} sample(s) -> {ani_path}\n"
         )
+        if saved_corrected:
+            summary += (f"Saved with the linear TRM-evolution correction (R -> ZB): "
+                        f"{', '.join(saved_corrected)}\n")
         if skipped:
             summary += f"Skipped (6 positions not identified): {', '.join(skipped)}\n"
         if declined:
             summary += f"Not saved (anisotropy not satisfactory, declined): {', '.join(declined)}\n"
         self._afficher(summary)
+
+    def _evolution_alternative(self, ech, result, pmagpy_result, diag_lines):
+        """Calcule et AFFICHE le tenseur AVEC la correction lineaire de
+        l'evolution R->ZB, puis le compare au tenseur non corrige deja
+        affiche (`result`/`pmagpy_result`) - voir calcul.
+        _correct_trm_evolution. Retourne None si non applicable (pas de
+        ZB, correction indefinie), sinon {"result": AnisotropyComputation
+        corrige, "recommended": 1|2}.
+
+        Critere STATISTIQUE : la somme des carres des residus du
+        moindres-carres de Hext (S = (3n-6) * sigma^2, sigma = residu
+        PmagPy, 12 degres de liberte pour n=6) des DEUX tenseurs, calculee
+        sur les MEMES mesures (donnees appariees, donc PAS un test de
+        rapport de variances entre echantillons independants, tres
+        conservateur). La correction est un modele a UN parametre de plus
+        (l'evolution E) : test F emboite F = (S_non_corr - S_corr) /
+        (S_corr / 11), comparee a F(1, 11) a 5 %. Recommandation = tenseur
+        corrige SEULEMENT si le residu baisse significativement (parcimonie
+        : sinon le tenseur non corrige, plus simple) ; sigma, le test F de
+        Hext (F, F12, F23) et l'asymetrie native des paires sont affiches
+        en complement pour que l'utilisateur decide."""
+        result_c = compute_anisotropy_tensor(
+            ech, holder=self._arm_holder_background, positions=result.positions,
+            correct_evolution=True)
+        if result_c is None or not result_c.evolution_corrected:
+            return None
+        pm_c = compute_aarm_pmagpy(
+            result_c.positions, holder=self._arm_holder_background, n_pos=6,
+            nrm_mean=result_c.nrm_mean)
+        a0 = result_c.all_tensors[0]
+        a0.n_positions = 6
+        a0.sigma, a0.ftest, a0.ftest12, a0.ftest23 = (
+            pm_c.sigma, pm_c.f_test, pm_c.f12_test, pm_c.f23_test)
+        a0.f_crit, a0.quality = pm_c.f_crit, pm_c.quality
+
+        t = result_c.tensor
+        lines = ["", f"======== {ech.id}: WITH the linear TRM-evolution correction (R -> ZB) ========"]
+        lines.extend(diag_lines(result_c))
+        lines.append("-------- Tensor 'A0' (symmetric, corrected) --------")
+        lines.append(f"  {t.k11:10.3E}  {t.k12:10.3E}  {t.k13:10.3E}")
+        lines.append(f"  {t.k12:10.3E}  {t.k22:10.3E}  {t.k23:10.3E}")
+        lines.append(f"  {t.k13:10.3E}  {t.k23:10.3E}  {t.k33:10.3E}")
+        lines.append(format_aarm_pmagpy(ech.id, pm_c))
+
+        def fmt(v, f):
+            return "n.d" if v is None else format(v, f)
+        recommended = 1
+        verdict = "no statistical comparison possible (Hext residual not computable)"
+        if pmagpy_result.sigma and pm_c.sigma:
+            df = 12
+            s0, s1 = pmagpy_result.sigma ** 2 * df, pm_c.sigma ** 2 * df
+            if s1 >= s0:
+                verdict = "the correction does NOT reduce the residual: the uncorrected tensor is recommended"
+            else:
+                f_nested = (s0 - s1) / (s1 / (df - 1))
+                try:
+                    from scipy.stats import f as f_dist
+                    p_value = float(f_dist.sf(f_nested, 1, df - 1))
+                except Exception:
+                    p_value = 0.05 if f_nested > 4.84 else 0.5
+                if p_value < 0.05:
+                    recommended = 2
+                    verdict = (f"CORRECTED is significantly better (residual reduced by "
+                               f"{100.0 * (1.0 - s1 / s0):.0f} %, nested F(1,{df - 1}) = {f_nested:.2f}, "
+                               f"p = {p_value:.3f})")
+                else:
+                    verdict = (f"residual reduced by {100.0 * (1.0 - s1 / s0):.0f} % but NOT significantly "
+                               f"(nested F(1,{df - 1}) = {f_nested:.2f}, p = {p_value:.2f}): "
+                               f"the simpler uncorrected tensor is recommended")
+        lines.append("")
+        lines.append("-------- Comparison: uncorrected vs linear-evolution correction --------")
+        lines.append(f"  measured TRM evolution R->ZB : {result.trm_evolution_pct:+.1f} %")
+        lines.append("                          uncorrected   corrected")
+        lines.append(f"  Hext residual sigma   : {fmt(pmagpy_result.sigma, '11.3e'):>11}   {fmt(pm_c.sigma, '.3e'):>9}   (lower = better)")
+        lines.append(f"  Hext F                : {fmt(pmagpy_result.f_test, '11.2f'):>11}   {fmt(pm_c.f_test, '.2f'):>9}   (higher = better)")
+        lines.append(f"  Hext F12 / F23        : {fmt(pmagpy_result.f12_test, '5.2f')} / {fmt(pmagpy_result.f23_test, '5.2f')}   {fmt(pm_c.f12_test, '.2f')} / {fmt(pm_c.f23_test, '.2f')}")
+        lines.append(f"  pair asymmetry (%)    : {result.deviation_pct:11.1f}   {result_c.deviation_pct:9.1f}   (lower = better)")
+        lines.append(f"  verdict: {verdict}")
+        self._afficher("\n".join(lines) + "\n")
+        return {"result": result_c, "recommended": recommended}
 
     def ouvrir_anisotropy_pmagpy_dialog(self):
         """Menu "Anisotropy PmagPy..." - PAS dans le Fortran, demande
