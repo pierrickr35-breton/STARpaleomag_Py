@@ -8,7 +8,7 @@ software... So I need the possibility to archive new data acquired in
 the legacy files. I need also to upload those acquire with the JR6
 magnetometer").
 
-Deux sources, meme logique de fusion :
+Trois sources, meme logique de fusion :
 - `parse_legacy_new_measurements` : nouvelle acquisition dans l'ancien
   format Rennes ("Id:"/mesures, 1/2/3 lignes d'entete) - reutilise
   testlect.read_ren_file (deja tolerant a ces variantes).
@@ -16,6 +16,10 @@ Deux sources, meme logique de fusion :
   parsing de reference/ImportJR6/ImportJR6data.f95 (branches
   `importinoldren`/`importinoldtxt`, PAS `createnewren` - cod2='=' pour
   un pas "AD", pas 'T').
+- `parse_minispin_file` : fichier Minispin brut (CSV) - port de
+  reference/Import_Minispin.f95 (`importinoldren`) - demande explicite
+  utilisateur ("archive new data as for the JR6 but from an other
+  instrument (minispin)").
 
 ECART DELIBERE par rapport a reference/ImportJR6/importinpmagren.f
 (confirme par l'utilisateur, "we assume that data will be archived only
@@ -44,7 +48,7 @@ correspondant aux nouvelles mesures sont effectivement inserees. Une
 sauvegarde `.bak` est ecrite avant toute modification, une seule fois."""
 
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from testlect import Measurement, Pmag, _prmag_kv_line, read_ren_file, read_prmag_file
 from convert_ren_to_r import _measurement_rows
@@ -121,6 +125,70 @@ def parse_jr6_file(path: str, encoding: str = "latin-1") -> Dict[str, List[Measu
                 x=x * r, y=y * r, z=z * r, q=0, ins="J6", s=0.0,
             )
             by_specimen.setdefault(specimen, []).append(meas)
+    return by_specimen
+
+
+def parse_minispin_file(path: str, encoding: str = "latin-1") -> Dict[str, List[Measurement]]:
+    """Parse un fichier Minispin brut (CSV exporte par le logiciel
+    d'acquisition - voir Miriam_2026/test_Magic/BAT51/Minispin1.csv) en
+    dict specimen -> liste de Measurement - demande explicite
+    utilisateur ("archive new data as for the JR6 but from an other
+    instrument (minispin)"), port du parsing de reference/
+    Import_Minispin.f95 (`importinoldren`, PAS `createnewren`).
+
+    4 premieres lignes = en-tete fixe ("Name,Measurement,...", ligne
+    vide, "Units,Am^2", ligne vide) - l'unite (colonne 7-8 de la 3e
+    ligne) determine l'echelle x/y/z, meme convention que le Fortran
+    (`codeunit=="Am"` -> valeurs telles quelles ; sinon *1e-5). Ensuite,
+    chaque bloc de specimen commence par une ligne SANS virgule (le nom,
+    normalise comme le Fortran : espaces -> "_", minuscules -> majuscules
+    - `.upper()` fait exactement ce que boucle le Fortran caractere par
+    caractere) suivie de ses lignes de mesure (avec virgules).
+
+    cod1/cod2 sont lus DIRECTEMENT dans la derniere colonne ("Notes",
+    ex. "N0"/"D="/"X+"/"Y-"/"Z+"...) plutot que redevines depuis la
+    sequence des pas comme le fait le Fortran quand ce champ est absent
+    (branche `choix=='n'`, PAS portee ici) - le fichier fourni les donne
+    toujours, demande explicite utilisateur ("the code1 and code2 are
+    also given at the end of the line"). `etape` = colonne "Value" telle
+    quelle (vide -> 0.0 pour NRM, pas de conversion). `q` = colonne
+    "NH factor" (int) - a la difference de parse_jr6_file (q=0, jamais
+    renseigne par le format JR6), le Fortran ecrit reellement cette
+    valeur pour Minispin (`write(15,301)...int(q)...`), reprise ici telle
+    quelle plutot que d'ignorer une donnee reelle disponible."""
+    with open(path, "r", encoding=encoding, errors="replace") as f:
+        lines = [raw.rstrip("\n") for raw in f]
+    if len(lines) < 4:
+        return {}
+    codeunit = lines[2][6:8] if len(lines[2]) >= 8 else ""
+    scale = 1.0 if codeunit == "Am" else 1.0e-5
+
+    by_specimen: Dict[str, List[Measurement]] = {}
+    specimen: Optional[str] = None
+    for line in lines[4:]:
+        if "," not in line:
+            name = line.strip()
+            specimen = name.upper().replace(" ", "_") if name else None
+            continue
+        if specimen is None:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 11:
+            continue
+        code = parts[10]
+        if len(code) < 2:
+            continue
+        try:
+            etape = float(parts[2]) if parts[2] else 0.0
+            x, y, z = float(parts[3]) * scale, float(parts[4]) * scale, float(parts[5]) * scale
+            q = int(round(float(parts[9]))) if parts[9] else 0
+        except ValueError:
+            continue
+        meas = Measurement(
+            etape=etape, cod1=code[0], cod2=code[1],
+            x=x, y=y, z=z, q=q, ins="MI", s=0.0,
+        )
+        by_specimen.setdefault(specimen, []).append(meas)
     return by_specimen
 
 

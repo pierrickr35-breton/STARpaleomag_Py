@@ -1219,6 +1219,13 @@ _INSTRUMENT_CODES = {
     "J?": ("Agico Spinner", ""),
     "J5": ("Agico Spinner Jr5", ""),
     "J6": ("Agico Spinner Jr6", ""),
+    # "MI" : Minispin (import_new_data.parse_minispin_file) - demande
+    # explicite utilisateur ("archive new data ... from an other
+    # instrument (minispin)"). Enregistre explicitement pour ne PAS
+    # tomber dans le repli generique "M*" -> "Molspin spinner" juste en
+    # dessous (un piege reel ici : Minispin et Molspin sont deux
+    # instruments differents, tous deux commencant par "M").
+    "MI": ("Minispin", ""),
 }
 
 

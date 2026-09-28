@@ -13,7 +13,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from testlect import read_ren_file, read_prmag_file
 from convert_legacy_ren import convert_legacy_auto
 from complete_sample_info import complete_site_info, complete_specimen_info, complete_sample_height
-from import_new_data import parse_jr6_file, parse_legacy_new_measurements, archive_new_measurements
+from import_new_data import (
+    parse_jr6_file, parse_legacy_new_measurements, parse_minispin_file, archive_new_measurements,
+)
 from convert_ren_to_r import convert_file as convert_ren_to_r_file
 from convert_magic_to_r import convert_magic_file, scan_dip_sign
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
@@ -1562,10 +1564,12 @@ class STARpaleomagApp:
         the .prmag file, it is possible that some new data will be
         acquire on the magnetometer in the lab... I need the possibility
         to archive new data acquired in the legacy files. I need also to
-        upload those acquire with the JR6 magnetometer") - voir
-        import_new_data.py pour le detail exact du format JR6 et de la
-        logique de fusion/deduplication (port de
-        reference/ImportJR6/ImportJR6data.f95 et importinpmagren.f).
+        upload those acquire with the JR6 magnetometer", puis "archive
+        new data as for the JR6 but from an other instrument
+        (minispin)") - voir import_new_data.py pour le detail exact des
+        formats JR6/Minispin et de la logique de fusion/deduplication
+        (port de reference/ImportJR6/ImportJR6data.f95, importinpmagren.f
+        et reference/Import_Minispin.f95).
 
         Un specimen de la nouvelle acquisition SANS correspondance dans
         le .prmag est ECARTE et journalise, PAS cree - demande explicite
@@ -1576,12 +1580,12 @@ class STARpaleomagApp:
         fichiers source a la fois (fusionnes avant l'archivage)."""
         self.text_area.insert(tk.END, "\n--- Archive new lab data (Escape to cancel) ---\n", "prompt")
         source = self._console_input(
-            "Source format: legacy Rennes file(s) (r) / JR6 file(s) (j): ", "r")
+            "Source format: legacy Rennes file(s) (r) / JR6 file(s) (j) / Minispin file(s) (m): ", "r")
         if source is None:
             return
         source = (source.strip().lower() or "r")[:1]
-        if source not in ("r", "j"):
-            self._showerror("Error", "Must be 'r' (legacy Rennes) or 'j' (JR6).")
+        if source not in ("r", "j", "m"):
+            self._showerror("Error", "Must be 'r' (legacy Rennes), 'j' (JR6) or 'm' (Minispin).")
             return
 
         prmag_path = filedialog.askopenfilename(
@@ -1596,15 +1600,20 @@ class STARpaleomagApp:
                 title="Select one or more legacy Rennes file(s) with the new data",
                 filetypes=[("REN/Text", "*.ren *.txt"), ("All files", "*.*")],
             )
-        else:
+        elif source == "j":
             source_paths = filedialog.askopenfilenames(
                 title="Select one or more JR6 file(s) with the new data",
                 filetypes=[("JR6", "*.jr6 *.txt"), ("All files", "*.*")],
             )
+        else:
+            source_paths = filedialog.askopenfilenames(
+                title="Select one or more Minispin file(s) with the new data",
+                filetypes=[("Minispin CSV", "*.csv *.txt"), ("All files", "*.*")],
+            )
         if not source_paths:
             return
 
-        parser = parse_legacy_new_measurements if source == "r" else parse_jr6_file
+        parser = {"r": parse_legacy_new_measurements, "j": parse_jr6_file, "m": parse_minispin_file}[source]
         new_by_specimen = {}
         try:
             for path in source_paths:
