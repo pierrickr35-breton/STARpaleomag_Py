@@ -720,6 +720,10 @@
         <div class="label">export results to Stereo_Py…</div>
         <div class="desc">Writes two files, in two <em>different</em> formats, both directly usable by StereoUtils_Py rather than a generic text dump: a "Project" file — the saved fits, grouped into a "layer" per site (see StereoUtils_Py's own guide, Project menu, for why that grouping is worth having rather than one flat list) — loadable as-is via StereoUtils_Py's own <code>Project → Load Project…</code>. A site's layer lets "Fisher Project" recompute that site's mean directly from these specimen directions, and — once plotted and exported to SVG — becomes its own named, independently toggleable layer in Illustrator/Inkscape, useful for composing a final stereonet figure out of many overlaid sites. A companion <code>_poles</code> file carries the same site means as VGPs (with their dp/dm confidence ellipse) in the "Data input" format expected by <code>Plot VGPs on Map</code> — a pole isn't a local direction, so it needs its own file and format, not the Project one.</div>
       </div>
+      <div class="item">
+        <div class="label">create KML file from prmag… <span class="badge-new">new</span></div>
+        <div class="desc">Writes a Google Earth <code>.kml</code> with one placemark per site of the whole loaded <code>.prmag</code> (not just the current selection). Each placemark's balloon lists the number of cores, sampling date, bedding strike/dip, number of specimens demagnetized (AF, thermal or Thellier paleointensity, at least two steps), lithology, geologic type, age and location. Sites without a latitude/longitude are skipped and reported.</div>
+      </div>
       <div class="item" id="pmagfile-quit">
         <div class="label">Quit STARpaleomag_Py <span class="shortcut">Cmd+Ctrl+X</span></div>
         <div class="desc">Closes the application.</div>
@@ -799,12 +803,16 @@
         <div class="label">Select results… <span class="shortcut">Cmd+Ctrl+R</span></div>
         <div class="desc">Loads results <strong>from the <code>.r</code> file</strong> (not the in-memory selection) in three modes: <em>Data</em> (individual results), <em>mean</em> (site means) or <em>site</em> (mean + its components), each with an optional filter by magnetization component (A/B/C…) — leaving that prompt blank now selects <strong>all</strong> components, the same as the site/type filters above it (it used to default to component <code>A</code> only, and typing <code>*</code> was needed for "all"). The <em>mean</em>/<em>site</em> mode requires the current orientation to match the one under which the mean was saved — otherwise an explicit message is shown.</div>
       </div>
+      <div class="item">
+        <div class="label">Select results by site… <span class="badge-new">new</span></div>
+        <div class="desc">Same <em>site</em> mode as <code>Select results…</code> above (the mean plus the individual results it combines), but the site name is picked from a scrolling list — built from the sites of the specimens currently loaded <em>and</em> from every site mean already archived in the <code>.pmagres</code> file, so a site kept only as a mean (no raw data loaded) still shows up — instead of typed by hand. Same optional component filter, and the same orientation-mismatch message if the mean was saved under a different orientation.</div>
+      </div>
       <p style="color:var(--ink-soft); font-size:0.95rem; max-width:70ch; margin-top:-0.4rem;">
         <strong style="color:var(--ink);">Mean vs. site mode, and why it matters for export.</strong> On a well-organized file, prefer <em>site</em> mode over <em>mean</em> mode: it loads the mean <em>together with</em> the individual line/plane results actually combined into it, so what you see (and what gets exported) is exactly the set of lines/planes the mean was computed from — nothing assumed. <em>Mean</em> mode alone still works, including for the <code>specimens</code> list on MagIC export: each combined result is tracked by an internal per-specimen anti-collision code (e.g. <code>96CC0301B_a</code>), and the specimen name is recovered from that code's own naming convention even when the individual results aren't loaded. That fallback is reliable for a well-organized file, but on an old legacy file — renamed sites, specimens split or merged across campaigns, a <code>.pmagres</code> assembled from more than one source — it's worth the extra step of loading <em>site</em> mode when you can, so the composition of the mean is never left to inference.
       </p>
       <div class="item">
         <div class="label">List results <span class="shortcut">Cmd+Ctrl+L</span></div>
-        <div class="desc">Table of saved fits, with dec/inc <strong>recomputed in the current orientation</strong> on every display (never frozen in the specimen frame).</div>
+        <div class="desc">Table of saved fits, with dec/inc <strong>recomputed in the current orientation</strong> on every display (never frozen in the specimen frame). Site means ("mean:") are shown in a separate, compact table right after the specimen fits — site, component, line/plane count, dec/inc, a95, k, VGP and dp/dm — without the specimen list that used to make this table hard to read; that list is still archived and used elsewhere (e.g. by "Select results..." site mode), just not printed here. Numbering stays the same as the specimen table above it (the numbers "Delete results..." expects), so a mean's number isn't necessarily consecutive with its neighbors when specimens and means are mixed.</div>
       </div>
       <div class="item">
         <div class="label">Init results <span class="shortcut">Cmd+Ctrl+I</span></div>

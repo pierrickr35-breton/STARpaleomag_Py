@@ -134,6 +134,7 @@ from magic_export import (
 )
 from anisotropy_magic import compute_aarm_pmagpy, format_aarm_pmagpy
 from export_stereo import export_stereo_project
+from export_kml import export_kml
 from detailed_export import export_detailed_txt
 from field_notes import (
     parse_orientation_file,
@@ -553,6 +554,8 @@ class STARpaleomagApp:
                                command=self._menu_cmd("pmagfile-textexport", self.ouvrir_export_detailed_dialog))
         file_menu.add_command(label="export results to Stereo_Py...",
                                command=self._menu_cmd("pmagfile-textexport", self.ouvrir_export_stereo_dialog))
+        file_menu.add_command(label="create KML file from prmag...",
+                               command=self._menu_cmd("pmagfile-textexport", self.ouvrir_export_kml_dialog))
         file_menu.add_separator()
         file_menu.add_command(label=self._labeled("Quit STARpaleomag_Py", "starend"),
                                command=self._menu_cmd("pmagfile-quit", self.root.quit))
@@ -605,6 +608,8 @@ class STARpaleomagApp:
         results_menu = tk.Menu(menubar, tearoff=0)
         results_menu.add_command(label=self._labeled("Select results...", "selres"),
                                   command=self._menu_cmd("results-manage", self.ouvrir_selres_dialog))
+        results_menu.add_command(label="Select results by site...",
+                                  command=self._menu_cmd("results-manage", self.ouvrir_select_results_by_site_dialog))
         results_menu.add_command(label=self._labeled("List results", "lisres"),
                                   command=self._menu_cmd("results-manage", self.lister_resultats))
         results_menu.add_command(label=self._labeled("Init results", "initres"),
@@ -2339,7 +2344,8 @@ class STARpaleomagApp:
         preview_rows = build_site_metadata_preview_rows(list(self.selection))
         missing_sites = [
             r for r in preview_rows
-            if not r["lat"] or not r["geologic_classes"] or not r["geologic_types"] or not r["lithologies"]
+            if (not r["lat"] or not r["geologic_classes"] or not r["geologic_types"]
+                or not r["lithologies"] or not r["location"] or not r["age"])
         ]
         preview_path = None
         if preview_rows:
@@ -2348,7 +2354,7 @@ class STARpaleomagApp:
                 "classification) for a valid contribution.\n"
                 f"Site metadata check: {len(preview_rows)} site(s) in this export, "
                 f"{len(missing_sites)} with at least one missing field\n"
-                "(lat/lon, geologic classes, geologic types, or lithology).\n"
+                "(lat/lon, geologic classes, geologic types, lithology, location, or age).\n"
             )
             export_preview = self._console_input(
                 "Export a site metadata table (site/lat/lon/geologic_classes/"
@@ -2956,6 +2962,33 @@ class STARpaleomagApp:
             f"({counts['directions']} direction(s), {counts['means']} mean(s), "
             f"{counts['vgp']} VGP(s)) - StereoUtils_Py: Project > Load Project...\n"
         )
+
+    def ouvrir_export_kml_dialog(self):
+        """Fichier Google Earth (.kml) des sites du .prmag charge (fichier
+        entier, pas la selection) - demande explicite utilisateur ("create
+        kml file from prmag", sous "export results to Stereo_Py") - voir
+        export_kml.export_kml."""
+        if not self.donnees:
+            self._showwarning("No data", "Load a .prmag or .ren file first.")
+            return
+        base = os.path.splitext(os.path.basename(self.data_file_path))[0] if self.data_file_path else "sites"
+        out_path = filedialog.asksaveasfilename(
+            title="Create KML file", defaultextension=".kml",
+            initialfile=base + ".kml",
+            initialdir=os.path.dirname(self.data_file_path) if self.data_file_path else None,
+            filetypes=[("KML", "*.kml"), ("All files", "*.*")],
+        )
+        if not out_path:
+            return
+        try:
+            counts = export_kml(self.donnees, out_path, doc_name=base)
+        except OSError as e:
+            self._showerror("Error", f"KML export failed:\n{e}")
+            return
+        msg = f"KML written to {out_path} ({counts['sites']} site(s))"
+        if counts["no_coords"]:
+            msg += f" - {counts['no_coords']} site(s) skipped: no latitude/longitude"
+        self._afficher(msg + "\n")
 
     # ------------------------------------------------------------------
     # Graphiques : Zijderveld (equivalent de `plotzijder`/`zijderplot`)
@@ -6587,6 +6620,50 @@ class STARpaleomagApp:
             "(use \"Select results...\" mode 'm' or 's' to load them into this session)\n"
         )
 
+    def _require_results_file(self) -> bool:
+        """Verifie que self.results_path existe et pointe vers un fichier
+        deja present sur disque - meme message d'erreur pour tous les
+        dialogues qui chargent des resultats DEPUIS le fichier .r (voir
+        ouvrir_selres_dialog/ouvrir_select_results_by_site_dialog)."""
+        if not self.results_path or not os.path.exists(self.results_path):
+            self._showwarning(
+                "No results file",
+                "No .r file found for the loaded data "
+                "(run a fit first, or load a .ren file)."
+                if not self.results_path else
+                f"{self.results_path} does not exist yet (no result archived).",
+            )
+            return False
+        return True
+
+    def _reload_results_if_stale(self):
+        """Si results_path a change sur le disque depuis la derniere lecture
+        (mtime) - typiquement une edition manuelle/externe du .pmagres,
+        ex. un dedoublonnage ou une correction faite hors de l'appli -
+        self.results et self._archived_ids sont vides/recalcules avant
+        de charger, plutot que d'accumuler par-dessus un etat perime
+        (des resultats deja retires du fichier resteraient sinon
+        visibles en memoire) - demande explicite utilisateur ("is it
+        possible to reload the file before any selection of results:
+        this file is usually edited by the user"). Comportement
+        d'accumulation NORMAL (selres, "the selection of results should
+        not initialize the previous list") inchange tant que le fichier
+        n'a pas change entre deux selections consecutives. Partage entre
+        ouvrir_selres_dialog et ouvrir_select_results_by_site_dialog -
+        suppose que _require_results_file() vient deja de confirmer que
+        self.results_path existe."""
+        current_mtime = os.path.getmtime(self.results_path)
+        if self._results_path_mtime is not None and current_mtime != self._results_path_mtime:
+            if self.results:
+                self._afficher(
+                    f"({self.results_path} was modified on disk since it was last read - "
+                    f"reloading from disk, {len(self.results)} previously loaded result(s) "
+                    "discarded)\n"
+                )
+            self.results = []
+            self._archived_ids = None
+        self._results_path_mtime = current_mtime
+
     def ouvrir_selres_dialog(self):
         """Equivalent GUI de `selres` (dataselect.f) : charge des resultats
         DEPUIS le fichier .r (equivalent filr) dans self.results. Trois
@@ -6610,39 +6687,9 @@ class STARpaleomagApp:
         different components of magnetizations within the same site, we
         may have two or three means by site... during the select results
         with m or s, we can also differentiate by component")."""
-        if not self.results_path or not os.path.exists(self.results_path):
-            self._showwarning(
-                "No results file",
-                "No .r file found for the loaded data "
-                "(run a fit first, or load a .ren file)."
-                if not self.results_path else
-                f"{self.results_path} does not exist yet (no result archived).",
-            )
+        if not self._require_results_file():
             return
-
-        # Si results_path a change sur le disque depuis la derniere lecture
-        # (mtime) - typiquement une edition manuelle/externe du .pmagres,
-        # ex. un dedoublonnage ou une correction faite hors de l'appli -
-        # self.results et self._archived_ids sont vides/recalcules avant
-        # de charger, plutot que d'accumuler par-dessus un etat perime
-        # (des resultats deja retires du fichier resteraient sinon
-        # visibles en memoire) - demande explicite utilisateur ("is it
-        # possible to reload the file before any selection of results:
-        # this file is usually edited by the user"). Comportement
-        # d'accumulation NORMAL (selres, "the selection of results should
-        # not initialize the previous list") inchange tant que le fichier
-        # n'a pas change entre deux "Select results..." consecutifs.
-        current_mtime = os.path.getmtime(self.results_path)
-        if self._results_path_mtime is not None and current_mtime != self._results_path_mtime:
-            if self.results:
-                self._afficher(
-                    f"({self.results_path} was modified on disk since it was last read - "
-                    f"reloading from disk, {len(self.results)} previously loaded result(s) "
-                    "discarded)\n"
-                )
-            self.results = []
-            self._archived_ids = None
-        self._results_path_mtime = current_mtime
+        self._reload_results_if_stale()
 
         self.text_area.insert(tk.END, "\n--- Select results (Escape to cancel) ---\n", "prompt")
         carselect = self._console_input(
@@ -6705,6 +6752,87 @@ class STARpaleomagApp:
         self._afficher(
             f"Selection: +{len(new_matches)} result(s) - "
             f"total {len(self.results)} result(s)\n")
+
+    def ouvrir_select_results_by_site_dialog(self):
+        """Pas dans le Fortran : choisit un site dans une liste deroulante
+        (meme widget que Pmag data > "Select site...", voir
+        _pick_from_list), puis charge les resultats INDIVIDUELS de ce
+        site (equivalent du mode 'd'/Data de ouvrir_selres_dialog, PAS du
+        mode 's'/site) - pour les rassembler dans self.results AVANT de
+        calculer une moyenne de site (Results > best dir Fisher.../Fisher
+        results), pas pour re-proposer le mode 's' deja disponible dans
+        "Select results..." - demande explicite utilisateur, corrigeant
+        un premier essai errone de ce menu qui rechargeait la moyenne en
+        plus des resultats individuels ("je voulais utiliser ce menu pour
+        selectionner les resultats individuels avant de calculer une
+        moyenne. pas repeter l'option s de select result").
+
+        Le site d'un resultat est celui du SPECIMEN correspondant
+        (calcul.site_of_result, via self.donnees) - PAS un filtre sur le
+        prefixe du nom du specimen (contrairement a `pattern` en mode 'd'
+        de ouvrir_selres_dialog/_load_data_results) : fiable meme si le
+        nom de specimen ne commence pas par le code du site, ou si le
+        site a ete renomme depuis (meme raison que le regroupement par
+        site avant l'archivage d'une moyenne, voir plus haut)."""
+        if not self._require_results_file():
+            return
+        self._reload_results_if_stale()
+
+        sites = sorted({p.magic_site.strip() for p in self.donnees if p.magic_site.strip()})
+        if not sites:
+            self._showwarning(
+                "No site", "No sample has a decoded MagIC site (see the « roche » line).")
+            return
+
+        self.text_area.insert(
+            tk.END, "\n--- Select individual results by site (Escape to cancel) ---\n", "prompt")
+        site = self._pick_from_list("Select site", sites, allow_all=False)
+        if site is None:
+            return
+        cat1 = self._console_input("Type (L/P/f/s, * = all): ", "*")
+        if cat1 is None:
+            return
+        component = self._console_input(
+            "Magnetization component (A/B/C..., blank = all): ", "")
+        if component is None:
+            return
+        cat1 = cat1.strip() or "*"
+        component = component.strip() or "*"
+
+        loaded = [
+            res for res in _iter_result_lines(self.results_path)
+            if res.id[:5] != "mean:"
+            and site_of_result(res, self.donnees) == site
+            and (cat1 == "*" or res.cat1 == cat1)
+            and (component == "*" or (res.component or "A").upper() == component.upper())
+        ]
+        if not loaded:
+            self._afficher(f"Site « {site} »: no individual result found.\n")
+            return
+
+        new_matches = [recompute_fit_geometry(r, self.donnees) for r in loaded]
+        self.results = self.results + new_matches
+        msg = (
+            f"Site « {site} »: +{len(new_matches)} individual result(s) - "
+            f"total {len(self.results)} result(s)\n"
+        )
+        # Plus d'un resultat pour le MEME specimen dans ce lot - demande
+        # explicite utilisateur ("after the selection, add a warning if
+        # there is more than one result for a specimen") : pas forcement
+        # une erreur (peut etre deux composantes de magnetisation
+        # distinctes, voir FitResult.component), mais compterait deux fois
+        # ce specimen dans la moyenne de Fisher si laisse tel quel - juste
+        # signale, rien n'est retire automatiquement.
+        by_specimen = {}
+        for r in new_matches:
+            by_specimen.setdefault(r.id, []).append(r)
+        duplicates = {sid: rs for sid, rs in by_specimen.items() if len(rs) > 1}
+        if duplicates:
+            msg += "!! WARNING more than one result for the same specimen:\n"
+            for sid, rs in sorted(duplicates.items()):
+                details = ", ".join(f"{r.cat1}{r.component or 'A'}" for r in rs)
+                msg += f"   {sid}: {len(rs)} results ({details})\n"
+        self._afficher(msg)
 
 
 if __name__ == "__main__":

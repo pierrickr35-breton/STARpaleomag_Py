@@ -60,6 +60,11 @@ class Measurement:
     # qualification b"). "g" par defaut (mesure normale) si la colonne
     # est absente/vide - voir datatools.remove_bad_quality_steps.
     quality: str = "g"
+    # Renseigne UNIQUEMENT sur une mesure SYNTHETIQUE reconstruite par
+    # symetrie (calcul.replace_position_by_symmetry) : etiquette de la
+    # position partenaire dont elle derive (ex. "X-" pour un X+ retire) -
+    # sert a ecrire "(-X-)" a la place de "X+" dans le texte du .pmagani.
+    reconstructed_from: str = ""
 
 
 @dataclass

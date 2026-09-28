@@ -517,6 +517,11 @@ def _derive_cod(row: Dict[str, str], letters: Dict[int, str], prev_cod2: str):
         if "LT-T-Z" in codes:
             return "D", "0", (temp - 273.0) if temp is not None else 0.0
         axis, sign = _atrm_axis_sign(_f(row, "treat_dc_field_phi"), _f(row, "treat_dc_field_theta"))
+        if "LT-PTRM-I" in codes and (axis, sign) == ("Z", "+"):
+            # Controle d'alteration de la position Z+ = mesure "ZB" native
+            # (voir magic_export.py et calcul._find_zb) : evite d'en faire un
+            # second Z+ "reel", qui ferait ignorer R comme substitut de Z+.
+            return "Z", "B", (temp - 273.0) if temp is not None else 0.0
         return axis, sign, (temp - 273.0) if temp is not None else 0.0
 
     if "LT-NO" in codes:

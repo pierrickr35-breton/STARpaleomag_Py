@@ -53,6 +53,14 @@ from complete_sample_info import _read_table_rows
 # ---------------------------------------------------------------------------
 
 _AGE_UNIT_PATTERNS = [
+    # Noms MagIC COMPLETS d'abord : une chaine importee de MagIC ecrit
+    # "665 # 20 AD Years Cal AD (+/-)" ; avec seul "Cal AD" reconnu, il
+    # restait "AD Years ... (+/-)" colle a l'ecart-type (age_sigma =
+    # "20 AD Years   (+/-)" dans sites.txt).
+    ("Years Cal AD (+/-)", "Years Cal AD (+/-)"),
+    ("Years Cal BP", "Years Cal BP"),
+    ("Years AD (+/-)", "Years AD (+/-)"),
+    ("Years BP", "Years BP"),
     ("Ga", "Ga"),
     ("Ma", "Ma"),
     ("ka", "ka"),
@@ -71,6 +79,10 @@ def parse_age(age_str: str) -> Tuple[str, str, str, str, str]:
         if token in s:
             age_unit = magic_unit
             s = s.replace(token, " ").strip()
+            if magic_unit.startswith("Years"):
+                # qualificatifs d'ere isoles ("20 AD") : deja portes par l'unite
+                s = re.sub(r"\b(?:AD|BP|Cal)\b", " ", s)
+                s = re.sub(r"\s+", " ", s).strip()
             break
 
     age = age_sigma = age_low = age_high = ""
@@ -246,7 +258,16 @@ def _apply_site_metadata(row: Dict[str, str], meta: Optional[Dict[str, str]]) ->
         if not row.get(field) and meta.get(field):
             row[field] = meta[field]
     if not row.get("age_low") and not row.get("age_high") and meta.get("age") and not row.get("age"):
-        row["age"] = meta["age"]
+        # `age` de la table complement = chaine combinee ("34 - 45 Ma") :
+        # a decouper comme celle d'un specimen (parse_age) - sinon le texte
+        # brut allait tel quel dans la colonne numerique `age` de sites.txt,
+        # avec age_low/age_high/age_unit vides (verifie sur
+        # complement_Tibet.txt : 100 sites concernes).
+        age, age_sigma, age_low, age_high, age_unit = parse_age(meta["age"])
+        for field, value in (("age", age), ("age_sigma", age_sigma), ("age_low", age_low),
+                             ("age_high", age_high), ("age_unit", age_unit)):
+            if value and not row.get(field):
+                row[field] = value
     # lat/lon - demande implicite (site sans specimen dont le VGP archive
     # est lui-meme a 0.0/0.0, voir build_sites_rows) : `_num()` valide
     # que la table fournit bien un nombre avant de l'utiliser, plutot que
@@ -490,8 +511,13 @@ def build_sites_rows(
     return rows
 
 
+# `location` et `age` : champs REQUIS au niveau site par le modele MagIC
+# (location, age ou age_low/age_high/age_unit) et pris en compte par
+# _apply_site_metadata - ils manquaient a l'apercu (signale par
+# l'utilisateur, "il manque beaucoup de colonnes").
 _SITE_METADATA_PREVIEW_HEADER = [
     "site", "lat", "lon", "geologic_classes", "geologic_types", "lithologies", "formation",
+    "location", "age",
 ]
 
 
@@ -501,7 +527,8 @@ def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict
     celles qui finiront dans sites.txt), avec les champs que MagIC exige
     au niveau site et que ce portage sait completer depuis un fichier
     complement (site/lat/lon/geologic_classes/geologic_types/
-    lithologies/formation) - "" quand non renseigne sur le specimen.
+    lithologies/formation/location/age) - "" quand non renseigne sur le
+    specimen.
 
     Sert de table d'apercu EXPORTABLE (voir
     app.ouvrir_export_magic_dialog) affichee/proposee AVANT le reste du
@@ -533,6 +560,8 @@ def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict
             "geologic_types": ech.magic_smt,
             "lithologies": ech.magic_li,
             "formation": ech.magic_fm,
+            "location": ech.magic_loc,
+            "age": ech.magic_age,
         })
     return rows
 
@@ -1497,6 +1526,17 @@ def _measurement_treatment(
             # positions +/-X,Y,Z.
             dc_field = ifield * 1.0e-6
             codes = "LT-T-I:LP-AN-TRM"
+            if m.cod1 == "Z" and m.cod2 == "B":
+                # ZB = repetition de la position Z+ en fin de sequence ATRM
+                # (controle d'alteration, voir calcul._find_zb). thellier_gui
+                # (calculate_anisotropy_tensors) ne reconnait un controle
+                # d'alteration ATRM QUE si la ligne porte LT-PTRM-I (avec
+                # LP-AN-TRM pour entrer dans le bloc ATRM, un champ non nul et
+                # phi/theta de la position revisitee - ici Z+ : 0/90) ; code
+                # LT-T-I, elle etait prise pour une seconde mesure Z+ (elle
+                # ecrasait meme R) et chaque specimen recevait "-W- Warning:
+                # no alteration check for specimen ...".
+                codes = "LT-PTRM-I:LP-AN-TRM"
     elif m.cod1 in ("L", "Q"):
         temp = etape + 273
         theta = 90.0

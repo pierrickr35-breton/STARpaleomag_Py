@@ -70,8 +70,14 @@ class FitResult:
     dec: float = 0.0       # declinaison/inclinaison BRUTES (repere echantillon,
     inc: float = 0.0       # non corrigees - comme res.dec/res.inc en Fortran)
     mad: float = 0.0       # maximum angular deviation (deg)
-    step_first: int = 0
-    step_last: int = 0
+    # float, PAS int - meme convention que Measurement.etape (temperature
+    # en degC ou champ AF en mT, genuinement fractionnaire, ex. 7.5 mT) ;
+    # `int` restait le type declare ici alors que fit_line/fit_plane
+    # l'affectent deja directement depuis `etape` (un float) - seule LA
+    # LECTURE d'un .pmagres arrondissait encore a l'entier (voir le
+    # correctif dans _parse_specimen_line/_parse_specimen_line_old_variant).
+    step_first: float = 0.0
+    step_last: float = 0.0
     tx: Tuple[float, float] = (0.0, 0.0)  # extremites du segment (pour tracer
     ty: Tuple[float, float] = (0.0, 0.0)  # la droite ajustee sur un Zijderveld)
     tz: Tuple[float, float] = (0.0, 0.0)
@@ -79,10 +85,11 @@ class FitResult:
     # equivalent id="mean: <site>", cat1='F', cat2='i' - Fisher). Inutilises
     # pour un resultat normal (L/P/f/s). par2_mean/par3_mean : memes
     # positions de colonnes que par2/par3 (step_first/step_last), mais des
-    # statistiques continues (pas des numeros d'etape entiers) - champs
-    # separes pour ne pas perdre leur precision decimale au passage par
-    # step_first/step_last (entiers, arrondis) lors d'un aller-retour
-    # lecture/ecriture. par4/par5 = 2e paire lat/long ou VGP selon le
+    # statistiques continues DE MOYENNE (ex. k moyen, pas un pas de
+    # mesure individuel) - champs separes par nature, pas pour eviter une
+    # perte de precision de step_first/step_last (qui sont eux-memes
+    # des float depuis le correctif ci-dessus, plus seulement des entiers
+    # arrondis). par4/par5 = 2e paire lat/long ou VGP selon le
     # contexte, `liste` = "codes:c1:c2:..." (les `c` des resultats
     # individuels combines dans la moyenne).
     lat: float = 0.0
@@ -1197,6 +1204,14 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
         _ORIENT_HEADER.get(orientation, _ORIENT_HEADER[1]),
         f"{_HEADER_MARK}     Sample          comp  cat  orig  demag   step1  stepn   nb   dec    inc   mad   ({tag}){_HEADER_MARK}",
     ]
+    # Moyennes de site dans un tableau SEPARE, compact (demande explicite
+    # utilisateur : "la lecture des moyennes est peu lisible... ce n'est pas
+    # la peine de donner la liste des specimens") : plus de ligne
+    # [codes:...] ni de lat/lon/e95/str/dip - la liste des specimens reste
+    # dans r.liste (archivee, utilisee ailleurs), juste plus affichee ici.
+    # Numerotation GLOBALE conservee (meme numero que dans self.results) -
+    # "Delete results..." designe les resultats par ces numeros.
+    mean_rows = []
     for i, r in enumerate(results, start=1):
         dec, inc = _correct_dec_inc(r, orientation)
         if r.id[:5] == "mean:":
@@ -1205,44 +1220,45 @@ def list_results(results: List[FitResult], orientation: int = 1, donnees=None) -
             # "L  2  P  5" (illisible une fois le vrai bug de lecture
             # corrige - voir _format_mean_line).
             if r.n_lines >= 0:
-                lp_txt = f"{r.n_lines}/{r.n_planes} (line/plane)"
+                lp_txt = f"{r.n_lines}/{r.n_planes}"
             else:
                 counts = _mean_line_plane_counts(r, results)
-                lp_txt = f"{counts[0]}/{counts[1]} (line/plane)" if counts else "?/? (line/plane)"
-            e95 = _e95(r.mad, inc)
+                lp_txt = f"{counts[0]}/{counts[1]}" if counts else "?/?"
             # dp/dm : la valeur ARCHIVEE (voir dp_dm_from_a95) si presente,
-            # sinon calculee a la volee depuis a95/inc (meme repli que e95
-            # ci-dessus) - couvre les moyennes archivees avant l'ajout de
-            # ces colonnes (voir _parse_mean_line, vgp_dp/vgp_dm=0.0 par
-            # defaut pour un ancien fichier).
+            # sinon calculee a la volee depuis a95/inc - couvre les moyennes
+            # archivees avant l'ajout de ces colonnes (voir
+            # _parse_mean_line, vgp_dp/vgp_dm=0.0 par defaut).
             dp_show, dm_show = (
                 (r.vgp_dp, r.vgp_dm) if (r.vgp_dp or r.vgp_dm) else dp_dm_from_a95(r.mad, inc)
             )
-            strdip = _mean_site_strike_dip(r, donnees)
-            strdip_txt = f"str={strdip[0]:5.1f} dip={strdip[1]:4.1f}" if strdip else "str=?  dip=?"
             # (Sa)/(IS)/(TC) AFFICHEE : celle de l'orientation ARCHIVEE
             # (r.par3_mean), PAS celle demandee en tete de tableau (voir
-            # _correct_dec_inc - une moyenne n'est jamais reprojetee, la
-            # valeur stockee est toujours celle affichee).
+            # _correct_dec_inc - une moyenne n'est jamais reprojetee).
             own_tag = _ORIENT_MODE_TAG.get(int(r.par3_mean), "?")
-            # Ligne separee pour [codes:...] (demande explicite utilisateur,
-            # "when you list the results with a mean... a linefeed might be
-            # useful") : `r.liste` porte un `c` par specimen combine dans la
-            # moyenne, sans borne de longueur - accolee en fin de la ligne
-            # de statistiques deja longue, elle rendait certaines moyennes
-            # (site a beaucoup de specimens) illisibles sur une seule ligne
-            # sans retour a la ligne, la fenetre Text ayant wrap="none".
-            lines.append(
-                f"{i:4d}: {r.id:<13s}[{r.component or 'A'}]    {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
-                f"  {lp_txt}  {r.nb:4d}  {dec:6.1f} {inc:6.1f} ({own_tag})  a95={r.mad:5.1f} e95={e95:5.1f}"
-                f"  k={r.tx[0]:8.1f}  lat={r.lat:9.5f} lon={r.rlong:9.5f}"
-                f"  VGP=({r.par4:6.1f},{r.par5:6.1f})  dp/dm=({dp_show:.1f}/{dm_show:.1f})  {strdip_txt}\n"
-                f"          [{r.liste}]"
-            )
+            mean_rows.append((
+                i, _mean_site_name(r.id), f"[{r.component or 'A'}]", lp_txt, r.nb,
+                f"{dec:6.1f}", f"{inc:6.1f} ({own_tag})", f"{r.mad:.1f}",
+                f"{r.tx[0]:.1f}", f"({r.par4:6.1f}, {r.par5:6.1f})", f"({dp_show:.1f}/{dm_show:.1f})",
+            ))
         else:
             lines.append(
                 f"{i:4d}: {r.id:<13s}[{r.component or 'A'}]    {r.cat1}{r.cat2}    {r.orig}     {r.demag:<3s}"
                 f"  {r.step_first:5.0f}  {r.step_last:5.0f}  {r.nb:4d}  {dec:6.1f} {inc:6.1f}  {r.mad:5.1f}"
+            )
+    if len(mean_rows) == len(results):
+        del lines[:2]  # aucun ajustement specimen : le tableau des specimens serait vide
+    if mean_rows:
+        w = max(len("site"), max(len(row[1]) for row in mean_rows))
+        if len(lines):
+            lines.append("")
+        lines.append(
+            f"{_HEADER_MARK}      {'site':<{w}s} comp (line/plane)     n     dec    inc         "
+            f"a95        k      VGP              dp/dm{_HEADER_MARK}"
+        )
+        for i, site, comp, lp, n, dec_s, inc_s, a95, k, vgp, dpdm in mean_rows:
+            lines.append(
+                f"{i:4d}: {site:<{w}s} {comp:<4s} {lp:^12s}  {n:4d}  {dec_s} {inc_s:<11s} "
+                f"{a95:>5s}  {k:>8s}   {vgp:<17s} {dpdm}"
             )
     return "\n".join(lines)
 
@@ -1611,7 +1627,17 @@ def _parse_specimen_line_old_variant(parts: List[str]) -> Optional[FitResult]:
         mad = float(parts[ptr]); ptr += 1
         return FitResult(
             id=parts[0].strip(),
-            step_first=int(round(float(parts[1]))), step_last=int(round(float(parts[2]))),
+            # float(), PAS int(round(...)) - bug reel corrige (signale par
+            # l'utilisateur sur un fichier .pmagres reel, VarSec_all_pmag_
+            # converted.pmagres, apres la correction Oersted->mT/10 d'un
+            # pas F : arrondir a l'entier ICI, a la LECTURE, detruisait
+            # silencieusement la partie decimale d'un pas AF legitimement
+            # fractionnaire (7.5 mT -> 8, 12.5 mT -> 12 par arrondi
+            # bancaire) des la prochaine ouverture du fichier - alors que
+            # l'ecriture (_fmt1) et fit_line/fit_plane traitent deja
+            # step_first/step_last comme des flottants reels, pas des
+            # entiers (voir Measurement.etape, meme convention).
+            step_first=float(parts[1]), step_last=float(parts[2]),
             cat1=lp, orig=ancr, demag=demag, numcomp=numcomp, nb=nb,
             dec=dec, inc=inc, mad=mad,
             component=_component_from_numcomp(numcomp),
@@ -1662,7 +1688,9 @@ def _parse_specimen_line(parts: List[str]) -> Optional[FitResult]:
                 component, c = parts[10].strip() or "A", parts[11].strip()
         return FitResult(
             id=parts[0].strip(),
-            step_first=int(round(float(parts[1]))), step_last=int(round(float(parts[2]))),
+            # float() - voir le meme correctif/la meme docstring dans
+            # _parse_specimen_line_old_variant ci-dessus.
+            step_first=float(parts[1]), step_last=float(parts[2]),
             cat1=parts[3].strip(), orig=_parse_anchor_token(parts[4]), demag=parts[5].strip(),
             numcomp=numcomp, nb=int(nb_s),
             dec=float(dec_s), inc=float(inc_s), mad=float(mad_s),
@@ -3367,7 +3395,10 @@ def replace_position_by_symmetry(
         new_vec = (new_vec[0] + holder.x[idx], new_vec[1] + holder.y[idx], new_vec[2] + holder.z[idx])
 
     original = positions[replace_key]
-    synthetic = replace(original, x=new_vec[0], y=new_vec[1], z=new_vec[2])
+    partner = positions[partner_key]
+    partner_label = partner_key if axis in ("X", "Y") else partner.cod1 + partner.cod2
+    synthetic = replace(
+        original, x=new_vec[0], y=new_vec[1], z=new_vec[2], reconstructed_from=partner_label)
     new_positions = dict(positions)
     new_positions[replace_key] = synthetic
     return new_positions
@@ -3971,10 +4002,33 @@ def create_empty_pmagani_if_missing(path: str) -> bool:
     return True
 
 
+def _position_step_labels(positions: Optional[Dict[str, Measurement]]) -> Optional[List[str]]:
+    """Etiquettes des 6 positions pour le texte "steps:" du .pmagani, dans
+    l'ordre X+ X- Y+ Y- Z+ Z- : le nom de la position (X/Y) ou cod1+cod2
+    de la mesure (Z, ex. "RE"), et "(-X-)"/"(-VE)" pour une position
+    RECONSTRUITE par symetrie a partir de son partenaire (voir
+    replace_position_by_symmetry) - demande explicite utilisateur ("quand
+    le tenseur est calcule apres le retrait d'une mesure, mettre steps:
+    (-X-) X- Y+ Y- RE VE")."""
+    if not positions:
+        return None
+    labels = []
+    for key in _ANI_POSITION_KEYS:
+        m = positions[key]
+        if m.reconstructed_from:
+            labels.append(f"(-{m.reconstructed_from})")
+        elif key[0] in ("X", "Y"):
+            labels.append(key)
+        else:
+            labels.append(m.cod1 + m.cod2)
+    return labels
+
+
 def _format_pmagani_line(
     specimen_id: str, tensor: AniTensor, etape: int,
     zplus_label: str, zminus_label: str, trm_evolution_pct: float, deviation_pct: float,
     info_text: Optional[str] = None, evolution_corrected: bool = False,
+    step_labels: Optional[List[str]] = None,
 ) -> str:
     """`info_text` : override total du texte informatif habituel (etape/
     positions/evolution TRM) - utilise par write_ani_tensors_from_magic
@@ -3985,7 +4039,7 @@ def _format_pmagani_line(
     if info_text is None:
         info_text = (
             f"TRM evo: {trm_evolution_pct:5.1f} deviation:{deviation_pct:5.1f}"
-            f"  steps: X+ X- Y+ Y- {zplus_label} {zminus_label}"
+            f"  steps: {' '.join(step_labels) if step_labels else f'X+ X- Y+ Y- {zplus_label} {zminus_label}'}"
         )
         if evolution_corrected:
             info_text += " - TRM evolution R->ZB corrected (linear)"
@@ -4223,7 +4277,9 @@ def write_ani_tensor(
     etape = positions["X+"].etape if positions else 0
     zplus_label = positions["Z+"].cod1 + positions["Z+"].cod2 if positions else ""
     zminus_label = positions["Z-"].cod1 + positions["Z-"].cod2 if positions else ""
-    line = _format_pmagani_line(ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct)
+    line = _format_pmagani_line(
+        ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct,
+        step_labels=_position_step_labels(positions))
     _insert_pmagani_line(path, line, is_mean=False)
 
 
@@ -4250,7 +4306,7 @@ def write_ani_tensors(
     for tensor in tensors:
         _insert_pmagani_line(path, _format_pmagani_line(
             ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct,
-            evolution_corrected=evolution_corrected),
+            evolution_corrected=evolution_corrected, step_labels=_position_step_labels(positions)),
             is_mean=False)
 
 
