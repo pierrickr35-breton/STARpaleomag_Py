@@ -21,6 +21,9 @@ from convert_magic_to_r import convert_magic_file, scan_dip_sign
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
 from convert_ipgp_to_r import convert_files as convert_ipgp_files
 from convert_montpellier_to_r import convert_file as convert_montpellier_file, DEFAULT_VOLUME_CM3 as _MONTPELLIER_DEFAULT_VOLUME_CM3
+from convert_jr6_paleo_to_r import (
+    convert_file as convert_jr6_paleo_file, read_jr6_paleo_file as read_jr6_paleo,
+)
 from irm import build_irm_figure, has_irm_data
 from selection import (
     select_samples,
@@ -535,6 +538,8 @@ class STARpaleomagApp:
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_ipgp_to_r_dialog))
         file_menu.add_command(label="Import Montpellier .montpellier to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_montpellier_to_r_dialog))
+        file_menu.add_command(label="Import JR6 paleointensity file to .prmag format...",
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_jr6_paleo_dialog))
         file_menu.add_separator()
         file_menu.add_command(label="Orientation: field notes orientation to prmag file...",
                                command=self._menu_cmd("pmagfile-orient", self.ouvrir_field_notes_dialog))
@@ -1983,6 +1988,88 @@ class STARpaleomagApp:
             "format - correct manually per specimen if the real volume differs; "
             "direction/fits are unaffected, only the displayed MAG(A/m)).\n"
             "site: \"n.d\" (this format has no site column either).\n"
+        )
+        self._load_data_file(output_path, announce=False)
+        self._afficher(msg)
+        self._showinfo("Conversion complete", msg)
+
+    def ouvrir_convert_jr6_paleo_dialog(self):
+        """Importe un fichier AGICO JR6 d'une experience de PALEOINTENSITE
+        (Thellier-Thellier : T = R en +Z, T+1 = V en -Z, T+2 = controle
+        pTRM) vers .prmag - demande explicite utilisateur. Voir
+        convert_jr6_paleo_to_r.py pour la classification des paliers et les
+        conventions. Le champ applique (uT) n'est pas dans le fichier JR6 :
+        demande des l'ouverture, puis "s'applique-t-il a tous les
+        echantillons ?" - sinon une valeur par specimen (defaut = la valeur
+        generale)."""
+        path_in = filedialog.askopenfilename(
+            title="Select a JR6 paleointensity file",
+            filetypes=[("JR6", "*.jr6 *.JR6 *.txt"), ("All files", "*.*")],
+        )
+        if not path_in:
+            return
+        try:
+            specimens = read_jr6_paleo(path_in)
+        except Exception as e:
+            self._showerror("Error", f"Cannot read JR6 file:\n{e}")
+            return
+        if not specimens:
+            self._showerror("Error", "No JR6 measurement lines found in this file.")
+            return
+        names = list(specimens)
+        self._afficher(f"JR6 file: {len(names)} specimen(s): {', '.join(names)}")
+
+        def ask_field(prompt, default):
+            s = self._console_input(prompt, default)
+            if s is None:
+                return None
+            try:
+                value = float(s.replace(",", "."))
+            except ValueError:
+                value = 0.0
+            if value <= 0.0:
+                self._showerror("Error", f"Not a valid applied field (uT): {s}")
+                return None
+            return value
+
+        field = ask_field("Applied laboratory field (uT): ", "50")
+        if field is None:
+            return
+        same = self._console_input(
+            f"Does {field:g} uT apply to all {len(names)} specimens? (Y/n): ", "y")
+        if same is None:
+            return
+        if same.strip().lower().startswith("n"):
+            fields = {}
+            for name in names:
+                value = ask_field(f"Applied field for {name} (uT): ", f"{field:g}")
+                if value is None:
+                    return
+                fields[name] = value
+        else:
+            fields = field
+
+        output_path = filedialog.asksaveasfilename(
+            title="Save converted .prmag as",
+            defaultextension=".prmag",
+            initialfile=os.path.splitext(os.path.basename(path_in))[0] + ".prmag",
+            initialdir=os.path.dirname(path_in),
+            filetypes=[("STARpaleomag_Py prmag", "*.prmag"), ("All files", "*.*")],
+        )
+        if not output_path:
+            return
+        try:
+            nb_sp, report = convert_jr6_paleo_file(path_in, output_path, fields)
+        except Exception as e:
+            self._showerror("Error", f"Conversion failed:\n{e}")
+            return
+        msg = (
+            f"Converted: {nb_sp} specimen(s) -> {output_path}\n\n"
+            + "\n".join(report)
+            + "\n\nSteps: NRM = N; T = R (+Z); T+1 = V (-Z); T+2, or a repeated "
+            "temperature = pTRM check (P). site is \"n.d\" (JR6 files carry no "
+            "site) and the volume is the nominal 10 cm3 of the JR6 pipeline "
+            "(the paleointensity ratio does not depend on it).\n"
         )
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
