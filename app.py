@@ -17,10 +17,12 @@ from import_new_data import (
     parse_jr6_file, parse_legacy_new_measurements, parse_minispin_file, archive_new_measurements,
 )
 from convert_ren_to_r import convert_file as convert_ren_to_r_file
-from convert_magic_to_r import convert_magic_file, scan_dip_sign
+from convert_magic_to_r import convert_magic_file, scan_dip_sign, scan_site_coordinates
+from magic_check import check_contribution, check_folder, report_path_for
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
 from convert_ipgp_to_r import convert_files as convert_ipgp_files
 from convert_montpellier_to_r import convert_file as convert_montpellier_file, DEFAULT_VOLUME_CM3 as _MONTPELLIER_DEFAULT_VOLUME_CM3
+from convert_pmd_to_r import convert_files as convert_pmd_files, list_pmd_files
 from convert_jr6_paleo_to_r import (
     convert_file as convert_jr6_paleo_file, read_jr6_paleo_file as read_jr6_paleo,
 )
@@ -278,6 +280,10 @@ HEADER_MARK = "\x01"
 # strong warning") pour signaler un signe de dip suspect a l'import MagIC
 # (voir convert_magic_to_r.scan_dip_sign / ouvrir_convert_magic_to_r_dialog).
 WARN_MARK = "\x02"
+# Erreurs des rapports de controle MagIC : rouge et gras, sans fond (voir
+# magic_check.Report.format, demande explicite utilisateur "write it in red
+# and bold").
+ERROR_MARK = "\x03"
 
 ORIENTATION_SHORTCUT_NAMES = {1: "selce", 2: "selis", 3: "selcp"}
 
@@ -411,6 +417,7 @@ class STARpaleomagApp:
         self.text_area.tag_configure("header", font=("Courier", 14, "bold"))
         self.text_area.tag_configure(
             "warn", foreground="#c0392b", background="#fdf1d0", font=("Courier", 14, "bold"))
+        self.text_area.tag_configure("error", foreground="#c0392b", font=("Courier", 14, "bold"))
         self.text_area.grid(row=0, column=0, sticky="nsew")
         text_yscroll.grid(row=0, column=1, sticky="ns")
         text_xscroll.grid(row=1, column=0, sticky="ew")
@@ -532,12 +539,18 @@ class STARpaleomagApp:
         file_menu.add_separator()
         file_menu.add_command(label="Import MagIC contribution to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_magic_to_r_dialog))
+        file_menu.add_command(label="Check a MagIC contribution (detailed report)...",
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_check_magic_dialog))
+        file_menu.add_command(label="Check all MagIC contributions in a folder...",
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_check_magic_folder_dialog))
         file_menu.add_command(label="Import Utrecht/PMAG2 .col to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_utrecht_to_r_dialog))
         file_menu.add_command(label="Import IPGP measurements/results to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_ipgp_to_r_dialog))
         file_menu.add_command(label="Import Montpellier .montpellier to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_montpellier_to_r_dialog))
+        file_menu.add_command(label="Import a folder of .pmd files to .prmag format...",
+                               command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_pmd_folder_dialog))
         file_menu.add_command(label="Import JR6 paleointensity file to .prmag format...",
                                command=self._menu_cmd("pmagfile-formats", self.ouvrir_convert_jr6_paleo_dialog))
         file_menu.add_separator()
@@ -1717,6 +1730,7 @@ class STARpaleomagApp:
         except Exception as e:
             self._showerror("Error", f"Could not read {path}:\n{e}")
             return
+        check_note = self._run_magic_check(path, os.path.splitext(path)[0] + ".prmag")
 
         dip_mode = "negate"
         dip_warning_note = ""
@@ -1782,11 +1796,46 @@ class STARpaleomagApp:
                     return
                 dip_mode = "utrecht" if choice.strip() == "2" else "raw"
 
+        # Reconstruction des sites par coordonnee - demande explicite
+        # utilisateur ("reconstruire les sites a partir des coordonnees
+        # lat-lon en regroupant tous les sites avec la meme coordonnee dans
+        # un seul site"), voir convert_magic_to_r.sites_from_coordinates.
+        # Proposee seulement si elle regrouperait quelque chose ; NON par
+        # defaut : une coupe stratigraphique a souvent UNE coordonnee pour
+        # tous ses niveaux (Lu et al. 2026 : 280 sites, une seule lat/lon),
+        # qu'il ne faut surtout pas fondre en un site.
+        sites_by_coords = False
+        try:
+            site_scan = scan_site_coordinates(path)
+        except Exception:
+            site_scan = None
+        if site_scan and site_scan["n_merged"]:
+            self._afficher(
+                f"{site_scan['n_sites']} site(s) in this contribution share only "
+                f"{site_scan['n_groups']} distinct lat/lon coordinate(s): "
+                f"{site_scan['n_merged']} coordinate(s) carry several sites (largest: "
+                f"{site_scan['largest']} sites"
+                + (f"; {site_scan['n_multi_location']} of them mix several locations"
+                   if site_scan["n_multi_location"] else "")
+                + f"). Coordinates mostly given with {site_scan['decimals']} decimal(s).\n"
+                "Only sites with the same geologic class and type are grouped"
+                + (f" ({site_scan['n_split_geology']} coordinate(s) carry sites of different "
+                   "class/type and give several sites)" if site_scan["n_split_geology"] else "")
+                + ".\n"
+                "Grouping them rebuilds the real sites of a contribution exported with one "
+                "site per sample (Utrecht/PMAG2), but would wrongly merge the levels of a "
+                "stratigraphic section sampled at a single coordinate.")
+            ans = self._console_input(
+                "Group the sites with the same lat/lon into one site? y/N: ", "N")
+            if ans is None:
+                return
+            sites_by_coords = ans.strip().lower() == "y"
+
         base, _ext = os.path.splitext(path)
         output_path = base + ".prmag"
         try:
             nb, report, nb_results, nb_means, nb_pint, redo_pint_path, nb_aniso = convert_magic_file(
-                path, output_path, dip_mode=dip_mode)
+                path, output_path, dip_mode=dip_mode, sites_by_coords=sites_by_coords)
         except Exception as e:
             self._showerror("Error", f"Conversion failed:\n{e}")
             return
@@ -1816,6 +1865,7 @@ class STARpaleomagApp:
         msg = (
             f"{dip_warning_note}{negate_note}{report}\n"
             f"Converted: {nb} specimen(s) -> {output_path}\n{results_msg}{pint_msg}{aniso_msg}"
+            f"{check_note}"
         )
         # Ouvre directement le .prmag converti - demande explicite
         # utilisateur ("ce serait bien d'ouvrir les fichiers convertis a
@@ -1823,7 +1873,76 @@ class STARpaleomagApp:
         # raison que ouvrir_convert_legacy_dialog.
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
-        self._showinfo("Conversion complete", msg)
+        self._showinfo("Conversion complete", msg.replace(ERROR_MARK, ""))
+
+    def _run_magic_check(self, path, output_path):
+        """Controle detaille de la contribution (voir magic_check.py) -
+        demande explicite utilisateur ("voir si il y a des doubles de sites,
+        samples et specimens... faire un rapport detaille sur les problemes
+        rencontres lors de l'importation des contributions"). Ecrit le
+        rapport complet a cote du .prmag et renvoie un resume (nombre de
+        problemes par gravite + intitules des erreurs) pour le message de
+        fin d'import. Ne bloque jamais l'import."""
+        try:
+            check = check_contribution(path)
+            report_path = report_path_for(path, output_path)
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(check.format())
+        except Exception as e:
+            return f"\nDetailed check not available: {e}\n"
+        counts = check.counts()
+        # Erreurs d'orientation d'abord, en rouge et gras dans la console
+        # (marqueurs retires pour la boite de dialogue de fin d'import).
+        error_items = sorted(
+            ((k, v) for k, v in check.issues.items() if k[0] == "ERROR"),
+            key=lambda kv: kv[0][1] not in ("Orientation", "Directions"))
+        errors = [f"{ERROR_MARK}  - [{v['count']}] {k[2]}{ERROR_MARK}" for k, v in error_items]
+        return (
+            f"\nDetailed check of the contribution: {counts['ERROR']} kind(s) of error, "
+            f"{counts['WARNING']} of warning, {counts['INFO']} note(s) -> {report_path}\n"
+            + ("\n".join(errors[:10]) + ("\n  ..." if len(errors) > 10 else "") + "\n" if errors else "")
+        )
+
+    def ouvrir_check_magic_dialog(self):
+        """Controle une contribution MagIC SANS l'importer et affiche le
+        rapport detaille dans la console (voir magic_check.py)."""
+        path = filedialog.askopenfilename(
+            title="Select the MagIC contribution file (.txt) to check",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            check = check_contribution(path)
+        except Exception as e:
+            self._showerror("Error", f"Check failed:\n{e}")
+            return
+        report_path = report_path_for(path)
+        try:
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(check.format())
+            saved = f"\nReport saved to {report_path}\n"
+        except OSError:
+            saved = ""
+        self._afficher(check.format(error_mark=ERROR_MARK) + saved)
+
+    def ouvrir_check_magic_folder_dialog(self):
+        """Controle toutes les contributions MagIC d'un dossier (voir
+        magic_check.check_folder) : un rapport par contribution et un
+        tableau recapitulatif dans <dossier>/MagIC_checks."""
+        folder = filedialog.askdirectory(title="Select the folder containing the MagIC contributions")
+        if not folder:
+            return
+        self._afficher(f"Checking the MagIC contributions in {folder} ...")
+        self.root.update_idletasks()
+        try:
+            _summary, lines = check_folder(folder)
+        except Exception as e:
+            self._showerror("Error", f"Check failed:\n{e}")
+            return
+        lines = [f"{ERROR_MARK}{line}{ERROR_MARK}" if re.search(r": [1-9]\d* error", line) else line
+                 for line in lines]
+        self._afficher("\n".join(lines) + "\n")
 
     def ouvrir_convert_utrecht_to_r_dialog(self):
         """Convertit un ou plusieurs fichiers .col d'Utrecht
@@ -1988,6 +2107,54 @@ class STARpaleomagApp:
             "format - correct manually per specimen if the real volume differs; "
             "direction/fits are unaffected, only the displayed MAG(A/m)).\n"
             "site: \"n.d\" (this format has no site column either).\n"
+        )
+        self._load_data_file(output_path, announce=False)
+        self._afficher(msg)
+        self._showinfo("Conversion complete", msg)
+
+    def ouvrir_convert_pmd_folder_dialog(self):
+        """Importe TOUT UN DOSSIER de fichiers .pmd (un fichier par specimen,
+        sous-dossiers compris) vers un seul .prmag - demande explicite
+        utilisateur ("ajouter une importation de donnees a partir de
+        fichiers .PMD et importer tout un dossier"). Voir
+        convert_pmd_to_r.py pour les conventions (verifiees sur les Dg/Ig/
+        Ds/Is des fichiers) et le traitement des paliers mesures plusieurs
+        fois : seule la derniere mesure est gardee par defaut, sinon tout
+        est garde et les mesures remplacees sont marquees quality 'b'."""
+        folder = filedialog.askdirectory(title="Select the folder containing the .pmd files")
+        if not folder:
+            return
+        paths = list_pmd_files(folder)
+        if not paths:
+            self._showerror("Error", f"No .pmd file found in this folder (sub-folders included):\n{folder}")
+            return
+        self._afficher(f"{len(paths)} .pmd file(s) found in {folder}")
+        keep_s = self._console_input(
+            "Steps measured several times: keep only the last measurement? "
+            "(n = keep all, earlier ones marked quality 'b') Y/n: ", "Y")
+        if keep_s is None:
+            return
+        keep_last = keep_s.strip().lower() != "n"
+        output_path = filedialog.asksaveasfilename(
+            title="Save converted .prmag as",
+            defaultextension=".prmag",
+            initialfile=os.path.basename(os.path.normpath(folder)) + ".prmag",
+            initialdir=folder,
+            filetypes=[("STARpaleomag_Py prmag", "*.prmag"), ("All files", "*.*")],
+        )
+        if not output_path:
+            return
+        try:
+            nb_sp, report = convert_pmd_files(paths, output_path, keep_last)
+        except Exception as e:
+            self._showerror("Error", f"Conversion failed:\n{e}")
+            return
+        msg = (
+            f"Converted: {nb_sp} specimen(s) -> {output_path}\n\n"
+            + "\n".join(report)
+            + "\n\nSpecimen = file name; site = the part of the name before the last \"-\" "
+            "(\"n.d\" without one). Orientation: azimuth = a + 90, dip = b, "
+            "bedding = s/d; x/y/z are the file's moments (Am2).\n"
         )
         self._load_data_file(output_path, announce=False)
         self._afficher(msg)
@@ -4689,9 +4856,9 @@ class STARpaleomagApp:
         l'empeche)."""
         if self.text_area.get("1.0", "end-1c").strip():
             self.text_area.insert(tk.END, "\n" + "-" * 60 + "\n")
-        mark_tags = {HEADER_MARK: "header", WARN_MARK: "warn"}
-        active_tag = {HEADER_MARK: False, WARN_MARK: False}
-        for part in re.split(f"([{HEADER_MARK}{WARN_MARK}])", text):
+        mark_tags = {HEADER_MARK: "header", WARN_MARK: "warn", ERROR_MARK: "error"}
+        active_tag = {HEADER_MARK: False, WARN_MARK: False, ERROR_MARK: False}
+        for part in re.split(f"([{HEADER_MARK}{WARN_MARK}{ERROR_MARK}])", text):
             if part in mark_tags:
                 active_tag[part] = not active_tag[part]
                 continue
@@ -4747,6 +4914,27 @@ class STARpaleomagApp:
             return None
         return step_min_val, step_max_val
 
+    def _focus_console_input(self):
+        """Donne le focus clavier a la console des qu'une question y est
+        posee - demande explicite utilisateur ("apres l'utilisation du menu
+        avec la souris, il est necessaire de clicker dans la fenetre texte
+        avant de pouvoir repondre a une question"). Sous macOS, une commande
+        lancee depuis la barre de menus s'execute AVANT que le menu natif ait
+        fini de se refermer : un simple focus_set() fait a ce moment est
+        perdu, et le focus reste ou il etait (souvent le graphique). D'ou
+        focus_force() (fenetre + console), repete apres 50 et 250 ms pour
+        passer apres la fermeture du menu - seulement tant que la question
+        attend sa reponse."""
+        def grab():
+            if not self._console_input_active:
+                return
+            self.root.focus_force()
+            self.text_area.focus_force()
+            self.text_area.mark_set(tk.INSERT, tk.END)
+        grab()
+        self.root.after(50, grab)
+        self.root.after(250, grab)
+
     def _console_input(self, prompt, default=""):
         """Lit une ligne tapee au clavier DANS la fenetre texte, comme une
         vraie console (equivalent du `write(*,...)` + `read(*,*)` du Fortran
@@ -4790,7 +4978,7 @@ class STARpaleomagApp:
         start_index = "input_start"
         self.text_area.mark_set(tk.INSERT, tk.END)
         self.text_area.see(tk.END)
-        self.text_area.focus_set()
+        self._focus_console_input()
 
         outcome = {"value": None}
         done = tk.BooleanVar(value=False)

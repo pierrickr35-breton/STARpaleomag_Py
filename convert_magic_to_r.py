@@ -32,6 +32,7 @@ echantillons archeologiques sans orientation de terrain, ex. tessons de
 poterie) : "n.d", memes conventions que convert_ren_to_r.py."""
 
 import argparse
+import collections
 import math
 import os
 import re
@@ -176,6 +177,165 @@ def _dir2cart(dec: Optional[float], inc: Optional[float], mag: Optional[float]):
     return x, y, z
 
 
+# Tolerances du controle de coherence magn_x/y/z <-> dir_dec/dir_inc/
+# magn_moment (voir _measurement_vector) : au-dela de l'arrondi habituel
+# des contributions (dec/inc a 0.1 deg, moment a 3 chiffres).
+_VECTOR_ANGLE_TOL_DEG = 1.0
+_VECTOR_MOMENT_TOL = 0.02
+
+# Volume MagIC (m3) au-dela duquel la valeur est tenue pour saisie en cm3
+# (voir _sample_header_block) : 1e-3 m3 = 1 litre, aucun specimen reel.
+_VOLUME_ABNORMAL_M3 = 1.0e-3
+
+
+def _measurement_vector(row: Dict[str, str]):
+    """x/y/z (Am2, repere specimen) d'une ligne de measurements.txt +
+    liste des incoherences relevees. Demande explicite utilisateur ("si
+    il y a deja magn_x, magn_y et magn_z, prendre ces valeurs, plutot que
+    de les recalculer avec magn_moment, dir_dec et dir_inc. Faire aussi la
+    verification que dir_dec et dir_inc et magn_moment sont bien derives
+    des trois composantes. J'ai trouve des erreurs dans la base de
+    donnees") : les trois composantes, quand elles sont TOUTES presentes,
+    sont la mesure d'origine et font foi ; dir_dec/dir_inc/magn_moment ne
+    servent plus que de repli (contributions sans magn_x/y/z) et de
+    controle, les ecarts etant journalises sans rien corriger."""
+    x, y, z = _f(row, "magn_x"), _f(row, "magn_y"), _f(row, "magn_z")
+    dec, inc, mag = _f(row, "dir_dec"), _f(row, "dir_inc"), _f(row, "magn_moment")
+    if x is None or y is None or z is None:
+        return _dir2cart(dec, inc, mag), []
+    issues = []
+    norm = math.sqrt(x * x + y * y + z * z)
+    if dec is not None and inc is not None and norm > 0.0:
+        dr, ir = math.radians(dec), math.radians(inc)
+        cos_a = (x * math.cos(ir) * math.cos(dr) + y * math.cos(ir) * math.sin(dr) + z * math.sin(ir)) / norm
+        if math.degrees(math.acos(max(-1.0, min(1.0, cos_a)))) > _VECTOR_ANGLE_TOL_DEG:
+            issues.append(
+                f"dir_dec/dir_inc more than {_VECTOR_ANGLE_TOL_DEG:g} deg away from the "
+                "magn_x/magn_y/magn_z direction (magn_x/y/z used)")
+    if mag is not None and abs(mag - norm) > _VECTOR_MOMENT_TOL * max(abs(mag), norm):
+        issues.append(
+            f"magn_moment differs by more than {100 * _VECTOR_MOMENT_TOL:g}% from "
+            "|magn_x, magn_y, magn_z| (magn_x/y/z used)")
+    return (x, y, z), issues
+
+
+def _clean_name(value: Optional[str]) -> str:
+    return (value or "").strip().strip('"').strip()
+
+
+def sites_from_coordinates(tables: Dict[str, List[Dict[str, str]]]) -> Tuple[Dict[str, str], List[Tuple[str, str, str, List[str]]]]:
+    """Regroupe en UN site tous les sites MagIC ayant exactement la meme
+    coordonnee lat/lon (texte tel qu'ecrit dans sites.txt, repli sur
+    samples.txt) - demande explicite utilisateur ("reconstruire les sites
+    a partir des coordonnees lat-lon en regroupant tous les sites avec la
+    meme coordonnee dans un seul site"). Vise les contributions exportees
+    "un echantillon = un site" (Utrecht/PMAG2), ou le vrai site n'existe
+    plus que par sa coordonnee GPS.
+
+    Nom du site regroupe : celui du site d'origine s'il est seul ; sinon
+    le prefixe commun des noms d'origine ("HO01.1", "HO01.2" -> "HO01")
+    s'il fait au moins 2 caracteres et n'est pris par aucun autre groupe ;
+    sinon "lat_lon" (suivi de la classe geologique si la meme coordonnee
+    porte plusieurs groupes). Les sites d'une meme coordonnee ne sont
+    regroupes que s'ils ont aussi la meme classe et le meme type
+    geologiques (geologic_classes/geologic_types de sites.txt, compares
+    sans tenir compte de la casse ni de l'ordre des termes) - demande
+    explicite utilisateur ("verifier aussi que les regroupements
+    respectent la classe geologique et le type") : une coulee et un
+    sediment preleves au meme point restent deux sites. Retourne ({site
+    d'origine: nouveau site}, [(nouveau site, lat, lon, [sites
+    d'origine], classe, type)]) - sites sans coordonnee laisses tels
+    quels (absents du dictionnaire)."""
+    def geology(value):
+        return ":".join(sorted({t.strip().lower() for t in _clean_name(value).split(":") if t.strip()}))
+
+    key_of: Dict[str, Tuple[str, str, str, str]] = {}
+    geology_of: Dict[str, Tuple[str, str]] = {}
+    for row in tables.get("sites", []):
+        name = row.get("site", "")
+        if name and name not in geology_of:
+            geology_of[name] = (geology(row.get("geologic_classes")), geology(row.get("geologic_types")))
+    for table in ("sites", "samples"):
+        for row in tables.get(table, []):
+            name = row.get("site", "")
+            lat, lon = _clean_name(row.get("lat")), _clean_name(row.get("lon"))
+            if name and lat and lon and name not in key_of:
+                key_of[name] = (lat, lon) + geology_of.get(name, ("", ""))
+
+    groups: Dict[Tuple[str, str, str, str], List[str]] = {}
+    for name, key in key_of.items():
+        groups.setdefault(key, []).append(name)
+    per_coordinate: Dict[Tuple[str, str], int] = {}
+    for key in groups:
+        per_coordinate[key[:2]] = per_coordinate.get(key[:2], 0) + 1
+
+    def prefix(names):
+        return os.path.commonprefix(sorted(_clean_name(n) for n in names)).rstrip(" .-_/")
+
+    prefixes = {coord: prefix(names) for coord, names in groups.items() if len(names) > 1}
+    taken: Dict[str, int] = {}
+    for coord, names in groups.items():
+        key = _clean_name(names[0]) if len(names) == 1 else prefixes[coord]
+        taken[key] = taken.get(key, 0) + 1
+
+    mapping: Dict[str, str] = {}
+    listing = []
+    for (lat, lon, classes, types), names in groups.items():
+        if len(names) == 1:
+            new = _clean_name(names[0])
+        else:
+            new = prefixes[(lat, lon, classes, types)]
+            if len(new) < 2 or taken.get(new, 0) > 1:
+                new = f"{lat}_{lon}"
+                if per_coordinate[(lat, lon)] > 1:
+                    new += "_" + (classes or "n.d").replace(":", "-").replace(" ", "-")
+        for name in names:
+            mapping[name] = new
+        listing.append((new, lat, lon, names, classes, types))
+    return mapping, listing
+
+
+def scan_site_coordinates(path: str) -> Dict[str, object]:
+    """Ce que donnerait sites_from_coordinates sur ce fichier, pour la
+    question posee avant l'import : nombre de sites, de groupes, de
+    regroupements de plusieurs "locations", et precision des coordonnees
+    (nombre de decimales le plus courant)."""
+    tables = parse_magic_contribution(path)
+    mapping, listing = sites_from_coordinates(tables)
+    location_of = {row.get("site", ""): row.get("location", "") for row in tables.get("sites", [])}
+    decimals: Dict[int, int] = {}
+    for _new, lat, lon, _names, _classes, _types in listing:
+        for value in (lat, lon):
+            n = len(value.split(".")[1]) if "." in value else 0
+            decimals[n] = decimals.get(n, 0) + 1
+    return {
+        "n_sites": len(mapping),
+        "n_groups": len(listing),
+        "n_merged": sum(1 for item in listing if len(item[3]) > 1),
+        "largest": max((len(item[3]) for item in listing), default=0),
+        "n_multi_location": sum(
+            1 for item in listing if len({location_of.get(n, "") for n in item[3]}) > 1),
+        "decimals": max(decimals, key=decimals.get) if decimals else None,
+        "n_split_geology": sum(
+            1 for n in collections.Counter((item[1], item[2]) for item in listing).values() if n > 1),
+    }
+
+
+def write_site_grouping(listing, path_out: str) -> Optional[str]:
+    """Table "nouveau site -> sites d'origine" a cote du .prmag, pour
+    pouvoir verifier chaque regroupement."""
+    merged = [item for item in listing if len(item[3]) > 1]
+    if not merged:
+        return None
+    path = os.path.splitext(path_out)[0] + "_sites_from_coordinates.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("new_site\tlat\tlon\tgeologic_classes\tgeologic_types\tn_sites\toriginal_sites\n")
+        for new, lat, lon, names, classes, types in sorted(merged, key=lambda item: item[0]):
+            f.write(f"{new}\t{lat}\t{lon}\t{classes or 'n.d'}\t{types or 'n.d'}\t{len(names)}\t"
+                    f"{', '.join(_clean_name(n) for n in names)}\n")
+    return path
+
+
 def _iso_from_magic_ts(ts: str) -> str:
     m = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", ts or "")
     return f"{m.group(1)}T{m.group(2)}" if m else "n.d"
@@ -292,9 +452,12 @@ _DIP_MODES = {
 
 def _sample_header_block(
     specimen: str, spec_row, sample_row, site_row, loc_row, dip_mode: str = "negate",
+    problems: Optional[list] = None, site_override: Optional[str] = None,
 ) -> str:
     sample_name = _s(spec_row, "sample") if spec_row else (sample_row.get("sample", "n.d") if sample_row else "n.d")
     site_name = _s(sample_row, "site") if sample_row else (site_row.get("site", "n.d") if site_row else "n.d")
+    if site_override:
+        site_name = site_override
     lat = _f(sample_row, "lat") if sample_row and sample_row.get("lat") else _f(site_row, "lat")
     lon = _f(sample_row, "lon") if sample_row and sample_row.get("lon") else _f(site_row, "lon")
     elevation = _f(site_row, "elevation")
@@ -358,7 +521,18 @@ def _sample_header_block(
     volume_raw = _f(spec_row, "volume") if spec_row else None
     weight_raw = _f(spec_row, "weight") if spec_row else None
     obs = "n.d"
-    if volume_raw is not None:
+    if volume_raw is not None and volume_raw > _VOLUME_ABNORMAL_M3:
+        # Demande explicite utilisateur ("lorsque le volume est anormal
+        # (exemple 10 m3 a la place de 10 cm3), corriger ce volume de
+        # 10^-6") : valeur saisie en cm3 dans une colonne en m3 - prise
+        # telle quelle comme des cm3, et signalee.
+        volume_field, mass_field = f"{volume_raw:.4f}", "n.d"
+        obs = "volume given in cm3 instead of m3 in MagIC - corrected"
+        if problems is not None:
+            problems.append((
+                f"abnormal specimen volume (> {_VOLUME_ABNORMAL_M3:g} m3) - read as cm3 "
+                "(corrected by 1e-6)", 1, specimen))
+    elif volume_raw is not None:
         volume_field, mass_field = f"{volume_raw * 1.0e6:.4f}", "n.d"
     elif weight_raw is not None:
         volume_field, mass_field = "n.d", f"{weight_raw * 1.0e3:.4f}"
@@ -658,12 +832,9 @@ def _measurement_rows(specimen: str, meas_rows: List[Dict[str, str]], problems: 
                 key = (row.get("method_codes", "") or "(empty method_codes)").strip()
                 unrecognized_codes[key] = unrecognized_codes.get(key, 0) + 1
 
-            dec = _f(row, "dir_dec")
-            inc = _f(row, "dir_inc")
-            mag = _f(row, "magn_moment")
-            x, y, z = _dir2cart(dec, inc, mag)
-            if x is None:
-                x, y, z = _f(row, "magn_x"), _f(row, "magn_y"), _f(row, "magn_z")
+            (x, y, z), vector_issues = _measurement_vector(row)
+            for issue in vector_issues:
+                problems.append((issue, 1, specimen))
 
             # _ac_field_t/_temp_k (repli meas_field_ac/meas_temp pour les
             # fichiers non conventionnels, voir leur docstring) reutilises
@@ -713,9 +884,14 @@ def _measurement_rows(specimen: str, meas_rows: List[Dict[str, str]], problems: 
 
 
 def convert_magic_file(
-    path_in: str, path_out: str, dip_mode: str = "negate",
+    path_in: str, path_out: str, dip_mode: str = "negate", sites_by_coords: bool = False,
 ) -> Tuple[int, str, int, int, int, Optional[str], int]:
+    """`sites_by_coords` : voir sites_from_coordinates - le nouveau site
+    remplace celui de la contribution dans le .prmag (les moyennes de site
+    deja presentes dans sites.txt gardent leur nom d'origine dans le
+    .pmagres), et la table de regroupement est ecrite a cote."""
     tables = parse_magic_contribution(path_in)
+    site_mapping, site_listing = sites_from_coordinates(tables) if sites_by_coords else ({}, [])
     locations = _index_by(tables.get("locations", []), "location")
     sites = _index_by(tables.get("sites", []), "site")
     samples = _index_by(tables.get("samples", []), "sample")
@@ -745,7 +921,9 @@ def convert_magic_file(
             continue  # tout le specimen etait hors perimetre (voir problems)
 
         header_block = _sample_header_block(
-            specimen, spec_row, sample_row, site_row, loc_row, dip_mode=dip_mode)
+            specimen, spec_row, sample_row, site_row, loc_row, dip_mode=dip_mode,
+            problems=problems,
+            site_override=site_mapping.get(sample_row.get("site", "")) if sample_row else None)
         blocks.append(header_block + "\n" + "\n".join(meas_lines))
 
     with open(path_out, "w", encoding="utf-8") as f:
@@ -753,6 +931,11 @@ def convert_magic_file(
         f.write("\n\n".join(blocks) + "\n")
 
     report = format_problems_report(path_in, problems)
+    if sites_by_coords:
+        grouping_path = write_site_grouping(site_listing, path_out)
+        report += (
+            f"\nSites rebuilt from lat/lon: {len(site_mapping)} site(s) -> {len(site_listing)} "
+            f"site(s)" + (f", grouping table -> {grouping_path}" if grouping_path else ", nothing to merge"))
     nb_results, nb_means = _convert_magic_results(path_in, path_out)
     nb_pint, redo_pint_path = _write_pint_redo_file(path_in, path_out)
     nb_aniso = _write_ani_tensors_from_magic(path_in, path_out)

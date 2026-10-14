@@ -15,6 +15,8 @@ datas = collect_data_files('pmagpy')
 # EXTRAIT sous le meme nom de dossier ('help/') pour que _resource_path
 # (sys._MEIPASS + 'help' + nom de fichier) le retrouve une fois empaquete.
 datas += [('help', 'help')]
+# Modele de donnees MagIC 3.0 officiel (EarthRef), lu par magic_check.py.
+datas += [('magic_model', 'magic_model')]
 
 # matplotlib charge les backends SVG/PDF dynamiquement au moment de
 # fig.savefig(path, format="svg") (Export SVG...) / pdf.savefig(fig)
