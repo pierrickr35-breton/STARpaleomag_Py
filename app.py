@@ -994,8 +994,8 @@ class STARpaleomagApp:
             n_point, pt, arno, norme = item
             mom = pt.xp * arno * (1.0e-3 if norme == "m" else 1.0)
             self._show_pick_info(
-                f"[Arai] n={n_point}  step {pt.temp:.0f} degC  arn={pt.yp:.3E}  atr={pt.xp:.3E}  "
-                f"mom.atr={mom:.3E}  NRM dec={pt.decl:.1f} inc={pt.aincl:.1f}  "
+                f"[Arai] n={n_point}  step {pt.temp:.0f} degC  NRM/NRM0={pt.yp:.3f}  TRM/NRM0={pt.xp:.3f}  "
+                f"TRM={mom:.3E}  NRM dec={pt.decl:.1f} inc={pt.aincl:.1f}  "
                 f"pTRM dec={pt.dec:.1f} inc={pt.winc:.1f}\n")
         elif kind == "arai_check":
             chk, done_at, arno = item
@@ -1003,8 +1003,8 @@ class STARpaleomagApp:
             ratio = ecart / chk.xtptrm if chk.xtptrm else 0.0
             self._show_pick_info(
                 f"[Arai pTRM check] done at {done_at:.0f}, target {chk.temp:.0f} degC  "
-                f"mom={chk.xt * arno:.3E}  %atr={chk.xt:.2f}  ecart/atrt={ecart:.2f}  "
-                f"ecart/atrp={ratio:.2f}\n")
+                f"Moment={chk.xt * arno:.3E}  %TRM={chk.xt:.2f}  gap/total_TRM={ecart:.2f}  "
+                f"gap/partial_TRM={ratio:.2f}\n")
 
     def _show_pick_info(self, text):
         """Affiche l'information d'un point clique. Pendant une saisie
@@ -3514,17 +3514,23 @@ class STARpaleomagApp:
 
         out = io.StringIO()
         out.write(" paleointensity diagram NRM-TRM\n")
-        out.write(f"  numero: {ech.id}\n\n")
-        out.write("    n  temp.    arn     dec    inc      atr      mom.atr    dec    inc\n\n")
+        out.write(f"  specimen: {ech.id}\n\n")
+        # En-tetes en anglais (NRM/TRM au lieu des acronymes francais
+        # arn/atr) et valeurs normalisees en format fixe 0.998 plutot que
+        # 9.983E-01 - demande explicite utilisateur. Chaque titre est
+        # aligne a droite sur la largeur de sa colonne.
+        widths = (5, 6, 12, 9, 8, 12, 12, 9, 8)
+        titles = ("n", "temp.", "NRM/NRM0", "dec", "inc", "TRM/NRM0", "TRM", "dec", "inc")
+        out.write("".join(f"{t:>{w}}" for t, w in zip(titles, widths)) + "\n\n")
         for i, p in enumerate(points, start=1):
             mom = p.xp * arno * volumasse
             out.write(
-                f"  {i:3d}  {p.temp:4.0f}   {p.yp:9.3E}  {p.decl:7.2f} {p.aincl:7.2f}   "
-                f"{p.xp:9.3E}   {mom:9.3E}   {p.dec:7.1f} {p.winc:7.1f}\n"
+                f"{i:5d}{p.temp:6.0f}{p.yp:12.3f}{p.decl:9.2f}{p.aincl:8.2f}"
+                f"{p.xp:12.3f}{mom:12.3E}{p.dec:9.1f}{p.winc:8.1f}\n"
             )
         if checks:
             pt_by_k = {p.k: p for p in points}
-            out.write("\n   results of the ptrm checks\n")
+            out.write("\n   results of the pTRM checks\n")
             # 2 colonnes de temperature distinctes - demande explicite
             # utilisateur ("you also miss the step at which the ptrm
             # is done") : `done_at` = pas COURANT ou le controle a ete
@@ -3532,15 +3538,16 @@ class STARpaleomagApp:
             # = pas revisite par le controle (c.temp) - auparavant
             # affichees identiques par erreur (les deux calculees a
             # partir du meme "target").
-            out.write("   done_at  target     mom       %atr   ecart/atrt  ecart/atrp\n")
+            check_widths = (10, 8, 12, 8, 16, 17)
+            check_titles = ("done_at", "target", "Moment", "%TRM", "gap/total_TRM", "gap/partial_TRM")
+            out.write("".join(f"{t:>{w}}" for t, w in zip(check_titles, check_widths)) + "\n")
             for c in checks:
                 done_at = pt_by_k[c.k].temp if c.k in pt_by_k else c.temp
                 mom = c.xt * arno
                 ecart = c.xt - c.xtptrm
                 ratio = ecart / c.xtptrm if c.xtptrm else 0.0
                 out.write(
-                    f"   {done_at:5.0f}  {c.temp:5.0f}   {mom:9.3E}   {c.xt:6.2f}   "
-                    f"{ecart:6.2f}      {ratio:6.2f}\n"
+                    f"{done_at:10.0f}{c.temp:8.0f}{mom:12.3E}{c.xt:8.2f}{ecart:16.2f}{ratio:17.2f}\n"
                 )
         return out.getvalue()
 
@@ -3733,7 +3740,7 @@ class STARpaleomagApp:
             ichamp = ichamp_auto if ncom else 0
 
             icomp_s = self._console_input(
-                " ARN one (1) two (2) or several components (3) : ", "1")
+                " NRM one (1) two (2) or several components (3) : ", "1")
             if icomp_s is None:
                 return
             try:
@@ -3744,7 +3751,7 @@ class STARpaleomagApp:
                 icomposante = 1
             if icomposante != 1:
                 self._afficher(
-                    "(ARN 2/3 components not yet ported - treated as 1 component.)\n")
+                    "(NRM 2/3 components not yet ported - treated as 1 component.)\n")
 
             plot_inv = self._console_input(" Plot TRM in - and + : y/N", "N")
             if plot_inv is None:
@@ -6571,7 +6578,7 @@ class STARpaleomagApp:
                 if auto:
                     self._afficher(f"{ech.id}: L/Q + R/V pattern not found automatically.\n")
                 rows_s = self._console_input(
-                    f"[{ech.id}] Line numbers ATR+fast ATR-fast ATR+slow before/after loop "
+                    f"[{ech.id}] Line numbers TRM+fast TRM-fast TRM+slow before/after loop "
                     "(empty = skip): ", "")
                 if rows_s is None:
                     return
