@@ -1,0 +1,100 @@
+# MagIC controlled vocabulary "type" (Sample Material Types, geologic_types), 98 terms
+# ("Sun-Dried Object" appears twice on the page). Copied from the EarthRef vocabularies
+# page, supplied by the user on 2026-10-21 - replaces the 2019 list shipped with PmagPy.
+Amphora
+Baked Clay
+Baked Contact
+Baked Mud
+Baked Rock
+Bath
+Bed Sediment
+Bell Mould
+Brick
+Burnt Daub
+Burnt Earth
+Burnt Floor
+Burnt Pit
+Burnt Sediment
+Burnt Structure
+Burnt Castle Wall
+Charcoal Pile
+Ceramic
+Chert
+Chilled Margin
+Concretion
+Conglomerate
+Delta
+Diabase
+Drift
+Flow Top
+Foundry
+Fresco
+Funeral Pyre
+Furnace
+Furnace Slag
+Glacial Drift
+Glassy Margin
+Granite
+Hearth
+Hypocaust
+Impact Melt
+Intrusion
+Kamadogu
+Kiln
+Laccolith
+Lacustrine
+Lahar
+Lava
+Lava Flow
+Layered Intrusion
+Metallurgical Slag
+Meteorite
+Mixed Archeological Objects
+Mosaic
+Mural
+Not Specified
+Obsidian
+Oven
+Oven or Hearth (GEOMAGIA Only)
+Pit Structure
+Pit House
+Pluton
+Porcelain
+Pot Rim
+Pot Sherd
+Pottery
+Pyroclastic Flow
+Pyroclastite
+Roasting Pit
+Roof
+Room
+Salt Kiln
+Sauna
+Sediment Dike
+Sediment Layer
+Sill
+Single Crystal
+Slag
+Soil
+Speleothem
+Sun-Dried Object
+Suspended Sediment
+Synthetic
+Tapping Slag
+Temple
+Tile
+Tuff
+Tuyere
+Unbaked Sediment
+Vitrified Object
+Vitrified Stone
+Volcanic Ash
+Volcanic Dike
+Volcanic Dome
+Volcanic Glass
+Volcanic Other
+Volcanic Other or Undefined (GEOMAGIA Only)
+Volcanic Pillow
+Volcanic Vent
+Volcanic Undefined
+Wall

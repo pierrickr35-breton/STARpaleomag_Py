@@ -32,6 +32,7 @@ quelques exemples (table, ligne du fichier, nom).
 """
 
 import collections
+import difflib
 import json
 import math
 import os
@@ -148,7 +149,20 @@ class DataModel:
         self.version = model.get("data_model_version", "?")
         self.updated = model.get("updated_day", "?")
         self.tables = model["tables"]
-        self.codes = {c["code"] for cat in load("method_codes.json").values() for c in cat["codes"]}
+        # Codes de methode officiels (magic_model/method_codes.json, telecharge
+        # par l'utilisateur depuis magic.earthref.org/MagIC/method-codes le
+        # 2026-10-21, 673 codes) plutot que la liste de PmagPy (2019, 630) :
+        # 47 codes ajoutes depuis (LP-T, LP-AF, LP-CA-*, LT-AF-Z-XYZ...), 4
+        # retires (LP-PI-CA-*, remplaces par LP-CA-*).
+        official_codes = os.path.join(os.path.dirname(_bundled_path()), "method_codes.json")
+        try:
+            with open(official_codes, encoding="utf-8-sig") as f:
+                code_tables = json.load(f)
+            self.codes_origin = "official list (October 2026)"
+        except (OSError, ValueError):
+            code_tables = load("method_codes.json")
+            self.codes_origin = "PmagPy list (2019)"
+        self.codes = {c["code"] for cat in code_tables.values() for c in cat["codes"]}
         self.codes_upper = {c.upper(): c for c in self.codes}
         vocab_files = sorted(f for f in os.listdir(folder) if f.startswith("controlled_vocabularies_"))
         vocab = load(vocab_files[-1]) if vocab_files else {}
@@ -156,6 +170,27 @@ class DataModel:
             name: {str(item["item"]) for item in entry.get("items", []) if "item" in item}
             for name, entry in vocab.items() if isinstance(entry, dict)
         }
+        # Listes officielles plus recentes livrees avec STARpaleomag_Py
+        # (magic_model/vocabulary_<nom>.txt, une valeur par ligne) : elles
+        # REMPLACENT celles de PmagPy (2019) - EarthRef ne publie plus ces
+        # listes en fichier ; "lithology" (1003 termes, oct. 2026, fournie
+        # par l'utilisateur) contient par exemple "Granitoid", absent de la
+        # liste de PmagPy et signale a tort auparavant.
+        self.updated_vocabularies = []
+        folder_model = os.path.dirname(_bundled_path())
+        try:
+            names = sorted(os.listdir(folder_model))
+        except OSError:
+            names = []
+        for fname in names:
+            m = re.match(r"vocabulary_(.+)\.txt$", fname)
+            if not m:
+                continue
+            with open(os.path.join(folder_model, fname), encoding="utf-8") as f:
+                terms = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+            if terms:
+                self.vocab[m.group(1)] = terms
+                self.updated_vocabularies.append(m.group(1))
         self.vocab_upper = {name: {v.upper(): v for v in values} for name, values in self.vocab.items()}
 
     def columns(self, table: str) -> Dict[str, dict]:
@@ -188,7 +223,7 @@ class Table:
 
 
 def read_tables(path: str) -> List[Table]:
-    with open(path, encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
         lines = f.read().replace("\r\n", "\n").replace("\r", "\n").split("\n")
     tables: List[Table] = []
     i = 0
@@ -227,9 +262,12 @@ class Report:
         self.summary: List[str] = []
         self.positive_dip: Tuple[int, int] = (0, 0)  # (samples with dip > 0, samples with a dip)
 
-    def add(self, severity: str, category: str, message: str, example: Optional[str] = None, count: int = 1):
+    def add(self, severity: str, category: str, message: str, example: Optional[str] = None, count: int = 1,
+            aggregate: bool = False):
+        """`aggregate` : l'exemple est deja la liste (tronquee) de tous les
+        cas - pas de ligne "... (n more)" dans le rapport."""
         key = (severity, category, message)
-        issue = self.issues.setdefault(key, {"count": 0, "examples": []})
+        issue = self.issues.setdefault(key, {"count": 0, "examples": [], "aggregate": aggregate})
         issue["count"] += count
         if example is not None and len(issue["examples"]) < _MAX_EXAMPLES:
             issue["examples"].append(example)
@@ -269,7 +307,7 @@ class Report:
                 out.append(f"{mark}  [{issue['count']}] {label}{message}{mark}")
                 for example in issue["examples"]:
                     out.append(f"        e.g. {example}")
-                if issue["count"] > len(issue["examples"]) and issue["examples"]:
+                if issue["count"] > len(issue["examples"]) and issue["examples"] and not issue["aggregate"]:
                     out.append(f"        ... ({issue['count'] - len(issue['examples'])} more)")
 
         orientation = [(k, v) for k, v in self.issues.items() if k[1] in _ORIENTATION_CATEGORIES]
@@ -467,9 +505,11 @@ def _check_columns(tables: List[Table], model: DataModel, report: Report, index:
                                            f"{table.name}.{col}: '{token}' written with a different case "
                                            f"from the standard '{standard}'", _where(table, k))
                             else:
+                                close = difflib.get_close_matches(token, sorted(allowed), n=3, cutoff=0.7)
+                                hint = f" (closest standard terms: {', '.join(close)})" if close else ""
                                 report.add("WARNING", "Controlled vocabulary",
                                            f"{table.name}.{col}: '{token}' is not in the MagIC vocabulary "
-                                           f"'{vocab_name}'", _where(table, k))
+                                           f"'{vocab_name}'{hint}", _where(table, k))
                     elif v == 'type("method_codes")':
                         for code in _tokens(value):
                             if code in model.codes:
@@ -540,10 +580,26 @@ def _check_duplicates(tables: Dict[str, Table], report: Report):
                            f"{table_name}: the same {name_col} is described with contradictory values",
                            f"{name_col} '{name}' ({len(ks)} rows): {'; '.join(conflicts)}")
             elif len(signatures) > 1:
-                report.add("INFO", "Duplicates",
-                           f"{table_name}: several result rows for the same {name_col} (normal for e.g. "
-                           "in situ and tilt-corrected results, check otherwise)",
-                           f"{name_col} '{name}': {len(ks)} rows")
+                # Plusieurs lignes de resultats d'un meme objet : normal
+                # quand elles sont dans des reperes differents (specimen /
+                # in situ / tectonique, dir_tilt_correction -1/0/100) -
+                # remarque utilisateur ("lorsqu'il y a des resultats en
+                # coordonnee specimen et IS, c'est normal d'avoir 2 lignes").
+                # Signale seulement deux resultats du MEME repere pour la MEME
+                # composante (et le meme type de resultat).
+                def result_key(r):
+                    kind = "dir" if r.get("dir_dec") else ("int" if r.get("int_abs") else "other")
+                    return (kind, r.get("dir_tilt_correction", ""),
+                            r.get("dir_comp") or r.get("dir_comp_name") or "")
+                keys = collections.Counter(result_key(table.rows[k]) for k in ks)
+                same = [key for key, n in keys.items() if n > 1 and key[0] != "other"]
+                if same:
+                    kind, tilt, comp = same[0]
+                    report.add("WARNING", "Duplicates",
+                               f"{table_name}: several {'direction' if kind == 'dir' else 'intensity'} results "
+                               f"for the same {name_col} in the same coordinate system and component",
+                               f"{name_col} '{name}': {keys[same[0]]} rows with dir_tilt_correction="
+                               f"{tilt or 'n.d'}, component {comp or 'n.d'}")
         report.summary.append(f"  {table_name}: {len(table.rows)} row(s), {n_names} distinct {name_col}(s)")
 
         # Noms presque identiques : meme nom une fois retires guillemets,
@@ -587,7 +643,7 @@ def _check_hierarchy(tables: Dict[str, Table], report: Report):
         orphans = sorted({r.get(name_col, "") for r in pt.rows} - used - {""})
         if orphans:
             report.add("INFO", "Hierarchy", f"{parent} with no {child} attached ({len(orphans)})",
-                       ", ".join(orphans[:12]) + (" ..." if len(orphans) > 12 else ""), count=len(orphans))
+                       ", ".join(orphans[:12]) + (" ..." if len(orphans) > 12 else ""), count=len(orphans), aggregate=True)
     for child, col in (("samples", "site"), ("specimens", "sample")):
         ct = tables.get(child)
         if ct is None:
@@ -711,7 +767,7 @@ def _check_samples_sites(tables: Dict[str, Table], report: Report):
         n_none = sum(1 for r in specimens.rows if not r.get("volume") and not r.get("weight"))
         if n_none:
             report.add("INFO", "Units", f"specimens without volume nor weight ({n_none}): magnetization per "
-                       "unit volume/mass cannot be computed (the import assumes 10.8 cm3)", count=n_none)
+                       "unit volume/mass cannot be computed (the import assumes 10.8 cm3)", count=n_none, aggregate=True)
 
 
 def _measurement_vector_issues(r: Dict[str, str], check_direction: bool = True) -> List[str]:
@@ -891,7 +947,7 @@ def _check_measurements(tables: Dict[str, Table], report: Report):
     without_nrm = sorted(specimens_seen - nrm_specimens - {""})
     if without_nrm:
         report.add("INFO", "Measurements", f"specimens with no NRM / untreated measurement ({len(without_nrm)})",
-                   ", ".join(without_nrm[:12]) + (" ..." if len(without_nrm) > 12 else ""), count=len(without_nrm))
+                   ", ".join(without_nrm[:12]) + (" ..." if len(without_nrm) > 12 else ""), count=len(without_nrm), aggregate=True)
 
 
 def check_contribution(path: str) -> Report:
@@ -905,6 +961,10 @@ def check_contribution(path: str) -> Report:
             tables[t.name].lines.extend(t.lines)
         else:
             tables[t.name] = t
+    with open(path, "rb") as f:
+        if f.read(3) == b"\xef\xbb\xbf":
+            report.add("INFO", "Structure", "the file starts with a UTF-8 byte-order mark (BOM) - invisible, "
+                       "but some programs then fail to recognize the first table")
     contrib = tables.get("contribution")
     if contrib and contrib.rows:
         r = contrib.rows[0]
@@ -916,8 +976,11 @@ def check_contribution(path: str) -> Report:
             report.add("WARNING", "Structure", f"data model version {r.get('data_model_version')} (checks below "
                        "use MagIC 3.0)")
     report.summary.append(f"  reference used for the checks: MagIC data model {model.version} updated "
-                          f"{model.updated}, {model.origin}; method codes and controlled vocabularies as "
-                          "shipped with PmagPy (no longer published online by EarthRef)")
+                          f"{model.updated}, {model.origin}; method codes: {model.codes_origin}; controlled "
+                          "vocabularies: "
+                          + (f"{', '.join(model.updated_vocabularies)} from the official lists (October 2026), "
+                             "the others" if model.updated_vocabularies else "all")
+                          + " as shipped with PmagPy (2019)")
 
     index: Dict[str, set] = {}
     for t in tables.values():
@@ -952,7 +1015,7 @@ def write_check_report(path_in: str, path_out: Optional[str] = None) -> Tuple[st
 
 def is_magic_contribution(path: str) -> bool:
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
             first = f.readline()
     except OSError:
         return False

@@ -1,0 +1,18 @@
+# MagIC controlled vocabulary "class" (Geologic Classifications, geologic_classes), 15 terms.
+# Copied from the EarthRef vocabularies page, supplied by the user on 2026-10-21 -
+# replaces the 2019 list shipped with PmagPy.
+Archeologic
+Extraterrestrial
+Extrusive
+Igneous
+Impact
+Intrusive
+Lunar
+Martian
+Metamorphic
+Meteorite
+Not Specified
+Sedimentary
+Subaerial
+Submarine
+Synthetic

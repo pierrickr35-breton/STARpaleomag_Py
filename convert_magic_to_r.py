@@ -80,7 +80,7 @@ def parse_magic_contribution(path: str) -> Dict[str, List[Dict[str, str]]]:
     la table measurements, produisant un "specimen" fantome (id vide, 1
     mesure bidon) dans le .prmag converti."""
     tables: Dict[str, List[Dict[str, str]]] = {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:  # tolere un BOM UTF-8 en tete
         raw = f.read()
     blocks = re.split(r"^tab delimited\t(\S+)\s*$", raw, flags=re.MULTILINE)
     # blocks[0] est vide (avant le 1er marqueur) ; puis alternance nom,corps
