@@ -318,14 +318,23 @@ def draw_zijderveld(
         ctx.pick_point(cm_scale * x_cm, cm_scale * y_sec, "zijderveld_step", m)
         ctx.pick_point(cm_scale * x_cm, cm_scale * y_vert, "zijderveld_step", m)
 
-    # ajustements de droite : couleur par numero de composante (numcomp),
+    # ajustements de droite : couleur par composante (A/B/C, voir plus bas),
     # epaisseur doublee - port de `zijder2` (lignes ~2276-2300).
     _FIT_PENS = {1: 3, 2: 4, 3: 5, 4: 8}
     matching_fits = [f for f in (fits or []) if f.id == ech.id]
     if matching_fits:
         ctx.thickn(2.0)
         for fit in matching_fits:
-            ctx.newpen(_FIT_PENS.get(fit.numcomp, 3))
+            # Couleur selon la COMPOSANTE (A rouge, B vert, C bleu, D...) et
+            # non plus selon le numero d'ajustement `numcomp` - remarque
+            # utilisateur ("we are now using Component A, B, C... while the
+            # color used for the lines was based on component number") :
+            # deux ajustements d'une meme composante gardent la meme couleur,
+            # quel que soit l'ordre dans lequel ils ont ete faits. Repli sur
+            # numcomp si la lettre manque (anciens resultats).
+            letter = (getattr(fit, "component", "") or "").strip().upper()[:1]
+            comp_index = ord(letter) - ord("A") + 1 if "A" <= letter <= "Z" else fit.numcomp
+            ctx.newpen(_FIT_PENS.get(comp_index, 3))
             pts_n, pts_e, pts_d = [], [], []
             for tx, ty, tz in zip(fit.tx, fit.ty, fit.tz):
                 n, e, d = _oriented_ned(tx, ty, tz, ech, orientation)
@@ -336,15 +345,6 @@ def draw_zijderveld(
             ctx.plot(cm_scale * fx[1], cm_scale * sec[1], 2)
             ctx.plot(cm_scale * fx[0], cm_scale * -pts_d[0], 3)
             ctx.plot(cm_scale * fx[1], cm_scale * -pts_d[1], 2)
-        if len(matching_fits) == 1:
-            fit = matching_fits[0]
-            ctx.newpen(1)
-            # meme niveau vertical que le texte "scale: ..." (b + dimzij/18.0
-            # plus bas, ligne ~298) - demande explicite de l'utilisateur.
-            ctx.plottxt(
-                cm_scale * amax * 0.1, -v + dimzij / 18.0, dimzij / 40.0,
-                f"fit between {fit.step_first} and {fit.step_last}",
-            )
         ctx.thickn(0.5)
         ctx.newpen(1)
 
@@ -384,7 +384,22 @@ def draw_zijderveld(
     # pres) contre zijder-11CL7801A.svg pour "scale:", id, type et orientation.
     b = -v
     a = -u + 4.0 * dimzij / 5.0
-    ctx.plottxt(-a + dimzij / 5.0, b + dimzij / 18.0, dimzij / 35.0, scale_text)
+    scale_x = -a + dimzij / 5.0
+    ctx.plottxt(scale_x, b + dimzij / 18.0, dimzij / 35.0, scale_text)
+    if len(matching_fits) == 1:
+        fit = matching_fits[0]
+        # Meme niveau vertical que "scale: ..." (demande explicite de
+        # l'utilisateur), mais jamais par-dessus : quand le diagramme est
+        # etroit, la position habituelle (10 % de l'etendue) tombait dans le
+        # texte de l'echelle et les deux se superposaient (signale par
+        # l'utilisateur, capture d'ecran) - decale alors juste apres la fin
+        # de "scale: ...", avec deux caracteres d'espace.
+        scale_end = scale_x + (len(scale_text) + 2) * char_width_cm(dimzij / 35.0)
+        ctx.newpen(1)
+        ctx.plottxt(
+            max(cm_scale * amax * 0.1, scale_end), b + dimzij / 18.0, dimzij / 40.0,
+            f"fit between {fit.step_first} and {fit.step_last}",
+        )
     b -= dimzij / 26.0
     a -= dimzij / 25.0
     ctx.plottxt(-a, b, dimzij / 25.0, ech.id, nchar=12)
