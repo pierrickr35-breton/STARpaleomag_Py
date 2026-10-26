@@ -7167,6 +7167,7 @@ class STARpaleomagApp:
             loaded = load_results(
                 self.results_path, pattern=site or "*", carselect=carselect,
                 iorient=self.orientation.get(), component=component or "*",
+                donnees=self.donnees,
             )
             if not loaded:
                 available = available_mean_orientations(self.results_path, site or "*")
@@ -7206,10 +7207,22 @@ class STARpaleomagApp:
         # initres/"Init results" remet self.results a zero. Demande
         # explicite utilisateur ("the selection of results should not
         # initialize the previous list").
-        self.results = self.results + new_matches
+        # un resultat deja selectionne n'est pas ajoute une seconde fois (ex.
+        # mode 's' puis 'm' sur le meme site - demande explicite utilisateur)
+        def _key(r):
+            return (r.id, r.c, r.par3_mean, round(r.dec, 2), round(r.inc, 2), r.step_first, r.step_last)
+        already = {_key(r) for r in self.results}
+        fresh = []
+        for r in new_matches:
+            if _key(r) not in already:
+                already.add(_key(r))
+                fresh.append(r)
+        n_dup = len(new_matches) - len(fresh)
+        self.results = self.results + fresh
         self._afficher(
-            f"Selection: +{len(new_matches)} result(s) - "
-            f"total {len(self.results)} result(s)\n")
+            f"Selection: +{len(fresh)} result(s)"
+            + (f" ({n_dup} already selected, not added again)" if n_dup else "")
+            + f" - total {len(self.results)} result(s)\n")
 
     def ouvrir_select_results_by_site_dialog(self):
         """Pas dans le Fortran : choisit un site dans une liste deroulante

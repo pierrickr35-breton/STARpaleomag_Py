@@ -2470,7 +2470,7 @@ def available_mean_orientations(path: str, pattern: str = "*") -> List[int]:
 
 
 def _load_site_results(
-    path: str, pattern: str, iorient: int, component: str = "*"
+    path: str, pattern: str, iorient: int, component: str = "*", donnees=None,
 ) -> List[FitResult]:
     """Equivalent de la branche `carselect=="s"` de `selres` (label 444) :
     les moyennes matchees par `_load_mean_results`, PLUS pour chacune les
@@ -2506,8 +2506,105 @@ def _load_site_results(
             for res in _iter_result_lines(path):
                 if res.id[:5] != "mean:" and res.c in wanted:
                     results.append(res)
+        else:
+            # moyenne sans liste de codes (ancien .r) : composition retrouvee
+            # par le calcul - voir reconstruct_mean_members
+            # (orientation des specimens reprise du .prmag, `donnees`)
+            site = _mean_site_name(mean_res.id).strip()
+            if donnees:
+                results.extend(reconstruct_mean_members(
+                    mean_res, [recompute_fit_geometry(r, donnees) for r in _iter_result_lines(path)
+                               if r.id[:5] != "mean:" and r.id.startswith(site)]))
         results.append(mean_res)
     return results
+
+
+def _angle_deg(d1: float, i1: float, d2: float, i2: float) -> float:
+    r = math.radians
+    c = (math.cos(r(i1)) * math.cos(r(i2)) * math.cos(r(d1 - d2)) + math.sin(r(i1)) * math.sin(r(i2)))
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def reconstruct_mean_members(mean_res: FitResult, candidates: List[FitResult],
+                             max_extra: int = 5, tol: float = 0.2) -> List[FitResult]:
+    """Resultats specimen qui composent une moyenne de site SANS liste de
+    codes ("codes:" vide - moyennes des anciens .r sans prefixe "c:", ex.
+    Beagle/Fuego) - demande explicite utilisateur ("la selection par s ne
+    marche pas") : parmi les resultats du site (`candidates`), cherche le
+    sous-ensemble dont la moyenne de Fisher (droites + plans, meme repere
+    que la moyenne) redonne dec/inc/a95 a `tol` degre pres, avec le meme n
+    et, si connus, les memes nombres de droites et de plans. Essaie d'abord
+    tous les resultats, puis par composante, puis les combinaisons de n
+    resultats quand il y en a au plus `max_extra` de trop. Retourne [] si
+    aucun sous-ensemble ne correspond (jamais de devinette approchee)."""
+    import itertools
+    n = mean_res.nb
+    orient = int(mean_res.par3_mean) if mean_res.par3_mean in (1.0, 2.0, 3.0) else 2
+    usable = [r for r in candidates if r.cat1 in _LINE_LIKE_CAT1 or r.cat1 == "P"]
+
+    def matches(group) -> bool:
+        if len(group) != n:
+            return False
+        if mean_res.n_planes >= 0 and sum(1 for r in group if r.cat1 == "P") != mean_res.n_planes:
+            return False
+        try:
+            st = fisher_from_results(list(group), orientation=orient)
+        except (ValueError, ZeroDivisionError):
+            return False
+        return (_angle_deg(st.dec, st.inc, mean_res.dec, mean_res.inc) <= tol
+                and abs(st.a95 - mean_res.mad) <= max(tol, 0.06 * mean_res.mad))
+
+    groups = [usable]
+    for comp in sorted({r.component for r in usable}):
+        groups.append([r for r in usable if r.component == comp])
+    for g in groups:
+        if matches(g):
+            return list(g)
+    for g in groups:
+        if n < len(g) <= n + max_extra:
+            for combo in itertools.combinations(g, n):
+                if matches(combo):
+                    return list(combo)
+    return []
+
+
+def fill_missing_mean_codes(path: str, donnees) -> Tuple[int, List[str]]:
+    """Complete, dans un .pmagres, la liste "codes:" des moyennes de site qui
+    n'en ont pas (voir reconstruct_mean_members), pour que la selection par
+    site (mode 's') et l'export MagIC retrouvent les resultats specimen.
+    `donnees` : les specimens du .prmag (orientation de chaque resultat,
+    voir recompute_fit_geometry). Ne touche a aucune autre ligne. Retourne (nombre de moyennes completees,
+    sites dont la composition n'a pas pu etre retrouvee)."""
+    results = list(_iter_result_lines(path))
+    specimens = [recompute_fit_geometry(r, donnees) for r in results if r.id[:5] != "mean:"]
+    with open(path, "r", encoding="iso-8859-1", errors="replace") as f:
+        lines = f.read().split("\n")
+    in_mean, n_done, failed = False, 0, []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            in_mean = in_mean or "site mean" in stripped.lower()
+            continue
+        if not in_mean or not stripped:
+            continue
+        res = _parse_mean_line(stripped.split())
+        if res is None or res.liste.replace("codes:", "").strip():
+            continue
+        site = _mean_site_name(res.id).strip()
+        members = reconstruct_mean_members(res, [r for r in specimens if r.id.startswith(site)])
+        if not members:
+            failed.append(f"{site} ({_ORIENT_TO_FILE_CODE.get(res.par3_mean, res.par3_mean)})")
+            continue
+        res.liste = "codes:" + ":".join(r.c for r in members)
+        if res.n_lines < 0:
+            res.n_planes = sum(1 for r in members if r.cat1 == "P")
+            res.n_lines = len(members) - res.n_planes
+        lines[i] = _format_mean_line(res)
+        n_done += 1
+    if n_done:
+        with open(path, "w", encoding="iso-8859-1", errors="replace", newline="\n") as f:
+            f.write("\n".join(lines))
+    return n_done, failed
 
 
 def load_results(
@@ -2518,6 +2615,7 @@ def load_results(
     numcomp: Optional[int] = None,
     iorient: int = 1,
     component: str = "*",
+    donnees=None,
 ) -> List[FitResult]:
     """Equivalent de `selres` (dataselect.f), les 3 modes `carselect` :
 
@@ -2546,7 +2644,7 @@ def load_results(
     if carselect == "m":
         return _load_mean_results(path, pattern, iorient, component=component)
     if carselect == "s":
-        return _load_site_results(path, pattern, iorient, component=component)
+        return _load_site_results(path, pattern, iorient, component=component, donnees=donnees)
     return _load_data_results(path, pattern, cat1, numcomp, component=component)
 
 
