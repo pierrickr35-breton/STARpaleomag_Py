@@ -86,7 +86,13 @@ def parse_age(age_str: str) -> Tuple[str, str, str, str, str]:
             break
 
     age = age_sigma = age_low = age_high = ""
-    if "#" in s:
+    # "60 ± 5 Ma" / "60 +/- 5 Ma" : age et incertitude, comme "60#5" -
+    # demande explicite utilisateur (sinon "60 ± 5" partait tel quel dans la
+    # colonne numerique `age` de sites.txt, vu sur Fuego_Pmag_converted).
+    pm = re.match(r"^\s*([-+]?\d+(?:\.\d+)?)\s*(?:±|\+/-|\+-)\s*(\d+(?:\.\d+)?)\s*$", s)
+    if pm:
+        age, age_sigma = pm.group(1), pm.group(2)
+    elif "#" in s:
         a, b = s.split("#", 1)
         age, age_sigma = a.strip(), b.strip()
     elif "&" in s:

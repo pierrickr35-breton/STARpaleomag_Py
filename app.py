@@ -1,3 +1,4 @@
+import copy
 import io
 import os
 import re
@@ -43,6 +44,7 @@ from selection import (
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
 from auto_interpretation import propose_components, propose_components_for_site, format_suggestions
 from calcul import (
+    AniTensor,
     FitResult,
     fit_line,
     fit_plane,
@@ -3553,7 +3555,7 @@ class STARpaleomagApp:
 
     def _arai_fit_report(
         self, ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
-        fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm,
+        fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm, h_raw=None,
     ):
         """Rapport detaille d'un calcul de pente n1..n2 (cercle de
         Paterson, directions ancree/libre + DANG, avant/apres correction
@@ -3670,11 +3672,78 @@ class STARpaleomagApp:
             f"{(direction.free_mad or 0.0):5.1f}  {(direction.dang or 0.0):5.1f}  "
             f"{hlab:5.1f}  {fit.b:7.4f}  {fit.sigma:6.4f}  "
             f"{(fit.sigma / fit.b if fit.b else 0.0):7.4f}  {fit.ccr:8.5f}  "
-            f"{fit.h:6.2f}  "
+            # Colonne H = intensite NON corrigee, meme dans le calcul apres
+            # correction d'anisotropie (h_raw) - remarque utilisateur ("c'est
+            # evident que H est la valeur non corrigee") ; Hcorani porte la
+            # valeur corrigee.
+            f"{(h_raw if h_raw is not None else fit.h):6.2f}  "
             + (f"{fcor:6.3f}  {hcorani:6.2f}" if fcor is not None else "   -       -  ")
             + f"  {gamma:5.1f}  {curv0.k:7.4f}  {curv0.sse:7.5f}\n"
         )
         return res.getvalue()
+
+    def _peek_ani_tensor(self, ech, ani_path):
+        """Tenseur A0 qui servira a la correction d'anisotropie, SANS poser
+        de question (la question "not significant... anyway?" vient apres le
+        calcul brut, voir _apply_anisotropy_correction) - pour annoncer le
+        bloc "BEFORE ANISOTROPY CORRECTION" avant le calcul brut. None si
+        les mesures sont deja corrigees (flaganiso) ou s'il n'y a pas de A0."""
+        if getattr(ech, "flaganiso", False) or not ani_path:
+            return None
+        return read_ani_tensor(ani_path, ech.id, "A0")
+
+    def _arai_anisotropy_corrected(self, ech, tensor, n1, n2, hlab, fit_raw, direction_raw):
+        """Correction d'anisotropie appliquee a TOUTES les mesures - demande
+        explicite utilisateur ("la prise en compte de l'anisotropie se fasse
+        sur toutes les mesures et que tous les calculs intermediaires avant
+        et apres anisotropie soient affiches"). Une COPIE du specimen recoit
+        l'inverse du tenseur A0 sur chaque mesure (calcul.apply_inverse_
+        anisotropy, comme "Inverse_ANI_correction...", mais sans toucher aux
+        donnees chargees), puis TOUT le calcul est refait sur le meme
+        intervalle n1..n2 : tableau NRM/TRM, controles pTRM, courbure,
+        directions, CRM, statistiques de Coe, ligne de resultats. H corrige
+        (Hcorani) = H de ce second calcul ; fcor = Hcorani / H brut, tous deux
+        dans la ligne de resultats de ce second calcul (celle du calcul brut
+        reste sans correction), puis une ligne de bilan avec la deviation
+        des directions due a l'anisotropie. Ordre d'affichage voulu par
+        l'utilisateur ("il faut respecter un peu plus la continuite") :
+        calcul brut complet, puis la question eventuelle sur un tenseur non
+        significatif, puis ce calcul corrige, puis le bilan.
+
+        Retourne (texte, fcor, hcorani), ou None si le calcul corrige ne
+        retrouve pas l'intervalle (nombre de points different)."""
+        ech_c = copy.deepcopy(ech)
+        apply_inverse_anisotropy(ech_c, tensor)
+        ech_c.flaganiso = True
+        points_c, checks_c, arno_c = compute_arai(ech_c, orientation=1)
+        if len(points_c) < n2:
+            return None
+        fit_c = fit_arai_line(points_c, n1, n2, hlab=hlab)
+        direction_c = fit_arai_direction(points_c, n1, n2, ech_c, orientation=1)
+        gamma_c = 90.0 - points_c[n2 - 1].winc
+        rf1_c, rf2_c = compute_rf1_rf2(points_c, n1, n2, nrm0_vector(ech_c, orientation=1))
+        curv0_c = arai_curvature([0.0] + [p.xp for p in points_c[:n2]], [1.0] + [p.yp for p in points_c[:n2]])
+        curv1_c = arai_curvature([p.xp for p in points_c[n1 - 1:n2]], [p.yp for p in points_c[n1 - 1:n2]])
+        crm_c = compute_crm(points_c, n1, n2, arno_c) if n2 - n1 >= 1 else None
+        fcor = fit_c.h / fit_raw.h if fit_raw.h else None
+        dev_anchored = angle_between_vectors(
+            direction_raw.anchored_specimen_frame, direction_c.anchored_specimen_frame)
+        dev_free = angle_between_vectors(direction_raw.free_specimen_frame, direction_c.free_specimen_frame)
+        text = (
+            f"\n{HEADER_MARK}===== AFTER ANISOTROPY CORRECTION - inverse of tensor 'A0' applied to ALL "
+            f"measurements of {ech.id} ====={HEADER_MARK}\n"
+            + self._arai_step_tables(ech_c, points_c, checks_c, arno_c)
+            + self._arai_fit_report(
+                ech_c, points_c, n1, n2, arno_c, hlab, fit_c, direction_c, gamma_c, rf1_c, rf2_c,
+                fcor, fit_c.h, "", None, curv0_c, curv1_c, crm_c, h_raw=fit_raw.h)
+            + f"\n{HEADER_MARK}Anisotropy correction (all measurements, tensor 'A0'"
+            + (", NOT significant - applied anyway" if tensor.quality == "b" else "")
+            + f"): H (raw)={fit_raw.h:.2f}µT -> Hcorani={fit_c.h:.2f}µT  fcor={fcor:.3f}{HEADER_MARK}\n"
+            + (f" deviation of the directions by the anisotropy: anchored {dev_anchored:.1f} deg"
+               + (f", free {dev_free:.1f} deg" if dev_free is not None else "") + "\n"
+               if dev_anchored is not None else "")
+        )
+        return text, fcor, fit_c.h
 
     def afficher_arai(self):
         """Equivalent GUI de `paleoin` (diagramme d'Arai/Thellier) - reprend
@@ -3807,9 +3876,6 @@ class STARpaleomagApp:
                 gamma = 90.0 - points[n2 - 1].winc
                 rf1, rf2 = compute_rf1_rf2(points, n1, n2, nrm0_vector(ech, orientation=1))
 
-                fcor, hcorani, aniso_note, aniso_tensor = self._apply_anisotropy_correction(
-                    ech, ani_path, direction, fit.h)
-
                 # courbure de Paterson (adjustcircle.f95, AraiCurvature) :
                 # appel 1 sur (0,1)+points[1..n2] (utilise dans la ligne de
                 # resultats finale), appel 2 sur points[n1..n2] uniquement
@@ -3827,9 +3893,27 @@ class STARpaleomagApp:
                 self._arai_state = (ech, points, checks, arno, fit, hlab)
                 self._refresh_current_graphic()
 
+                # Continuite (demande utilisateur) : calcul brut complet,
+                # PUIS la question eventuelle (tenseur non significatif),
+                # PUIS le calcul corrige, PUIS le bilan.
+                if self._peek_ani_tensor(ech, ani_path) is not None:
+                    self._afficher(
+                        f"\n{HEADER_MARK}===== BEFORE ANISOTROPY CORRECTION - raw measurements of "
+                        f"{ech.id} ====={HEADER_MARK}\n")
                 self._afficher(self._arai_fit_report(
                     ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
-                    fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm))
+                    None, None, "", None, curv0, curv1, crm))
+                fcor, hcorani, aniso_note, aniso_tensor = self._apply_anisotropy_correction(
+                    ech, ani_path, direction, fit.h)
+                corrected = None
+                if aniso_tensor is not None:
+                    corrected = self._arai_anisotropy_corrected(
+                        ech, aniso_tensor, n1, n2, hlab, fit, direction)
+                if corrected is not None:
+                    _text, fcor, hcorani = corrected
+                    self._afficher(corrected[0])
+                elif aniso_note:
+                    self._afficher(f"\n{aniso_note}")
 
                 # Meme traitement PmagPy/MagIC parallele que le batch
                 # review (compute_magic_paleointensity) - AJOUTE ici (pas
@@ -4003,8 +4087,9 @@ class STARpaleomagApp:
                     "(raw data may have changed since this specimen was archived)\n")
                 continue
 
-            # fit UNIQUEMENT pour redessiner la droite du diagramme - voir
-            # docstring ci-dessus (fonction pure, ne "modifie" rien).
+            # fit pour redessiner la droite du diagramme ET pour rejouer le
+            # detail du calcul - voir docstring ci-dessus (fonction pure, ne
+            # "modifie" rien, rien n'est ecrit).
             fit = fit_arai_line(points, n1, n2, hlab=hlab_stored)
 
             self._paleoint_review_state = (ech, points, checks, arno, fit)
@@ -4016,9 +4101,47 @@ class STARpaleomagApp:
             # interpretation recalculee) - demande explicite utilisateur
             # (details/tableau aussi en revue). Les statistiques restent
             # celles STOCKEES ci-dessous, jamais recalculees.
+            # Meme presentation que les deux autres menus - demande
+            # explicite utilisateur ("presenter les calculs de
+            # paleointensite de la meme maniere pour les rapid views") :
+            # calcul brut complet, puis - si un tenseur a ete applique a
+            # l'archivage - le calcul complet apres correction de TOUTES
+            # les mesures par CE tenseur stocke (pas celui du .pmagani
+            # actuel, pour rester une relecture fidele), puis la ligne
+            # STOCKEE telle quelle pour comparaison. Rien n'est ecrit, et
+            # aucune question n'est posee.
+            stored_tensor = None
+            parts = row.get("tensor", "n.d").split(":")
+            if len(parts) == 6:
+                try:
+                    k11, k22, k33, k12, k23, k13 = (float(v) for v in parts)
+                    stored_tensor = AniTensor(sample_id, "A0", k11, k22, k33, k12, k23, k13)
+                except ValueError:
+                    stored_tensor = None
+            direction = fit_arai_direction(points, n1, n2, ech, orientation=1)
+            gamma = 90.0 - points[n2 - 1].winc
+            rf1, rf2 = compute_rf1_rf2(points, n1, n2, nrm0_vector(ech, orientation=1))
+            curv0 = arai_curvature([0.0] + [p.xp for p in points[:n2]], [1.0] + [p.yp for p in points[:n2]])
+            curv1 = arai_curvature([p.xp for p in points[n1 - 1:n2]], [p.yp for p in points[n1 - 1:n2]])
+            crm = compute_crm(points, n1, n2, arno) if n2 - n1 >= 1 else None
+
             self._afficher(f"\n{sample_id} : Tmin={tmin:g} Tmax={tmax:g} (stored)\n")
+            if stored_tensor is not None:
+                self._afficher(
+                    f"\n{HEADER_MARK}===== BEFORE ANISOTROPY CORRECTION - raw measurements of "
+                    f"{sample_id} ====={HEADER_MARK}\n")
             self._afficher(self._arai_step_tables(ech, points, checks, arno))
-            self._afficher(_format_pmagint_row(sample_id, row))
+            self._afficher(self._arai_fit_report(
+                ech, points, n1, n2, arno, hlab_stored, fit, direction, gamma, rf1, rf2,
+                None, None, "", None, curv0, curv1, crm))
+            if stored_tensor is not None:
+                corrected = self._arai_anisotropy_corrected(
+                    ech, stored_tensor, n1, n2, hlab_stored, fit, direction)
+                if corrected is not None:
+                    self._afficher(corrected[0])
+            self._afficher(
+                f"\n{HEADER_MARK}--- Stored in .pmagint (archived values) ---{HEADER_MARK}\n"
+                + _format_pmagint_row(sample_id, row))
 
             pause = self._console_input(
                 "Press Return to continue (Escape to quit): ", "")
@@ -4209,8 +4332,12 @@ class STARpaleomagApp:
             gamma = 90.0 - points[n2 - 1].winc
             rf1, rf2 = compute_rf1_rf2(points, n1, n2, nrm0_vector(ech, orientation=1))
 
-            fcor, hcorani, aniso_note, aniso_tensor = self._apply_anisotropy_correction(
-                ech, ani_path, direction, fit.h)
+            fcor, hcorani, aniso_note, aniso_tensor = None, None, "", None
+            peek_tensor = self._peek_ani_tensor(ech, ani_path)
+            if getattr(ech, "flaganiso", False):
+                aniso_note = (
+                    "Anisotropy: measurements already corrected (Inverse_ANI_correction "
+                    "applied) - H below is the anisotropy-corrected intensity.\n")
 
             # Repli sur le facteur d'anisotropie DEJA calcule par la
             # contribution MagIC (int_corr_aniso, 5e colonne du fichier
@@ -4221,7 +4348,7 @@ class STARpaleomagApp:
             # explicite utilisateur, pour ne jamais corriger deux fois le
             # meme effet physique (tenseur natif recalcule ET facteur
             # MagIC deja applique par le logiciel source).
-            if aniso_tensor is None and aniso_corr and not getattr(ech, "flaganiso", False):
+            if peek_tensor is None and aniso_corr and not getattr(ech, "flaganiso", False):
                 fcor = aniso_corr
                 hcorani = fit.h * aniso_corr
                 aniso_note = (
@@ -4256,10 +4383,31 @@ class STARpaleomagApp:
             ypat2 = [p.yp for p in points[n1 - 1:n2]]
             curv1 = arai_curvature(xpat2, ypat2)
             self._afficher(f"\n{ech.id} : Tmin={tmin} Tmax={tmax}\n")
+            if peek_tensor is not None:
+                self._afficher(
+                    f"\n{HEADER_MARK}===== BEFORE ANISOTROPY CORRECTION - raw measurements of "
+                    f"{ech.id} ====={HEADER_MARK}\n")
             self._afficher(self._arai_step_tables(ech, points, checks, arno))
+            # Calcul brut complet (avec le seul repli MagIC int_corr_aniso
+            # eventuel), puis question/correction d'anisotropie, puis bilan.
             self._afficher(self._arai_fit_report(
                 ech, points, n1, n2, arno, hlab, fit, direction, gamma, rf1, rf2,
-                fcor, hcorani, aniso_note, aniso_tensor, curv0, curv1, crm))
+                fcor, hcorani, aniso_note, None, curv0, curv1, crm))
+            corrected = None
+            if peek_tensor is not None:
+                fcor, hcorani, aniso_note, aniso_tensor = self._apply_anisotropy_correction(
+                    ech, ani_path, direction, fit.h)
+                if aniso_tensor is not None:
+                    corrected = self._arai_anisotropy_corrected(
+                        ech, aniso_tensor, n1, n2, hlab, fit, direction)
+                if corrected is not None:
+                    _text, fcor, hcorani = corrected
+                    self._afficher(corrected[0])
+                elif aniso_note:
+                    self._afficher(f"\n{aniso_note}")
+            h_final = hcorani if hcorani is not None else fit.h
+            if cooling:
+                h_final = h_final * cooling
             if cooling:
                 # Facteur de refroidissement (fichier redo) - absent du
                 # rapport partage avec le dialogue interactif.
