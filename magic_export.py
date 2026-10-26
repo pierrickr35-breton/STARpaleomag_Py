@@ -44,6 +44,7 @@ from typing import Dict, List, Optional, Tuple
 from selection import SelectedSample, Measurement, polere, corfor, corpen
 from calcul import FitResult, AniTensor, AniMeanTensor
 from complete_sample_info import _read_table_rows
+from age_fields import parse_age, _AGE_UNIT_PATTERNS, normalize_age_fields  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Age : equivalent de `checkage` (fichiers_magic.f:2225), etendu pour
@@ -52,65 +53,21 @@ from complete_sample_info import _read_table_rows
 # des delimiteurs Fortran natifs #/_/& des donnees Rennes brutes.
 # ---------------------------------------------------------------------------
 
-_AGE_UNIT_PATTERNS = [
-    # Noms MagIC COMPLETS d'abord : une chaine importee de MagIC ecrit
-    # "665 # 20 AD Years Cal AD (+/-)" ; avec seul "Cal AD" reconnu, il
-    # restait "AD Years ... (+/-)" colle a l'ecart-type (age_sigma =
-    # "20 AD Years   (+/-)" dans sites.txt).
-    ("Years Cal AD (+/-)", "Years Cal AD (+/-)"),
-    ("Years Cal BP", "Years Cal BP"),
-    ("Years AD (+/-)", "Years AD (+/-)"),
-    ("Years BP", "Years BP"),
-    ("Ga", "Ga"),
-    ("Ma", "Ma"),
-    ("ka", "ka"),
-    ("Cal AD", "Years Cal AD (+/-)"),
-    ("Cal BP", "Years Cal BP"),
-    ("AD", "Years AD (+/-)"),
-    ("BP", "Years BP"),
-]
+# parse_age et _AGE_UNIT_PATTERNS : voir age_fields.py (partages avec la
+# lecture du .prmag et Complete sample information).
 
 
-def parse_age(age_str: str) -> Tuple[str, str, str, str, str]:
-    """Retourne (age, age_sigma, age_low, age_high, age_unit)."""
-    s = (age_str or "").strip()
-    age_unit = ""
-    for token, magic_unit in _AGE_UNIT_PATTERNS:
-        if token in s:
-            age_unit = magic_unit
-            s = s.replace(token, " ").strip()
-            if magic_unit.startswith("Years"):
-                # qualificatifs d'ere isoles ("20 AD") : deja portes par l'unite
-                s = re.sub(r"\b(?:AD|BP|Cal)\b", " ", s)
-                s = re.sub(r"\s+", " ", s).strip()
-            break
-
-    age = age_sigma = age_low = age_high = ""
-    # "60 ± 5 Ma" / "60 +/- 5 Ma" : age et incertitude, comme "60#5" -
-    # demande explicite utilisateur (sinon "60 ± 5" partait tel quel dans la
-    # colonne numerique `age` de sites.txt, vu sur Fuego_Pmag_converted).
-    pm = re.match(r"^\s*([-+]?\d+(?:\.\d+)?)\s*(?:±|\+/-|\+-)\s*(\d+(?:\.\d+)?)\s*$", s)
-    if pm:
-        age, age_sigma = pm.group(1), pm.group(2)
-    elif "#" in s:
-        a, b = s.split("#", 1)
-        age, age_sigma = a.strip(), b.strip()
-    elif "&" in s:
-        parts = [p.strip() for p in s.split("&")]
-        if len(parts) >= 3:
-            age, age_low, age_high = parts[0], parts[1], parts[2]
-        else:
-            age = s
-    elif "_" in s:
-        a, b = s.split("_", 1)
-        age_low, age_high = a.strip(), b.strip()
-    elif re.search(r"\s-\s", s):
-        a, b = re.split(r"\s-\s", s, maxsplit=1)
-        age_low, age_high = a.strip(), b.strip()
-    else:
-        age = s
-
-    return age, age_sigma, age_low, age_high, age_unit
+def _symmetric_sigma(age: str, low: str, high: str) -> str:
+    """age_sigma MagIC quand l'intervalle est symetrique autour de l'age
+    ("1601 # 39 Years Cal AD", "80 ± 10 Ma" -> low/high = age -/+ 39 ou 10) :
+    l'incertitude d'origine reste exportee, pas seulement l'intervalle."""
+    try:
+        a, lo, hi = float(age), float(low), float(high)
+    except (TypeError, ValueError):
+        return ""
+    if abs((a - lo) - (hi - a)) < 1e-9 and hi > a:
+        return f"{hi - a:g}"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +399,11 @@ def build_sites_rows(
             continue
         seen.append(site)
 
-        age, age_sigma, age_low, age_high, age_unit = parse_age(ech.magic_age)
+        # quatre champs separes du .prmag (voir age_fields.py) - plus de
+        # texte libre a deviner.
+        age, age_low, age_high, age_unit = normalize_age_fields(
+            ech.magic_age, ech.magic_age_low, ech.magic_age_high, ech.magic_age_unit)
+        age_sigma = _symmetric_sigma(age, age_low, age_high)
         elevation = "" if ech.altitude <= 0.0 else _num(ech.altitude, 1)
         base_row = {
             "site": site,
@@ -523,7 +484,7 @@ def build_sites_rows(
 # l'utilisateur, "il manque beaucoup de colonnes").
 _SITE_METADATA_PREVIEW_HEADER = [
     "site", "lat", "lon", "geologic_classes", "geologic_types", "lithologies", "formation",
-    "location", "age",
+    "location", "age", "age_low", "age_high", "age_unit",
 ]
 
 
@@ -568,6 +529,9 @@ def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict
             "formation": ech.magic_fm,
             "location": ech.magic_loc,
             "age": ech.magic_age,
+            "age_low": ech.magic_age_low,
+            "age_high": ech.magic_age_high,
+            "age_unit": ech.magic_age_unit,
         })
     return rows
 
@@ -616,9 +580,11 @@ def build_locations_rows(
         lons = [_wrap_lon(m.rlong) for m in members]
         gc = next((m.magic_gc for m in members if m.magic_gc), "")
         li = next((m.magic_li for m in members if m.magic_li), "")
-        age, age_sigma, age_low, age_high, age_unit = parse_age(
-            next((m.magic_age for m in members if m.magic_age), "")
-        )
+        first_aged = next((m for m in members if m.magic_age or m.magic_age_low or m.magic_age_high), None)
+        age, age_low, age_high, age_unit = normalize_age_fields(
+            *((first_aged.magic_age, first_aged.magic_age_low, first_aged.magic_age_high,
+               first_aged.magic_age_unit) if first_aged else ("", "", "", "")))
+        age_sigma = ""
         row = {
             "location": loc,
             "geologic_classes": gc,

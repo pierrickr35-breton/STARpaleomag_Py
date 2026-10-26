@@ -1032,6 +1032,11 @@ def magic_site_means(sites_source, combined=True) -> Optional[List[dict]]:
             # site (ex. "A"/"B") des l'import. "A" si absent (ancien
             # champ, valeur par defaut de FitResult.component).
             "component": clean_str(row.get("dir_comp_name", "")) or "A",
+            # Nombre de directions (droites) et de plans de la moyenne - colonne
+            # L/P du .pmagres ; None si la contribution ne les donne pas
+            # (comptes alors depuis les resultats specimen inclus).
+            "n_lines": parse_float_val(row.get("dir_n_specimens_lines", ""), None),
+            "n_planes": parse_float_val(row.get("dir_n_specimens_planes", ""), None),
         })
     if n_skipped_sample_coords:
         print(f"⚠️  {n_skipped_sample_coords} site mean(s) skipped: dir_tilt_correction "

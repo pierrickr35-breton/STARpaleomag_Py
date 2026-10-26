@@ -44,6 +44,7 @@ fournit "1835 - 1835 AD" deja pre-forme via geologic_age - aucune donnee
 source ne permet de le re-decouper fiablement en age_low/age_high/
 age_unit distincts a ce stade)."""
 
+from age_fields import age_fields_chunks
 import argparse
 import os
 import re
@@ -160,7 +161,10 @@ def _sample_header_block(p: Pmag) -> str:
     )
     line_c = f"bed_dip_strike: {bed_dip_strike:.1f}\tbed_dip: {bed_dip:.1f}"
     line_d = (
-        f"formation: {p.magic_fm or 'n.d'}\tage: {p.magic_age.strip() or 'n.d'}\t"
+        f"formation: {p.magic_fm or 'n.d'}\t"
+        + age_fields_chunks(p.magic_age, getattr(p, "magic_age_low", ""),
+                            getattr(p, "magic_age_high", ""), getattr(p, "magic_age_unit", ""))
+        + "\t"
         f"geologic_classes: {p.magic_gc or 'n.d'}\tgeologic_types: {p.magic_smt or 'n.d'}\t"
         f"lithologies: {p.magic_li or 'n.d'}\tlocation: {p.magic_loc or 'n.d'}\t"
         f"obs: {p.magic_obs or 'n.d'}\tmethod_codes: {method_summary}"
@@ -304,7 +308,10 @@ def convert_file(
 
     old_results_path = legacy_results_path or (os.path.splitext(path_in)[0] + ".r")
     new_results_path = results_path_for(path_out)
-    n_results, warnings = convert_legacy_results_file(old_results_path, new_results_path)
+    # mesures par specimen : les pas AF des anciens .r sont en Oersted (x10),
+    # convertis en mT d'apres les etapes reellement mesurees
+    measurements = {p.id: p.mesures for p in samples}
+    n_results, warnings = convert_legacy_results_file(old_results_path, new_results_path, measurements)
     return len(samples), n_results, warnings
 
 

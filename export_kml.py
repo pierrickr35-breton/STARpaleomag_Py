@@ -10,6 +10,7 @@ directement `donnees` (List[Pmag], le fichier ENTIER charge) plutot que la
 selection courante - une carte de sites n'a pas de raison de dependre de
 ce qui est selectionne pour les graphiques."""
 
+from age_fields import age_display
 from typing import Dict, List
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -46,7 +47,7 @@ def _description_html(specimens: List[Pmag]) -> str:
     parts.append(f"<B>Nb specimens demagnetized : </B>{n_demag}<BR>")
     for label, value in (
         ("Lithology", first.magic_li), ("Geologic type", first.magic_smt),
-        ("Age", first.magic_age), ("Location", first.magic_loc),
+        ("Age", age_display(first.magic_age, first.magic_age_low, first.magic_age_high, first.magic_age_unit)), ("Location", first.magic_loc),
     ):
         if value.strip():
             parts.append(f"<B>{label} : </B>{_xml_escape(value.strip())}<BR>")

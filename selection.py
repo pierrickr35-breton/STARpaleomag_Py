@@ -54,6 +54,9 @@ class SelectedSample:
     magic_sample: str = ""
     magic_fm: str = ""
     magic_age: str = ""
+    magic_age_low: str = ""
+    magic_age_high: str = ""
+    magic_age_unit: str = ""
     magic_gc: str = ""
     magic_smt: str = ""
     magic_li: str = ""
@@ -314,6 +317,9 @@ def _build_selected_sample(p: Pmag, matched_mesures: List[Measurement]) -> Selec
         magic_sample=p.magic_sample,
         magic_fm=p.magic_fm,
         magic_age=p.magic_age,
+        magic_age_low=getattr(p, "magic_age_low", ""),
+        magic_age_high=getattr(p, "magic_age_high", ""),
+        magic_age_unit=getattr(p, "magic_age_unit", ""),
         magic_gc=p.magic_gc,
         magic_smt=p.magic_smt,
         magic_li=p.magic_li,

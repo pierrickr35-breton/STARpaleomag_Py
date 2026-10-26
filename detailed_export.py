@@ -25,6 +25,7 @@ champs magic_* deja decodes depuis la ligne roche (testlect.decode_roche)
 - pas besoin de la reparser ici.
 """
 
+from age_fields import age_display
 import os
 from typing import Dict, List, Optional
 
@@ -169,7 +170,7 @@ def _sample_param_lines(ech: SelectedSample, depthsam: Optional[float]) -> List[
     lines.append(f"Dip bedding    :  {ech.dip:6.1f}")
 
     lines.append(f'Formation   :   "{ech.magic_fm}"')
-    lines.append(f'Age         :   "{ech.magic_age}"')
+    lines.append(f'Age         :   "{age_display(ech.magic_age, ech.magic_age_low, ech.magic_age_high, ech.magic_age_unit)}"')
     lines.append(f'Geology     :   "{ech.magic_gc} : {ech.magic_smt} : {ech.magic_li}"')
     lines.append(f'Locality    :   "{ech.magic_loc}"')
     lines.append(f'Observation :   "{ech.magic_obs}"')

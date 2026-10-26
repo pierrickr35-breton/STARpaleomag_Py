@@ -80,6 +80,8 @@ le tout premier etat, avant la toute premiere completion)."""
 import os
 from typing import Dict, List, Optional, Tuple
 
+from age_fields import normalize_age_fields, set_age_fields_in_line
+
 _ROCHE_TABLE_FIELDS = (
     "formation", "age", "geologic_classes", "geologic_types", "lithologies", "location", "obs",
 )
@@ -195,6 +197,13 @@ def _missing_fields(line_a: dict, line_d: dict, check_height: bool) -> List[str]
     if check_height and line_a.get("stratigraphic_height", "").strip().lower() in ("", "n.d"):
         missing.append("stratigraphic_height")
     for field in _ROCHE_TABLE_FIELDS:
+        if field == "age":
+            # age connu si l'un des champs age/age_low/age_high l'est
+            # (voir age_fields.py)
+            if all(line_d.get(f, "").strip().lower() in ("", "n.d")
+                   for f in ("age", "age_low", "age_high")):
+                missing.append(field)
+            continue
         if line_d.get(field, "").strip().lower() in ("", "n.d"):
             missing.append(field)
     return missing
@@ -280,7 +289,6 @@ def _apply_table(
             skip_blank()
             continue
 
-        _normalize_age(record)
         a_updates = {}
         if record.get("lat"):
             try:
@@ -331,9 +339,25 @@ def _apply_table(
         if a_updates:
             lines[idx_a] = _rewrite_kv_line(lines[idx_a], a_updates)
 
-        d_updates = {field: record[field] for field in _ROCHE_TABLE_FIELDS if record.get(field)}
+        d_updates = {field: record[field] for field in _ROCHE_TABLE_FIELDS
+                     if field != "age" and record.get(field)}
         if d_updates:
             lines[idx_d] = _rewrite_kv_line(lines[idx_d], d_updates)
+        # Age : quatre champs separes (voir age_fields.py) - demande
+        # explicite utilisateur. Une table qui donne 'age' ET age_low/
+        # age_high/age_unit les transmet TOUS (avant, une colonne 'age'
+        # presente faisait ignorer les trois autres : "80 ± 10 Ma" devenait
+        # "80", vu sur Fuego_Pmag_converted.prmag). Un champ que la table ne
+        # donne pas garde la valeur deja presente dans le .prmag.
+        if any(record.get(f) for f in ("age", "age_low", "age_high", "age_unit")):
+            table_age = normalize_age_fields(record.get("age", ""), record.get("age_low", ""),
+                                             record.get("age_high", ""), record.get("age_unit", ""))
+            current = _prmag_kv_line(lines[idx_d])
+            current_age = normalize_age_fields(current.get("age"), current.get("age_low"),
+                                               current.get("age_high"), current.get("age_unit"))
+            merged = [t or c for t, c in zip(table_age, current_age)]
+            lines[idx_d] = set_age_fields_in_line(lines[idx_d], *merged)
+            d_updates["age"] = merged[0] or "range"
 
         if a_updates or d_updates:
             n_updated += 1

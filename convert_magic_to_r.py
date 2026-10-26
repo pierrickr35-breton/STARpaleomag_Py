@@ -31,6 +31,7 @@ n'ont souvent ni azimuth/dip/bed_dip_strike/bed_dip au niveau sample -
 echantillons archeologiques sans orientation de terrain, ex. tessons de
 poterie) : "n.d", memes conventions que convert_ren_to_r.py."""
 
+from age_fields import age_fields_chunks
 import argparse
 import collections
 import math
@@ -496,7 +497,10 @@ def _sample_header_block(
     age_low = _f(site_row, "age_low")
     age_high = _f(site_row, "age_high")
     age_unit = _s(site_row, "age_unit") if site_row else "n.d"
-    age = f"{_nd(age_low)} - {_nd(age_high)} {age_unit}" if (age_low is not None or age_high is not None) else "n.d"
+    age_value = _s(site_row, "age") if site_row else "n.d"
+    age_chunks = age_fields_chunks(
+        age_value, "" if age_low is None else f"{age_low:g}", "" if age_high is None else f"{age_high:g}",
+        age_unit)
     geologic_classes = _s(site_row, "geologic_classes") if site_row else "n.d"
     geologic_types = _s(site_row, "geologic_types") if site_row else "n.d"
     lithologies = _s(site_row, "lithologies") if site_row else "n.d"
@@ -553,7 +557,7 @@ def _sample_header_block(
     )
     line_c = f"bed_dip_strike: {_nd(bed_dip_strike, '.1f')}\tbed_dip: {_nd(bed_dip, '.1f')}"
     line_d = (
-        f"formation: {formation}\tage: {age}\t"
+        f"formation: {formation}\t{age_chunks}\t"
         f"geologic_classes: {geologic_classes}\tgeologic_types: {geologic_types}\t"
         f"lithologies: {lithologies}\tlocation: {location}\tobs: {obs}\t"
         f"method_codes: {_s(spec_row, 'method_codes') if spec_row else 'n.d'}"
@@ -1060,6 +1064,17 @@ def _convert_magic_results(path_in: str, path_out: str) -> Tuple[int, int]:
             component=row["component"],
             liste="codes:" + ":".join(str(c) for c in cs),
         )
+        # Droites/plans de la moyenne (colonne L/P, au lieu de "?/?") - demande
+        # explicite utilisateur ("integrer les infos sur lignes et plans pour le
+        # calcul des moyennes par site") : valeurs publiees par la contribution
+        # (dir_n_specimens_lines/planes), sinon comptees sur les specimens inclus.
+        fits = [specimen_fits[s] for s in row["specimens"] if s in specimen_fits]
+        if row.get("n_lines") is not None or row.get("n_planes") is not None:
+            mean_fit.n_lines = int(round(row.get("n_lines") or 0))
+            mean_fit.n_planes = int(round(row.get("n_planes") or 0))
+        elif fits:
+            mean_fit.n_planes = sum(1 for f in fits if f.cat1 == "P")
+            mean_fit.n_lines = len(fits) - mean_fit.n_planes
         _, existing_ids = archivres(mean_fit, path_results, existing_ids)
         nb_means += 1
 

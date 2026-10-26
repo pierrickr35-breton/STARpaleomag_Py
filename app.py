@@ -130,6 +130,7 @@ from datatools import (
     remove_step,
     remove_bad_quality_steps,
     eliminate_grm,
+    reduce_grm_before_fit,
     convert_z_minus,
     export_thellier_tdt,
     detect_grm,
@@ -5499,6 +5500,19 @@ class STARpaleomagApp:
     # Calcul : ajuslig / fishmes / fishres / lisres / initres
     # ------------------------------------------------------------------
 
+    def _reduce_grm_before_fit(self):
+        """Avant tout best fit : reduit les triplets AF X/Y/Z (methode 1)
+        des specimens selectionnes qui en contiennent - demande explicite
+        utilisateur ("au cours de l'analyse en best fit, reduire les GRM
+        d'abord si il y a des mesures en FX, FY et FZ"). Comme `Suppress
+        GRM`, la reduction vaut pour la selection de cette session."""
+        done = reduce_grm_before_fit(self.selection, method=1)
+        if done:
+            self._afficher(
+                f"GRM triplets (FX/FY/FZ) reduced before fitting on {len(done)} specimen(s): "
+                + ", ".join(f"{sid} ({n})" for sid, n, _ in done) + "\n"
+            )
+
     def ouvrir_ajuslig_dialog(self):
         """Equivalent GUI de `ajuslig` (ajustement de droite par ACP,
         linesplans.f) : boucle sur TOUS les echantillons de la selection,
@@ -5509,6 +5523,7 @@ class STARpaleomagApp:
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
+        self._reduce_grm_before_fit()
 
         samples = [s for s in self.selection if len(s.mesures) >= 2]
         if not samples:
@@ -5633,6 +5648,7 @@ class STARpaleomagApp:
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
+        self._reduce_grm_before_fit()
 
         viable = [ech for ech in self.selection if len(ech.mesures) >= 2]
 
@@ -5738,6 +5754,7 @@ class STARpaleomagApp:
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
+        self._reduce_grm_before_fit()
 
         samples = [s for s in self.selection if len(s.mesures) >= 2]
         if not samples:
@@ -5820,6 +5837,7 @@ class STARpaleomagApp:
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
+        self._reduce_grm_before_fit()
 
         for ech in self.selection:
             if not ech.mesures:
@@ -5909,6 +5927,7 @@ class STARpaleomagApp:
         if not self.selection:
             self._showwarning("No selection", "Select some samples first.")
             return
+        self._reduce_grm_before_fit()
 
         ancr_s = self._console_input(
             "Automatic fit anchored to origin (Y/n): ", "Y")

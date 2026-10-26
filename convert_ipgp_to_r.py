@@ -306,7 +306,7 @@ def _sample_header_block(sp: dict) -> str:
     )
     line_c = f"bed_dip_strike: {sp['bed_dip_strike']:.1f}\tbed_dip: {sp['bed_dip']:.1f}"
     line_d = (
-        "formation: n.d\tage: n.d\t"
+        "formation: n.d\tage: n.d\tage_low: n.d\tage_high: n.d\tage_unit: n.d\t"
         "geologic_classes: n.d\tgeologic_types: n.d\t"
         "lithologies: n.d\tlocation: n.d\t"
         "obs: n.d\tmethod_codes: n.d"

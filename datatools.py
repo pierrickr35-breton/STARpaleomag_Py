@@ -199,6 +199,32 @@ def eliminate_grm(ech: SelectedSample, method: int = 1) -> int:
     return count
 
 
+def has_grm_triplets(ech: SelectedSample) -> bool:
+    """Vrai si le specimen contient au moins un triplet AF consecutif
+    cod1='F', cod2 'X','Y','Z' (celui que eliminate_grm reduit)."""
+    ms = ech.mesures
+    return any(
+        ms[i].cod1 == "F" and ms[i].cod2 == "X" and ms[i + 1].cod2 == "Y" and ms[i + 2].cod2 == "Z"
+        for i in range(len(ms) - 2)
+    )
+
+
+def reduce_grm_before_fit(samples, method: int = 1) -> List[Tuple[str, int, int]]:
+    """Reduit les triplets AF X/Y/Z de chaque specimen qui en contient,
+    AVANT un ajustement (best fit) - demande explicite utilisateur ("au
+    cours de l'analyse en best fit, reduire les GRM d'abord si il y a des
+    mesures en FX, FY et FZ"). Methode 1 (substitution axe par axe) par
+    defaut : c'est elle qui redonne les ajustements des anciens .r du
+    Fortran (Fuego_Pmag.r). Retourne [(id, triplets reduits, mesures
+    restantes)] pour les specimens modifies."""
+    done = []
+    for ech in samples:
+        if has_grm_triplets(ech):
+            n = eliminate_grm(ech, method=method)
+            done.append((ech.id, n, len(ech.mesures)))
+    return done
+
+
 # ---------------------------------------------------------------------------
 # detect_grm : diagnostic (pas de correction) de contamination par GRM sur
 # un degausser 3 axes EN LIGNE avec le magnetometre - demande explicite

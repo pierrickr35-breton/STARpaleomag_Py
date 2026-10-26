@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import csv
 
+from age_fields import normalize_age_fields
+
 
 # ---------------------------------------------------------------------------
 # Structures équivalentes au Fortran STRUCTURE /pmagdata/
@@ -101,6 +103,11 @@ class Pmag:
     magic_sample: str = ""
     magic_fm: str = ""
     magic_age: str = ""
+    # age_low/age_high/age_unit : voir age_fields.py (champs separes,
+    # deduits du texte de magic_age pour un ancien fichier).
+    magic_age_low: str = ""
+    magic_age_high: str = ""
+    magic_age_unit: str = ""
     magic_gc: str = ""
     magic_smt: str = ""
     magic_li: str = ""
@@ -293,6 +300,14 @@ def parse_measure_line(line: str) -> Optional[Measurement]:
     ici, voir _LEGACY_AF_CODES.
     """
     parts = line.split()
+    # Susceptibilite >= 10000 (format Fortran a2,f7.1) : la valeur se colle
+    # a l'instrument ("C121511.0" = C1 + 21511.0) - la ligne avait alors 6
+    # champs et la mesure entiere etait perdue a la lecture, sans message
+    # (vu sur les sites 13CB de Beagle, ex. 13CB1204B : 8 mesures sur 12).
+    if len(parts) >= 6:
+        glued = re.fullmatch(r"([A-Za-z][A-Za-z0-9])(-?\d+\.\d*)", parts[5])
+        if glued:
+            parts[5:6] = [glued.group(1), glued.group(2)]
     if len(parts) < 7:
         return None
 
@@ -539,7 +554,8 @@ def read_prmag_file(filepath: str, encoding: str = "utf-8") -> List[Pmag]:
         p.dip = _prmag_nd(line_c.get("bed_dip"))
 
         p.magic_fm = _prmag_text(line_d.get("formation"))
-        p.magic_age = _prmag_text(line_d.get("age"))
+        p.magic_age, p.magic_age_low, p.magic_age_high, p.magic_age_unit = normalize_age_fields(
+            line_d.get("age"), line_d.get("age_low"), line_d.get("age_high"), line_d.get("age_unit"))
         p.magic_gc = _prmag_text(line_d.get("geologic_classes"))
         p.magic_smt = _prmag_text(line_d.get("geologic_types"))
         p.magic_li = _prmag_text(line_d.get("lithologies"))

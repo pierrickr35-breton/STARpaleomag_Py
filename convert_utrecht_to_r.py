@@ -66,6 +66,7 @@ Notes :
    ecriture dans .prmag.
 """
 
+from age_fields import age_fields_chunks
 import argparse
 import json
 import os
@@ -126,7 +127,9 @@ def _sample_header_block(sp: dict, site: str = "n.d") -> str:
     name = sp["name"]
     lat, lon = sp.get("latitude"), sp.get("longitude")
     age_min, age_max = sp.get("ageMin"), sp.get("ageMax")
-    age = f"{_nd(age_min)} - {_nd(age_max)} Ma" if (age_min is not None or age_max is not None) else "n.d"
+    age_chunks = age_fields_chunks(
+        "", "" if age_min is None else f"{age_min:g}", "" if age_max is None else f"{age_max:g}",
+        "Ma" if (age_min is not None or age_max is not None) else "")
 
     line_a = (
         f"specimen: {name}\tsample: {name}\tsite: {site}\t"
@@ -148,7 +151,7 @@ def _sample_header_block(sp: dict, site: str = "n.d") -> str:
     )
     line_c = f"bed_dip_strike: {_nd(sp.get('beddingStrike'), '.1f')}\tbed_dip: {_nd(sp.get('beddingDip'), '.1f')}"
     line_d = (
-        f"formation: n.d\tage: {age}\t"
+        f"formation: n.d\t{age_chunks}\t"
         f"geologic_classes: {sp.get('geology') or 'n.d'}\tgeologic_types: n.d\t"
         f"lithologies: {sp.get('lithology') or 'n.d'}\tlocation: n.d\t"
         f"obs: n.d\tmethod_codes: n.d"

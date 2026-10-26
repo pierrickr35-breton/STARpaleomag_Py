@@ -769,17 +769,34 @@ def fit_lines_auto(selected: List[SelectedSample], anchored: bool = True) -> Lis
 # ---------------------------------------------------------------------------
 
 def _resolve_step_range_by_value(
-    ech: SelectedSample, tempmin: float, tempmax: float
+    ech: SelectedSample, tempmin: float, tempmax: float,
+    codmin: str = "", codmax: str = "",
 ) -> Optional[Tuple[int, int]]:
+    """`codmin`/`codmax` (optionnels, voir _parse_redo_step) limitent la
+    recherche aux mesures de ce cod1 : indispensable pour une sequence
+    mixte thermique puis AF, ou "350" seul designerait aussi bien 350 degC
+    que la derniere etape AF <= 350 mT."""
     jdeb = jfin = None
     for idx, m in enumerate(ech.mesures, start=1):
-        if m.etape <= tempmin:
+        if m.etape <= tempmin and (not codmin or m.cod1 == codmin):
             jdeb = idx
-        if m.etape <= tempmax:
+        if m.etape <= tempmax and (not codmax or m.cod1 == codmax):
             jfin = idx
-    if jdeb is None or jfin is None:
+    if jdeb is None or jfin is None or jfin < jdeb:
         return None
     return jdeb, jfin
+
+
+def _parse_redo_step(token: str) -> Tuple[float, str]:
+    """Etape d'une ligne de redo file : un nombre ("350"), ou un nombre
+    suivi du code de desaimantation cod1 ("350D", "20F") - demande
+    explicite utilisateur (redo a partir d'un ancien .r dont les
+    ajustements passent de la thermique a l'AF sur le meme specimen).
+    Leve ValueError si le token n'est pas une etape."""
+    m = re.fullmatch(r"([-+]?\d+(?:\.\d+)?)([A-Za-z]?)", token.strip())
+    if not m:
+        raise ValueError(token)
+    return float(m.group(1)), m.group(2).upper()
 
 
 def _parse_redo_numcomp(token: str) -> Tuple[int, str]:
@@ -823,7 +840,16 @@ def fit_from_redo_file(
 
     La derniere colonne (numcomp) est convertie en lettre de composante
     (voir _parse_redo_numcomp) et assignee a `FitResult.component` -
-    demande explicite utilisateur (voir _parse_redo_numcomp)."""
+    demande explicite utilisateur (voir _parse_redo_numcomp).
+
+    Extensions (anciens fichiers redo inchanges) : tempmin/tempmax peuvent
+    porter le code de desaimantation ("350D 20F", voir _parse_redo_step),
+    et les triplets AF X/Y/Z du specimen sont reduits avant l'ajustement
+    (datatools.eliminate_grm, methode 1 ; une 7e colonne GRM2 choisit la
+    methode 2 - demande explicite utilisateur, "reduire les GRM d'abord si
+    il y a des mesures en FX, FY et FZ")."""
+    from datatools import eliminate_grm, has_grm_triplets  # import local : datatools importe calcul
+
     results: List[FitResult] = []
     last_line: Optional[str] = None
 
@@ -846,11 +872,16 @@ def fit_from_redo_file(
             continue
         numcomp, component = _parse_redo_numcomp(numcomp_s)
         try:
-            tempmin, tempmax = float(tempmin_s), float(tempmax_s)
+            (tempmin, codmin), (tempmax, codmax) = _parse_redo_step(tempmin_s), _parse_redo_step(tempmax_s)
         except ValueError:
             continue
+        # Triplets AF X/Y/Z toujours reduits avant l'ajustement (methode 1,
+        # ou 2 si la 7e colonne vaut GRM2) - voir datatools.reduce_grm_before_fit.
+        grm = parts[6].upper() if len(parts) > 6 else ""
+        if has_grm_triplets(ech):
+            eliminate_grm(ech, method=2 if grm == "GRM2" else 1)
 
-        rng = _resolve_step_range_by_value(ech, tempmin, tempmax)
+        rng = _resolve_step_range_by_value(ech, tempmin, tempmax, codmin, codmax)
         if rng is None:
             continue
         jdeb, jfin = rng
@@ -2094,18 +2125,18 @@ def _parse_legacy_result_line(line: str) -> Optional[FitResult]:
 
     if prefix_kwargs["id"][:5] == "mean:":
         try:
-            return FitResult(
-                **prefix_kwargs, par2_mean=par2_raw, par3_mean=par3_raw,
-                tx=(float(seg("tx1", _LEGACY_R_COLS_MEAN)), float(seg("tx2", _LEGACY_R_COLS_MEAN))),
+            return _legacy_mean_result(
+                prefix_kwargs, k=par2_raw, orientation=par3_raw,
+                n_lines=float(seg("tx1", _LEGACY_R_COLS_MEAN)), n_planes=float(seg("tx2", _LEGACY_R_COLS_MEAN)),
                 lat=float(seg("lat", _LEGACY_R_COLS_MEAN)), rlong=float(seg("rlong", _LEGACY_R_COLS_MEAN)),
-                par4=float(seg("par4", _LEGACY_R_COLS_MEAN)), par5=float(seg("par5", _LEGACY_R_COLS_MEAN)),
+                vgp_lat=float(seg("par4", _LEGACY_R_COLS_MEAN)), vgp_lon=float(seg("par5", _LEGACY_R_COLS_MEAN)),
                 liste=seg("liste", _LEGACY_R_COLS_MEAN).strip(),
             )
         except ValueError:
             return None
 
-    prefix_kwargs["step_first"] = int(round(par2_raw))
-    prefix_kwargs["step_last"] = int(round(par3_raw))
+    prefix_kwargs["step_first"] = par2_raw
+    prefix_kwargs["step_last"] = par3_raw
     try:
         return FitResult(
             **prefix_kwargs,
@@ -2122,7 +2153,107 @@ def _parse_legacy_result_line(line: str) -> Optional[FitResult]:
         return None
 
 
-def convert_legacy_results_file(old_path: str, new_path: str) -> Tuple[int, List[str]]:
+def _legacy_mean_result(
+    kwargs: dict, k: float, orientation: float, n_lines: float, n_planes: float,
+    lat: float, rlong: float, vgp_lat: float, vgp_lon: float, liste: str,
+) -> FitResult:
+    """Moyenne de site d'un ancien .r : `par1`=a95, `par2`=k, `par3`=repere
+    (2=IS, 3=TC), puis nombre de DROITES et de PLANS de la moyenne
+    (0.700E+01 0.100E+01 = 7 droites, 1 plan), lat/lon du site et VGP.
+    k va dans tx[0] (convention native, voir fisher_from_results) - avant,
+    tx recevait (droites, plans) et la colonne k du .pmagres affichait le
+    nombre de droites (ex. 07AT01 : k=4.0 au lieu de 215.7) ; droites/plans
+    vont maintenant dans la colonne L/P (n_lines/n_planes) au lieu de "?/?"
+    - demande explicite utilisateur ("integrer les infos sur lignes et
+    plans pour le calcul des moyennes par site"). dp/dm recalcules."""
+    res = FitResult(
+        **kwargs, par3_mean=orientation, tx=(k, 0.0),
+        lat=lat, rlong=rlong, par4=vgp_lat, par5=vgp_lon, liste=liste,
+    )
+    res.n_lines, res.n_planes = int(round(n_lines)), int(round(n_planes))
+    res.vgp_dp, res.vgp_dm = dp_dm_from_a95(res.mad, res.inc)
+    return res
+
+
+_LEGACY_NUM = r"(-?\d+(?:\.\d*)?(?:[Ee][-+]?\d+)?)"
+_LEGACY_NOPREFIX_SPEC_RE = re.compile(
+    r"^(\S+)\s+" + r"\s+".join([_LEGACY_NUM] * 4) + r"\s*([LPfFsS])(\S?)\s+(?:(o)\s+)?([A-Za-z])?\s*(\d+)\s+(\d+)\s+"
+    + r"\s+".join([_LEGACY_NUM] * 5))
+_LEGACY_NOPREFIX_MEAN_RE = re.compile(
+    r"^mean:\s*(\S+)\s+" + r"\s+".join([_LEGACY_NUM] * 4) + r"\s*(\S)(\S)?\s+(\d+)\s+(\d+)\s+"
+    + r"\s+".join([_LEGACY_NUM] * 11) + r"\s*(.*)$")
+
+
+def _parse_legacy_result_line_noprefix(line: str) -> Optional[FitResult]:
+    """Ligne d'ancien .r SANS le prefixe "c: <numero>" - la forme de la
+    plupart des .r reels (Fuego_Pmag.r, tous les .r de Beagle) : seules
+    quelques lignes y portent "c:", et _parse_legacy_result_line (colonnes
+    fixes calees sur ce prefixe) ignorait toutes les autres - un .pmagres
+    converti a 1 resultat sur 175 (Fuego). Lecture par jetons : la lettre
+    L/P est collee au pendage ("14.2L"), le champ ancre ("o") et le code
+    de desaimantation peuvent manquer (ancre vide = non ancre, comme
+    _parse_legacy_result_line). Pas d'ancien numero `c` ni de liste de
+    codes pour les moyennes dans cette forme."""
+    s = line.strip()
+    m = _LEGACY_NOPREFIX_MEAN_RE.match(s)
+    if m:
+        g = m.groups()
+        kwargs = dict(c="", id="mean: " + g[0], cin=float(g[1]), caz=float(g[2]), dip=float(g[3]),
+                      str_=float(g[4]), cat1=g[5], cat2=g[6] or " ", orig="n", demag="",
+                      numcomp=int(g[7]), nb=int(g[8]), dec=float(g[9]), inc=float(g[10]), mad=float(g[11]))
+        return _legacy_mean_result(kwargs, k=float(g[12]), orientation=float(g[13]),
+                                   n_lines=float(g[14]), n_planes=float(g[15]), lat=float(g[16]),
+                                   rlong=float(g[17]), vgp_lat=float(g[18]), vgp_lon=float(g[19]),
+                                   liste=g[20].strip())
+    m = _LEGACY_NOPREFIX_SPEC_RE.match(s)
+    if not m or s.startswith("mean"):
+        return None
+    g = m.groups()
+    numcomp = int(g[9])
+    return FitResult(
+        c="", id=g[0], cin=float(g[1]), caz=float(g[2]), dip=float(g[3]), str_=float(g[4]),
+        cat1=g[5], cat2=g[6] or " ", orig=g[7] or "n", demag=(g[8] or "").upper(),
+        numcomp=numcomp, component=_component_from_numcomp(numcomp), nb=int(g[10]),
+        dec=float(g[11]), inc=float(g[12]), mad=float(g[13]),
+        step_first=float(g[14]), step_last=float(g[15]),
+    )
+
+
+def _legacy_resolve_steps(first: float, last: float, demag: str, nb: int, mesures) -> Tuple[float, float]:
+    """Bornes d'un ajustement d'un ancien .r -> valeurs du .prmag : les pas
+    AF (F/A) y sont en Oersted (x10, voir testlect._LEGACY_AF_CODES), les
+    pas thermiques en degC, et un ajustement peut passer de la thermique a
+    l'AF (Fuego 97TF0708A : 350 degC -> 20 mT, ou "350" designerait aussi
+    35 mT). Les deux bornes sont cherchees ENSEMBLE dans les mesures du
+    specimen : parmi les paires possibles, celle dont le nombre de pas
+    distincts (un triplet AF X/Y/Z compte pour un) egale le n du .r ; a
+    egalite, la borne de fin de meme code que la colonne demag. Sans
+    mesures (ou sans correspondance), seul le code demag decide."""
+    def cands(value):
+        return [k for k, m in enumerate(mesures)
+                if (m.cod1 in _LEGACY_AF_STEP_CODES and abs(m.etape * 10 - value) < 1e-6)
+                or (m.cod1 not in _LEGACY_AF_STEP_CODES and abs(m.etape - value) < 1e-6)]
+    best = None
+    for j1 in cands(first):
+        for j2 in cands(last):
+            if j2 < j1:
+                continue
+            n = len({(m.etape, m.cod1) for m in mesures[j1:j2 + 1]})
+            score = (abs(n - nb), (mesures[j2].cod1 in _LEGACY_AF_STEP_CODES) != (demag in _LEGACY_AF_STEP_CODES))
+            if best is None or score < best[0]:
+                best = (score, mesures[j1].etape, mesures[j2].etape)
+    if best is not None:
+        return best[1], best[2]
+    if demag in _LEGACY_AF_STEP_CODES:
+        return first / 10.0, last / 10.0
+    return first, last
+
+
+_LEGACY_AF_STEP_CODES = ("F", "A")
+
+
+def convert_legacy_results_file(old_path: str, new_path: str,
+                                 measurements: Optional[Dict[str, list]] = None) -> Tuple[int, List[str]]:
     """Convertit un ANCIEN fichier .r (colonnes fixes) vers le nouveau
     .pmagres (sections specimen/site mean, colonnes auto-descriptives).
     tx/ty/tz de l'ancien fichier sont IGNORES (pas ecrits dans le nouveau
@@ -2174,9 +2305,16 @@ def convert_legacy_results_file(old_path: str, new_path: str) -> Tuple[int, List
     specimen_lines, mean_lines = [], []
     with open(old_path, "r", encoding="iso-8859-1", errors="replace") as f:
         for raw in f:
-            res = _parse_legacy_result_line(raw.rstrip("\n"))
+            line = raw.rstrip("\r\n")
+            res = _parse_legacy_result_line(line) if line.startswith("c:") else None
+            if res is None:
+                res = _parse_legacy_result_line_noprefix(line)
             if res is None:
                 continue
+            if res.id[:5] != "mean:":
+                res.step_first, res.step_last = _legacy_resolve_steps(
+                    res.step_first, res.step_last, res.demag, res.nb,
+                    (measurements or {}).get(res.id, []))
             if res.id[:5] == "mean:":
                 old_codes = [t for t in res.liste.replace("codes:", "").split(":") if t.strip()]
                 new_codes = []
