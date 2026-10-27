@@ -67,6 +67,10 @@ class Measurement:
     # position partenaire dont elle derive (ex. "X-" pour un X+ retire) -
     # sert a ecrire "(-X-)" a la place de "X+" dans le texte du .pmagani.
     reconstructed_from: str = ""
+    # colonne method_codes du .prmag (vide pour un .ren) - permet a l'export
+    # MagIC de reconnaitre une AARM (LP-AN-ARM) sur un pas X/Y/Z, que rien
+    # d'autre dans la mesure ne distingue d'une ATRM.
+    method_codes: str = ""
 
 
 @dataclass
@@ -586,6 +590,7 @@ def read_prmag_file(filepath: str, encoding: str = "utf-8") -> List[Pmag]:
                 s=_prmag_nd(col("s")),
                 treat_dc_field=_prmag_nd_opt(col("treat_dc_lowfield")),
                 quality=_prmag_text(col("quality")) or "g",
+                method_codes=_prmag_text(col("method_codes")),
             )
             p.mesures.append(meas)
 

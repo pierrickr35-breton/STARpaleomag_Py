@@ -1475,7 +1475,9 @@ def _measurement_treatment(
             dc_field = ifield * 1.0e-6
             codes = "LT-PTRM-I:LP-PI-TRM:LP-PI-ALT-PTRM:LP-PI-BT-IZZI"
     elif m.cod1 in ("X", "Y", "Z"):
-        theta = 90.0 if m.cod1 == "Z" else 0.0
+        # Z- = champ applique vers le bas de l'axe Z : theta -90 (comme X-/Y-
+        # inverses par phi) - avant, Z+ et Z- recevaient tous deux +90.
+        theta = (-90.0 if m.cod2 == "-" else 90.0) if m.cod1 == "Z" else 0.0
         if m.cod1 == "X":
             phi = 180.0 if m.cod2 == "-" else 0.0
         elif m.cod1 == "Y":
@@ -1493,7 +1495,17 @@ def _measurement_treatment(
         # `etape` represente alors un champ fort (mT), pas une
         # temperature - meme convention que cod1='I' (dc_field=etape*
         # 1e-3), PAS de treat_temp (contrairement au cas TRM).
-        if anisotropy_kind == "irm":
+        # champ labo : celui du .prmag (treat_dc_lowfield) s'il est donne,
+        # sinon celui du commentaire du specimen
+        field_uT = getattr(m, "treat_dc_field", None) or ifield
+        if "LP-AN-ARM" in (getattr(m, "method_codes", "") or ""):
+            # AARM (voir convert_ren_to_r._apply_rennes_anisotropy) : pas =
+            # champ alternatif en mT, champ continu en uT, temperature ambiante
+            af_field = etape * 0.001
+            dc_field = field_uT * 1.0e-6
+            temp = 273.0
+            codes = "LT-AF-I:LP-AN-ARM"
+        elif anisotropy_kind == "irm":
             dc_field = etape * 0.001
             codes = "LT-IRM:LP-AN-IRM"
         else:
@@ -1503,7 +1515,7 @@ def _measurement_treatment(
             # champ (et phi/theta, ecrits meme a 0 des qu'un champ est
             # applique) pour ranger chaque pas ATRM dans l'une des 6
             # positions +/-X,Y,Z.
-            dc_field = ifield * 1.0e-6
+            dc_field = field_uT * 1.0e-6
             codes = "LT-T-I:LP-AN-TRM"
             if m.cod1 == "Z" and m.cod2 == "B":
                 # ZB = repetition de la position Z+ en fin de sequence ATRM
