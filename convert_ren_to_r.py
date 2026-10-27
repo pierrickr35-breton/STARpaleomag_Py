@@ -48,7 +48,7 @@ from age_fields import age_fields_chunks
 import argparse
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from testlect import Pmag, read_ren_file
 from magic_export import _measurement_treatment, _instrument, _specimen_method_codes
@@ -198,7 +198,37 @@ def _step_value(m) -> float:
     return float(m.etape)
 
 
-def _measurement_rows(p: Pmag) -> List[str]:
+# Conventions du laboratoire de Rennes pour l'anisotropie de remanence -
+# option `rennes_anisotropy` de convert_file, demande explicite utilisateur
+# (conversion de Beagle) : les positions X/Y/Z mesurees sur le cryogenique
+# en 4 positions (instrument "C4") sont une AARM, dont le pas est le champ
+# alternatif en Oersted ("700X+" = 70 mT) ; toutes les autres sont une
+# ATRM (pas = temperature en degC). Positions notees R/V pour l'ATRM : R =
+# +, V = - (XR = X+, XV = X-...). Champ continu absent du commentaire :
+# 60 uT pour l'AARM, 40 uT pour l'ATRM.
+_RENNES_AARM_INSTRUMENTS = {"C4"}
+_RENNES_DEFAULT_FIELD_UT = {"arm": 60.0, "trm": 40.0}
+
+
+def _apply_rennes_anisotropy(p: Pmag) -> Dict[int, str]:
+    """Applique les conventions ci-dessus aux mesures X/Y/Z de `p` (en
+    place : cod2 R/V -> +/-, pas AARM Oersted -> mT) ; retourne
+    {index de mesure: "arm" | "trm"}."""
+    kinds: Dict[int, str] = {}
+    for j, m in enumerate(p.mesures):
+        if m.cod1 not in ("X", "Y", "Z"):
+            continue
+        if m.cod2 in ("R", "V"):
+            m.cod2 = "+" if m.cod2 == "R" else "-"
+        if (m.ins or "").strip() in _RENNES_AARM_INSTRUMENTS:
+            m.etape = m.etape / 10.0
+            kinds[j] = "arm"
+        else:
+            kinds[j] = "trm"
+    return kinds
+
+
+def _measurement_rows(p: Pmag, aniso_kinds: Optional[Dict[int, str]] = None) -> List[str]:
     ifield = _parse_ifield_uT(p.com)
     ifield_val = ifield if ifield is not None else 0.0
     rows = [_MEAS_HEADER]
@@ -210,6 +240,11 @@ def _measurement_rows(p: Pmag) -> List[str]:
         # X/Y/Z dans le Fortran/magic_export.py d'origine - corrige ici.
         if m.cod1 in ("X", "Y", "Z") and ifield is not None:
             dc_field = ifield_val * 1.0e-6
+        kind = (aniso_kinds or {}).get(j)
+        if kind:
+            dc_field = (ifield if ifield is not None else _RENNES_DEFAULT_FIELD_UT[kind]) * 1.0e-6
+            if kind == "arm":
+                codes = "LT-AF-I:LP-AN-ARM"
 
         # Unites lisibles (demande explicite utilisateur) : AF et IRM
         # (champs forts) en mT ; ARM/paleointensite (champs faibles) en
@@ -219,11 +254,13 @@ def _measurement_rows(p: Pmag) -> List[str]:
         # occupent maintenant 2 colonnes distinctes plutot qu'une seule
         # colonne treat_dc_field dont l'unite dependait de la ligne.
         af_field_mT = af_field * 1.0e3 if m.cod1 in _AC_FIELD_CODES else None
+        if kind == "arm":
+            af_field_mT = float(m.etape)
         dc_strongfield = dc_field * 1.0e3 if m.cod1 in _DC_STRONGFIELD_CODES else None
         dc_lowfield = dc_field * 1.0e6 if m.cod1 in _DC_LOWFIELD_CODES else 0.0
         # AF/ARM/IRM (A/F/I) : pas de pas thermique, temperature ambiante
         # - demande explicite utilisateur : 0.0 plutot que "n.d".
-        temp_c = float(m.etape) if m.cod1 in _TEMP_CODES else 0.0
+        temp_c = float(m.etape) if m.cod1 in _TEMP_CODES and kind != "arm" else 0.0
 
         step_str = f"{_step_value(m):6.1f}"
         ins_short = (m.ins or "").strip()
@@ -260,13 +297,29 @@ def _measurement_rows(p: Pmag) -> List[str]:
     return rows
 
 
-def convert_sample(p: Pmag) -> str:
-    return _sample_header_block(p) + "\n" + "\n".join(_measurement_rows(p))
+def convert_sample(p: Pmag, rennes_anisotropy: bool = False) -> str:
+    kinds = _apply_rennes_anisotropy(p) if rennes_anisotropy else None
+    header = _sample_header_block(p)
+    if kinds:
+        # resume des methodes du specimen : experiences d'anisotropie
+        extra = (["LT-AF-I", "LP-AN-ARM"] if "arm" in kinds.values() else []) + \
+                (["LP-AN-TRM"] if "trm" in kinds.values() else [])
+        lines = header.split("\n")
+        head, _sep, summary = lines[-1].rstrip().rpartition("method_codes: ")
+        present = summary.split(":")
+        # X/Y/Z comptaient comme pas thermique en champ (LT-T-I) : retire si
+        # toutes sont des AARM et qu'aucun autre pas thermique en champ n'existe
+        if "trm" not in kinds.values() and not any(m.cod1 in ("R", "V", "P", "L", "Q") for m in p.mesures):
+            present = [c for c in present if c != "LT-T-I"]
+        lines[-1] = head + "method_codes: " + ":".join(present + [c for c in extra if c not in present])
+        header = "\n".join(lines)
+    return header + "\n" + "\n".join(_measurement_rows(p, kinds))
 
 
 def convert_file(
     path_in: str, path_out: str,
     legacy_results_path: Optional[str] = None,
+    rennes_anisotropy: bool = False,
 ) -> Tuple[int, int, List[str]]:
     """Retourne (nb echantillons convertis, nb resultats convertis depuis
     un ANCIEN fichier .r compagnon - 0 si aucun n'existe, avertissements
@@ -301,7 +354,7 @@ def convert_file(
     lines.append(S_FIELD_HEADER)
     lines.append("")
 
-    blocks = [convert_sample(p) for p in samples]
+    blocks = [convert_sample(p, rennes_anisotropy) for p in samples]
     with open(path_out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
         f.write("\n\n".join(blocks) + "\n")
