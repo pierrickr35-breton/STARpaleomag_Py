@@ -198,9 +198,10 @@ def _step_value(m) -> float:
     return float(m.etape)
 
 
-# Conventions du laboratoire de Rennes pour l'anisotropie de remanence -
-# option `rennes_anisotropy` de convert_file, demande explicite utilisateur
-# (conversion de Beagle) : les positions X/Y/Z mesurees sur le cryogenique
+# Regles d'anisotropie de remanence PROPRES A L'ETUDE BEAGLE (Poblete et
+# al. 2016) - option `rennes_anisotropy` de convert_file, jamais activee
+# par defaut ni proposee a l'import : "C4 est juste un critere particulier
+# pour cette etude" (utilisateur). Dans ces donnees, les positions X/Y/Z mesurees sur le cryogenique
 # en 4 positions (instrument "C4") sont une AARM, dont le pas est le champ
 # alternatif en Oersted ("700X+" = 70 mT) ; toutes les autres sont une
 # ATRM (pas = temperature en degC). Positions notees R/V pour l'ATRM : R =
