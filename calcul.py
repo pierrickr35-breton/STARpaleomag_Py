@@ -3279,9 +3279,10 @@ def format_cooling_rate(r: CoolingRateResult) -> str:
 @dataclass
 class AniTensor:
     id: str
-    code2: str  # 'A0'=TRM, 'F0'=ARM (calcul natif/AMS_Py), 'N0'=susceptibilite,
-    # 'AA'=ARM DEJA calcule par une contribution MagIC importee (voir
-    # extract_magic.magic_anisotropy_rows) - deliberement distinct de 'F0'
+    code2: str  # 'A0'=TRM, 'AA'=ARM (calcul natif sur des mesures LP-AN-ARM,
+    # voir anisotropy_main_code, ou tenseur importe d'une contribution
+    # MagIC, voir extract_magic.magic_anisotropy_rows), 'F0'=ARM des
+    # anciens .ANI/AMS_Py, 'N0'=susceptibilite
     k11: float
     k22: float
     k33: float
@@ -3455,8 +3456,14 @@ def detect_six_positions(
     if force_zplus_label:
         zplus_label = force_zplus_label
 
+    # Positions limitees a l'etape de X - sans ce filtre (Fortran compris),
+    # un specimen avec aARM complete a 70 mT ET aTRM incomplete (Z+/Z- seuls)
+    # a 600 degC melangeait les deux experiences dans un meme tenseur
+    # (13CB1506A, Beagle : seul cas sur 225 specimens de 39 .prmag).
     positions: Dict[str, Measurement] = {}
     for m in ech.mesures:
+        if m.etape != item_rv:
+            continue
         testcode = m.cod1 + m.cod2
         if zplus_label and testcode == zplus_label:
             testcode = "Z+"
@@ -4519,6 +4526,20 @@ def write_ani_tensor(
     _insert_pmagani_line(path, line, is_mean=False)
 
 
+def anisotropy_main_code(positions: Optional[Dict[str, Measurement]]) -> str:
+    """Code du tenseur principal : 'AA' si les 6 positions sont des
+    mesures d'ARM (method_codes LP-AN-ARM, ex. aARM de Beagle), sinon 'A0'
+    (aTRM, le cas par defaut) - demande explicite utilisateur ("dans
+    l'archivage des aARM dans pmagani, on perd l'information sur l'ARM.
+    au lieu de mettre A0, peut-être mettre AA"). Les 14 variantes de
+    diagnostic (A+/A-/A1..B6, export N) gardent leurs codes."""
+    if positions and all(
+        "LP-AN-ARM" in (getattr(m, "method_codes", "") or "") for m in positions.values()
+    ):
+        return "AA"
+    return "A0"
+
+
 def write_ani_tensors(
     path: str, ech: "SelectedSample", tensors: List[AniTensor],
     positions: Optional[Dict[str, Measurement]] = None,
@@ -4539,7 +4560,10 @@ def write_ani_tensors(
     etape = positions["X+"].etape if positions else 0
     zplus_label = positions["Z+"].cod1 + positions["Z+"].cod2 if positions else ""
     zminus_label = positions["Z-"].cod1 + positions["Z-"].cod2 if positions else ""
+    main_code = anisotropy_main_code(positions)
     for tensor in tensors:
+        if tensor.code2 == "A0" and main_code != "A0":
+            tensor = replace(tensor, code2=main_code)
         _insert_pmagani_line(path, _format_pmagani_line(
             ech.id, tensor, etape, zplus_label, zminus_label, trm_evolution_pct, deviation_pct,
             evolution_corrected=evolution_corrected, step_labels=_position_step_labels(positions)),

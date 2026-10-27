@@ -712,6 +712,7 @@ _SPECIMENS_HEADER = [
 # pour ne plus en dependre.
 _ANISO_MAGIC_INFO = {
     "A0": ("ATRM", "LP-AN-TRM"),
+    "AA": ("AARM", "LP-AN-ARM"),
     "F0": ("AARM", "LP-AN-ARM"),
     "N0": ("AMS", "LP-X"),
 }
@@ -1248,6 +1249,17 @@ def classify_anisotropy_experiment(mesures: List[Measurement]) -> Optional[str]:
     axis_steps = [m for m in mesures if m.cod1 in _ANISOTROPY_AXIS_COD1]
     if not axis_steps:
         return None
+    # Codes MagIC deja portes par le .prmag (import MagIC, conversion
+    # Beagle) : le type est connu, ne pas redemander - Beagle posait la
+    # question pour 141 specimens tous codes LP-AN-TRM / LP-AN-ARM. Les pas
+    # LP-AN-ARM sont codes d'apres leur propre method_codes
+    # (_measurement_treatment), quel que soit le type retourne ici.
+    codes = [getattr(m, "method_codes", "") or "" for m in axis_steps]
+    untyped = [c for c in codes if not any(k in c for k in ("LP-AN-TRM", "LP-AN-IRM", "LP-AN-ARM"))]
+    if not untyped:
+        if any("LP-AN-IRM" in c for c in codes):
+            return None if any("LP-AN-TRM" in c for c in codes) else "irm"
+        return "trm"
     if any(m.cod1 in _PALEOINT_COMPANION_COD1 for m in mesures):
         return "trm"
     if any(m.etape > _MAX_PLAUSIBLE_TEMP_C for m in axis_steps):
@@ -1743,6 +1755,68 @@ def _write_tsv(path: str, table_name: str, header: List[str], rows: List[List[st
             f.write("\t".join(str(c) for c in row) + "\n")
 
 
+def read_extra_magic_tables(path: str) -> Dict[str, List[Dict[str, str]]]:
+    """Fichier MagIC (combine ">>>>>>>>>>" ou table unique) a fusionner
+    dans l'export - typiquement les donnees de magnetisme des roches
+    (K-T, hysteresis) produites par StereoUtils_Py (kt_magic.py) -
+    demande explicite utilisateur ("est-ce compliqué d'ajouter des
+    données K-T et Hysteresis dans les fichiers Magic?"). Retourne
+    {table: [ligne dict]}."""
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        content = f.read()
+    tables: Dict[str, List[Dict[str, str]]] = {}
+    for block in content.split(">>>>>>>>>>"):
+        lines = [ln for ln in block.strip("\n").splitlines() if ln.strip()]
+        if len(lines) < 2 or not lines[0].lower().startswith("tab delimited"):
+            continue
+        name = lines[0].split("\t", 1)[1].strip().lower() if "\t" in lines[0] else ""
+        cols = lines[1].split("\t")
+        rows = tables.setdefault(name, [])
+        for ln in lines[2:]:
+            vals = ln.split("\t")
+            rows.append({c: (vals[i] if i < len(vals) else "") for i, c in enumerate(cols)})
+    return tables
+
+
+def _merge_extra_rows(
+    header: List[str], rows: List[List[str]], extra: List[Dict[str, str]]
+) -> Tuple[List[str], List[List[str]]]:
+    """Ajoute les lignes `extra` (dict) a une table deja construite :
+    colonnes inconnues de `header` ajoutees en fin (les colonnes vides
+    sont de toute facon retirees par _write_tsv)."""
+    if not extra:
+        return header, rows
+    new_cols = []
+    for row in extra:
+        for c in row:
+            if c not in header and c not in new_cols:
+                new_cols.append(c)
+    header = header + new_cols
+    rows = [list(r) + [""] * len(new_cols) for r in rows]
+    rows += [[str(row.get(c, "")) for c in header] for row in extra]
+    return header, rows
+
+
+_GEOLOGY_COLUMNS = ("geologic_classes", "lithologies", "geologic_types")
+
+
+def _fill_extra_specimens_geology(extra: List[Dict[str, str]], specimens_rows: List[List[str]]) -> None:
+    """Classe/lithologie/type d'un specimen ajoute (ex. K-T) repris d'un
+    specimen paleomag du MEME echantillon - sinon colonnes requises vides
+    a tous les niveaux (verifie avec magic_check sur Beagle)."""
+    idx = {c: _SPECIMENS_HEADER.index(c) for c in ("sample",) + _GEOLOGY_COLUMNS}
+    by_sample: Dict[str, List[str]] = {}
+    for row in specimens_rows:
+        by_sample.setdefault(row[idx["sample"]], row)
+    for r in extra:
+        ref = by_sample.get(r.get("sample", ""))
+        if ref is None:
+            continue
+        for c in _GEOLOGY_COLUMNS:
+            if not r.get(c):
+                r[c] = ref[idx[c]]
+
+
 def export_to_magic(
     samples: List[SelectedSample],
     results: List[FitResult],
@@ -1756,6 +1830,7 @@ def export_to_magic(
     aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     include_site_only_means: bool = True,
+    extra_tables: Optional[Dict[str, List[Dict[str, str]]]] = None,
 ) -> MagicExportResult:
     """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
     les resultats de paleointensite deja archives dans .pmagint
@@ -1802,6 +1877,15 @@ def export_to_magic(
         ("specimens.txt", "specimens", _SPECIMENS_HEADER, specimens_rows),
         ("measurements.txt", "measurements", _MEASUREMENTS_HEADER, measurements_rows),
     ]
+    # Donnees de magnetisme des roches (K-T, hysteresis...) - seulement
+    # specimens/measurements : les echantillons/sites viennent du .prmag.
+    if extra_tables:
+        _fill_extra_specimens_geology(extra_tables.get("specimens", []), specimens_rows)
+        files = [
+            (fn, tn, *_merge_extra_rows(hdr, rows, extra_tables.get(tn, [])))
+            if tn in ("specimens", "measurements") else (fn, tn, hdr, rows)
+            for fn, tn, hdr, rows in files
+        ]
 
     result = MagicExportResult()
     for filename, table_name, header, rows in files:

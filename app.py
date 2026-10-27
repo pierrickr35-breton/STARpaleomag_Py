@@ -89,6 +89,7 @@ from calcul import (
     compute_cooling_rate,
     format_cooling_rate,
     read_ani_tensor,
+    anisotropy_main_code,
     read_ani_mean_tensor,
     read_all_ani_tensors,
     find_orphan_ani_specimens,
@@ -137,6 +138,7 @@ from datatools import (
 )
 from magic_export import (
     export_to_magic,
+    read_extra_magic_tables,
     classify_anisotropy_experiment,
     load_site_metadata_table,
     build_site_metadata_preview_rows,
@@ -2769,6 +2771,39 @@ class STARpaleomagApp:
             if ans is None:
                 return
             want_aniso = ans.strip().lower() != "n"
+
+        # Magnetisme des roches (K-T, hysteresis) deja mis au format MagIC
+        # par StereoUtils_Py (K-T > Export to MagIC...) - fusionne dans
+        # specimens/measurements.txt (voir magic_export.read_extra_magic_tables).
+        extra_tables = None
+        ans = self._console_input(
+            "Add rock-magnetic data (K-T, hysteresis) from a MagIC file made by "
+            "StereoUtils_Py? y/N: ", "N")
+        if ans is None:
+            return
+        if ans.strip().lower() == "y":
+            # Plusieurs fichiers possibles (K-T + hysteresis).
+            extra_paths = filedialog.askopenfilenames(
+                title="Rock-magnetic MagIC file(s) (K-T, hysteresis)",
+                filetypes=[("MagIC text", "*.txt"), ("All files", "*.*")])
+            if extra_paths:
+                extra_tables = {}
+                for extra_path in extra_paths:
+                    tables = read_extra_magic_tables(extra_path)
+                    for name, rows in tables.items():
+                        extra_tables.setdefault(name, []).extend(rows)
+                    self._afficher(
+                        f"[Export to MagIC] {os.path.basename(extra_path)}: "
+                        f"{len(tables.get('specimens', []))} specimen(s), "
+                        f"{len(tables.get('measurements', []))} measurement(s) added.\n")
+                sel_samples = {(e.magic_sample.strip() or e.id) for e in self.selection}
+                extra_specs = extra_tables.get("specimens", [])
+                orphans = sorted({r.get("sample", "") for r in extra_specs} - sel_samples)
+                if orphans:
+                    self._afficher(
+                        f"WARNING: {len(orphans)} rock-magnetic sample(s) not in the current "
+                        f"selection (no samples.txt row - MagIC will reject them): "
+                        f"{', '.join(orphans[:20])}\n")
         # --- fin bilan/choix ---
 
         lab_analysts = self._console_input(
@@ -2850,7 +2885,7 @@ class STARpaleomagApp:
         # l'extension export_samples pour les specimens AMS-only) est
         # desormais gate par `want_aniso` (choix consolide ci-dessus) -
         # plus de prompts Y/n separes par sous-categorie.
-        _ANISO_CODE_PRIORITY = ("A0", "F0", "N0")
+        _ANISO_CODE_PRIORITY = ("A0", "AA", "F0", "N0")
         aniso_tensors = {}
         aniso_mean_tensors = {}
         export_samples = list(self.selection)
@@ -3045,6 +3080,7 @@ class STARpaleomagApp:
                 aniso_mean_tensors=aniso_mean_tensors,
                 site_metadata=site_metadata,
                 include_site_only_means=selection_is_complete,
+                extra_tables=extra_tables,
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")
@@ -3691,7 +3727,14 @@ class STARpaleomagApp:
         les mesures sont deja corrigees (flaganiso) ou s'il n'y a pas de A0."""
         if getattr(ech, "flaganiso", False) or not ani_path:
             return None
-        return read_ani_tensor(ani_path, ech.id, "A0")
+        return self._correction_ani_tensor(ani_path, ech.id)
+
+    @staticmethod
+    def _correction_ani_tensor(ani_path, specimen):
+        """Tenseur de correction d'anisotropie : 'A0' (aTRM), sinon 'AA'
+        (aARM - archive sous ce code depuis calcul.anisotropy_main_code,
+        sous 'A0' auparavant : la correction le trouve donc toujours)."""
+        return read_ani_tensor(ani_path, specimen, "A0") or read_ani_tensor(ani_path, specimen, "AA")
 
     def _arai_anisotropy_corrected(self, ech, tensor, n1, n2, hlab, fit_raw, direction_raw):
         """Correction d'anisotropie appliquee a TOUTES les mesures - demande
@@ -4888,7 +4931,7 @@ class STARpaleomagApp:
             ), None
         if not ani_path or direction.anchored_specimen_frame is None:
             return None, None, "", None
-        tensor = read_ani_tensor(ani_path, ech.id, "A0")
+        tensor = self._correction_ani_tensor(ani_path, ech.id)
         if tensor is None:
             return None, None, "", None
 
@@ -6405,7 +6448,7 @@ class STARpaleomagApp:
             lines.append("(forcing symmetric)")
 
             t = result.tensor
-            lines.append("-------- Tensor 'A0' (symmetric) --------")
+            lines.append(f"-------- Tensor '{anisotropy_main_code(result.positions)}' (symmetric) --------")
             lines.append(f"  {t.k11:10.3E}  {t.k12:10.3E}  {t.k13:10.3E}")
             lines.append(f"  {t.k12:10.3E}  {t.k22:10.3E}  {t.k23:10.3E}")
             lines.append(f"  {t.k13:10.3E}  {t.k23:10.3E}  {t.k33:10.3E}")
@@ -6512,7 +6555,8 @@ class STARpaleomagApp:
 
         summary = (
             f"15 tensor variants (A0/A+/A-/A1/B1/A2/B2/A3/B3/A4/B4/A5/B5/A6/B6, "
-            f"'A0' being the main one) written for {len(done)} sample(s) -> {ani_path}\n"
+            f"'A0' being the main one - 'AA' instead of 'A0' for an ARM anisotropy) "
+            f"written for {len(done)} sample(s) -> {ani_path}\n"
         )
         if saved_corrected:
             summary += (f"Saved with the linear TRM-evolution correction (R -> ZB): "

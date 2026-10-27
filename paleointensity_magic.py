@@ -30,6 +30,7 @@ reel depuis la sequence.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from magic_export import _measurement_treatment, _izzi_order_tags
@@ -38,6 +39,7 @@ from testlect import Pmag
 from convert_ren_to_r import _parse_ifield_uT
 
 from pmagpy import pmag
+import SPD.lib.leastsq_jacobian as lib_k  # meme module que pmag.get_curve
 
 # Seuil standard MagIC (Paterson et al. 2014, criteres "Class B") pour la
 # "scat box" - sans lui, PintPars ne calcule pas SCAT (retourne toujours
@@ -75,6 +77,15 @@ class MagicPintResult:
     scat: str                 # "t" (pass) / "f" (fail)
     zigzag: float              # int_z : -1 = non teste, sinon Frat/Trat (>1 = echec)
     zigzag_method: str
+    # Courbure de l'Arai (Paterson 2011, lib_k.AraiCurvature) : k/k_sse sur
+    # TOUS les points de l'Arai, k_prime/k_prime_sse sur l'intervalle
+    # retenu ; gamma = angle pTRM / champ labo au dernier pas <= Tmax
+    # (GammaChecks) - a comparer aux k/k_sse/gamma natifs. None si absent.
+    k: Optional[float] = None
+    k_sse: Optional[float] = None
+    k_prime: Optional[float] = None
+    k_prime_sse: Optional[float] = None
+    gamma: Optional[float] = None
     raw: Dict = field(default_factory=dict, repr=False)  # dict complet retourne par PintPars
 
 
@@ -262,6 +273,27 @@ def compute_magic_paleointensity(
     if not drat_reliable:
         pars["_drat_unreliable_pmagpy_bug"] = True
 
+    # Bug reel dans pmagpy 4.5.2 (pmag.get_curve, appele en fin de
+    # PintPars) : `pars['int_k_sse'] = krv_data[1]` et idem pour
+    # int_k_prime_sse - or lib_k.AraiCurvature retourne (k, a, b, SSE) :
+    # krv_data[1] est l'ABSCISSE DU CENTRE du cercle ajuste, pas le SSE
+    # (verifie : int_k_sse de kr01_01b3 = 1.69033, centre LMA natif a =
+    # 1.69033, SSE natif 0.00594). Recalcule ici avec la MEME fonction
+    # PmagPy sur les MEMES points (copie de get_curve), en prenant krv[3].
+    first_Z_t = np.array(araiblock[0]).transpose()
+    first_I_t = np.array(araiblock[1]).transpose()
+    x_arai = first_I_t[3] / first_Z_t[3][0]
+    y_arai = first_Z_t[3] / first_Z_t[3][0]
+    pars["_int_k_sse_pmagpy_raw"] = pars.get("int_k_sse")
+    pars["_int_k_prime_sse_pmagpy_raw"] = pars.get("int_k_prime_sse")
+    def _sse(x, y):
+        try:
+            return lib_k.AraiCurvature(x=x, y=y)[3] if len(x) >= 3 else None
+        except Exception:
+            return None
+    pars["int_k_sse"] = _sse(x_arai, y_arai)
+    pars["int_k_prime_sse"] = _sse(x_arai[start:end + 1], y_arai[start:end + 1])
+
     b, sigma = pars["int_b"], pars["int_b_sigma"]
     field_uT = field_T * 1.0e6
     paleointensity_uT = abs(b) * field_uT
@@ -280,8 +312,30 @@ def compute_magic_paleointensity(
         drats=None if not drat_reliable else pars["int_drats"],
         md=pars["int_md"], frac=pars["int_frac"], gap_max=pars["int_gmax"],
         scat=pars["int_scat"], zigzag=pars["int_z"], zigzag_method=pars["method_codes"],
+        k=_opt(pars.get("int_k")), k_sse=_opt(pars.get("int_k_sse")),
+        k_prime=_opt(pars.get("int_k_prime")), k_prime_sse=_opt(pars.get("int_k_prime_sse")),
+        gamma=_opt(pars.get("specimen_gamma"), missing=-1),
         raw=pars,
     )
+
+
+def _opt(v, missing=None) -> Optional[float]:
+    """Valeur PintPars -> float ou None (absente, NaN, ou egale a la
+    valeur sentinelle `missing` ; specimen_gamma arrive parfois en liste
+    a un element)."""
+    if isinstance(v, (list, tuple, np.ndarray)):
+        v = v[0] if len(v) else None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(v) or (missing is not None and v == missing):
+        return None
+    return v
+
+
+def _g(v: Optional[float], fmt: str) -> str:
+    return "n.d" if v is None else format(v, fmt)
 
 
 def format_magic_paleointensity(r: MagicPintResult) -> str:
@@ -298,6 +352,9 @@ def format_magic_paleointensity(r: MagicPintResult) -> str:
         f"  paleointensity : {r.paleointensity_uT:.2f} uT   (b={r.b:.4f}, b_sigma={r.b_sigma:.4f}, b_beta={r.b_beta:.4f})\n"
         f"  MAD (free)     : {r.mad:.2f}    DANG: {r.dang:.2f}\n"
         f"  f: {r.f:.3f}   f_vds: {r.fvds:.3f}   g: {r.g:.3f}   q: {r.q:.2f}\n"
+        f"  k: {_g(r.k, '.4f')}   k_sse: {_g(r.k_sse, '.5f')}   (all Arai points)   "
+        f"k': {_g(r.k_prime, '.4f')}   k'_sse: {_g(r.k_prime_sse, '.5f')}   (selected interval)\n"
+        f"  gamma: {_g(r.gamma, '.1f')}\n"
         f"  FRAC: {r.frac:.3f}   gap_max: {r.gap_max:.3f}   SCAT: {scat_txt}"
         f"  (b_beta threshold used: {DEFAULT_B_BETA_THRESHOLD})\n"
         f"  DRAT: {_pct(r.drat, r.raw)}   DRATS: {_pct(r.drats, r.raw)}   MD(tail): {r.md:.2f}%\n"

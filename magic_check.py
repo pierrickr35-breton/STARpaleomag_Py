@@ -880,7 +880,10 @@ def _check_measurements(tables: Dict[str, Table], report: Report):
         codes = _tokens(r.get("method_codes", ""))
         spec = r.get("specimen", "")
         specimens_seen.add(spec)
-        if not any(c.startswith("LT-") for c in codes):
+        # Magnetisme des roches (K-T, hysteresis, backfield) : mesures sans
+        # traitement de laboratoire - aucun code LT- attendu.
+        rockmag = any(c.startswith(("LP-X", "LP-HYS", "LP-BCR", "LP-IRM-DCD")) for c in codes)
+        if not rockmag and not any(c.startswith("LT-") for c in codes):
             report.add("WARNING", "Treatment codes",
                        "measurements without any LT- treatment code (only LP-/other codes): the type of step "
                        "must be guessed from treat_temp/treat_ac_field, and PmagPy's Demag GUI ignores these rows",
