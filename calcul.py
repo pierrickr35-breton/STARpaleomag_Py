@@ -4478,6 +4478,17 @@ def read_ani_mean_tensor(path: str, site: str, code2: str) -> Optional[AniMeanTe
     return None
 
 
+def read_ani_mean_tensors(path: str, site: str, code2: str) -> List[AniMeanTensor]:
+    """Toutes les moyennes de site `code2` de `site` (une par correction de
+    pendage : specimen / in situ / tectonique), dans l'ordre du fichier -
+    voir read_ani_mean_tensor, qui ne rend que la premiere."""
+    if not os.path.exists(path):
+        return []
+    site_upper = site.strip().upper()
+    return [t for t in _read_pmagani_mean_tensors(path)
+            if t.id.strip().upper() == site_upper and t.code2 == code2]
+
+
 def _read_ani_tensors_legacy(path: str) -> List[AniTensor]:
     """Lit un ancien fichier .ANI (format list-directed Fortran, sans
     entete : `D id cin caz dip str etape code2 k11 k22 k33 k12 k23 k13 s

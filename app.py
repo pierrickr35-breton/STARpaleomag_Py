@@ -90,7 +90,7 @@ from calcul import (
     format_cooling_rate,
     read_ani_tensor,
     anisotropy_main_code,
-    read_ani_mean_tensor,
+    read_ani_mean_tensor, read_ani_mean_tensors,
     read_all_ani_tensors,
     find_orphan_ani_specimens,
     apply_inverse_anisotropy,
@@ -2776,6 +2776,7 @@ class STARpaleomagApp:
         # par StereoUtils_Py (K-T > Export to MagIC...) - fusionne dans
         # specimens/measurements.txt (voir magic_export.read_extra_magic_tables).
         extra_tables = None
+        metadata_samples = []
         ans = self._console_input(
             "Add rock-magnetic data (K-T, hysteresis) from a MagIC file made by "
             "StereoUtils_Py? y/N: ", "N")
@@ -2799,11 +2800,26 @@ class STARpaleomagApp:
                 sel_samples = {(e.magic_sample.strip() or e.id) for e in self.selection}
                 extra_specs = extra_tables.get("specimens", [])
                 orphans = sorted({r.get("sample", "") for r in extra_specs} - sel_samples)
-                if orphans:
+                # Echantillon avec seulement du magnetisme des roches (ex.
+                # hysteresis de 11TU5607, sans desaimantation donc pas
+                # selectionne) : sa ligne samples/sites vient du .prmag
+                # charge - sinon MagIC rejette le specimen ajoute.
+                for p in self.donnees:
+                    sample = p.magic_sample.strip() or p.id
+                    if sample in orphans and sample not in {
+                            (e.magic_sample.strip() or e.id) for e in metadata_samples}:
+                        metadata_samples.append(_build_selected_sample(p, []))
+                found = {(e.magic_sample.strip() or e.id) for e in metadata_samples}
+                if found:
                     self._afficher(
-                        f"WARNING: {len(orphans)} rock-magnetic sample(s) not in the current "
-                        f"selection (no samples.txt row - MagIC will reject them): "
-                        f"{', '.join(orphans[:20])}\n")
+                        f"[Export to MagIC] {len(found)} sample(s) with rock-magnetic data only, "
+                        f"added to samples.txt from the .prmag: {', '.join(sorted(found)[:20])}\n")
+                missing = [o for o in orphans if o not in found]
+                if missing:
+                    self._afficher(
+                        f"WARNING: {len(missing)} rock-magnetic sample(s) not in the loaded .prmag "
+                        f"(no samples.txt row - MagIC will reject them): "
+                        f"{', '.join(missing[:20])}\n")
         # --- fin bilan/choix ---
 
         lab_analysts = self._console_input(
@@ -3055,13 +3071,14 @@ class STARpaleomagApp:
             # specimen.
             for site in {ech.magic_site.strip() for ech in export_samples if ech.magic_site.strip()}:
                 for code2 in _ANISO_CODE_PRIORITY:
-                    mean_tensor = read_ani_mean_tensor(ani_path, site, code2)
+                    # Toutes les corrections de pendage (in situ ET
+                    # tectonique...) - avant, seule la premiere etait lue.
                     # Meme filtre export=="N" que pour les tenseurs
                     # specimen ci-dessus (voir calcul.AniMeanTensor.export).
-                    if mean_tensor is not None and mean_tensor.export == "N":
-                        continue
-                    if mean_tensor is not None:
-                        aniso_mean_tensors[site] = mean_tensor
+                    mean_tensors = [t for t in read_ani_mean_tensors(ani_path, site, code2)
+                                    if t.export != "N"]
+                    if mean_tensors:
+                        aniso_mean_tensors[site] = mean_tensors
                         break
 
         out_dir = filedialog.askdirectory(title="MagIC output folder (sites/samples/specimens/measurements.txt)")
@@ -3081,6 +3098,7 @@ class STARpaleomagApp:
                 site_metadata=site_metadata,
                 include_site_only_means=selection_is_complete,
                 extra_tables=extra_tables,
+                metadata_samples=metadata_samples,
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")

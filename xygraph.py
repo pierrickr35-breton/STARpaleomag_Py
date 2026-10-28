@@ -34,6 +34,15 @@ _THERMAL_CODES = {"D", "S", "T", "K"}
 _IRM_CODES = {"I"}
 _COMPONENT_LABELS = {"total": "Mtot", "x": "|X|", "y": "|Y|", "z": "|Z|"}
 _COLOR_CYCLE = colormaps["tab10"].colors
+# specimen -> couleur, fixee pour toute la figure (build_xygraph_figure) :
+# un specimen AF puis thermique garde la meme couleur dans les deux panneaux.
+_SPECIMEN_COLORS = {}
+
+
+def _specimen_color(specimen_id: str, fallback_index: int):
+    if specimen_id in _SPECIMEN_COLORS:
+        return _SPECIMEN_COLORS[specimen_id]
+    return _COLOR_CYCLE[fallback_index % len(_COLOR_CYCLE)]
 
 
 def _relevant_runs(selected: List[SelectedSample]):
@@ -53,13 +62,51 @@ def _relevant_runs(selected: List[SelectedSample]):
     inchangees."""
     normal_runs, irm_demag_runs = [], []
     for ech in selected:
+        prev_family = None
         for run in split_experiments(ech.mesures):
             kind = experiment_kind(run)
             if kind in ("F", "D"):
-                normal_runs.append(_dc_replace(ech, mesures=run))
+                for seg in _split_af_thermal(run):
+                    virt = _dc_replace(ech, mesures=seg)
+                    family = experiment_kind(seg)
+                    if prev_family and family in ("F", "D") and family != prev_family:
+                        # suite d'un traitement de l'autre type sur le MEME
+                        # specimen (AF puis thermique, ou thermique puis AF -
+                        # demande utilisateur, ex. 97TF0706B, 14NQ1705A) :
+                        # marquee a l'affichage.
+                        _HYBRID_REF[id(virt)] = "after AF" if prev_family == "F" else "after thermal"
+                    if family in ("F", "D"):
+                        prev_family = family
+                    normal_runs.append(virt)
             elif kind == "D_IRM":
                 irm_demag_runs.append(_dc_replace(ech, mesures=run))
     return normal_runs, irm_demag_runs
+
+
+# id(echantillon virtuel) -> "after AF"/"after thermal" : partie d'un
+# specimen qui suit un traitement de l'autre type (voir _relevant_runs).
+_HYBRID_REF = {}
+
+
+def _split_af_thermal(run):
+    """Coupe un run AF puis thermique (ou l'inverse) SANS retour en arriere de pas
+    (11TU4901A : 5F...25F 120D...; NPA33-1 : 0N 1F...10F 80D...) - demande
+    explicite utilisateur ("lorsqu'il y a a la fois une partie des
+    desaimantations en AF et en Thermique pour un meme echantillon, il vaut
+    mieux separer les deux types sur les deux plots") : split_experiments
+    ne coupe que quand le pas redescend, donc ces sequences restaient
+    entieres sur l'axe AF (degC traces comme des mT). Le 'N' initial reste
+    avec le premier segment."""
+    segs = [[]]
+    family = None
+    for m in run:
+        fam = "F" if m.cod1 in _AF_CODES else "D" if m.cod1 in _THERMAL_CODES else None
+        if fam and family and fam != family:
+            segs.append([])
+        if fam:
+            family = fam
+        segs[-1].append(m)
+    return segs
 
 
 def _sample_demag_code(ech: SelectedSample) -> Optional[str]:
@@ -126,12 +173,15 @@ def _plot_group(
         if not ech.mesures:
             continue
         steps, vals = _sample_values(ech, component)
+        hybrid = _HYBRID_REF.get(id(ech))
+        # partie apres un traitement de l'autre type : normalisee par son
+        # PROPRE premier point (demande utilisateur), comme toute autre courbe.
         ref = _normalize_ref(vals)
         norm = [v / ref for v in vals]
         ymax = max(ymax, max(norm))
-        color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
-        ax.plot(steps, norm, "o-", color=color, markerfacecolor=color,
-                 markersize=4, linewidth=1, label=ech.id)
+        color = _specimen_color(ech.id, i)
+        ax.plot(steps, norm, "^-" if hybrid else "o-", color=color, markerfacecolor=color,
+                 markersize=4, linewidth=1, label=ech.id + (f" ({hybrid})" if hybrid else ""))
         _pick_points(ax, steps, norm, ech.id)
         demag_code = demag_code or _sample_demag_code(ech)
 
@@ -179,7 +229,8 @@ def has_mixed_demag(selected: List[SelectedSample]) -> bool:
     True s'il enchaine plusieurs protocoles). Sert a l'appelant (app.py)
     pour choisir une figure plus large avant d'appeler
     build_xygraph_figure."""
-    kinds = {experiment_kind(run) for ech in selected for run in split_experiments(ech.mesures)}
+    kinds = {experiment_kind(seg) for ech in selected for run in split_experiments(ech.mesures)
+             for seg in _split_af_thermal(run)}
     return "F" in kinds and ("D" in kinds or "D_IRM" in kinds)
 
 
@@ -209,6 +260,10 @@ def build_xygraph_figure(
     else:
         fig.clear()
 
+    _HYBRID_REF.clear()
+    _SPECIMEN_COLORS.clear()
+    for ech in selected:
+        _SPECIMEN_COLORS.setdefault(ech.id, _COLOR_CYCLE[len(_SPECIMEN_COLORS) % len(_COLOR_CYCLE)])
     normal_runs, irm_demag_runs = _relevant_runs(selected)
     af_samples = [r for r in normal_runs if _sample_demag_code(r) in _AF_CODES]
     th_samples = [r for r in normal_runs if _sample_demag_code(r) in _THERMAL_CODES]

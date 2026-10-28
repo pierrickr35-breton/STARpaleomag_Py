@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from selection import SelectedSample, Measurement, polere, corfor, corpen
+from dataclasses import replace as _dc_replace
 from calcul import FitResult, AniTensor, AniMeanTensor
 from complete_sample_info import _read_table_rows
 from age_fields import parse_age, _AGE_UNIT_PATTERNS, normalize_age_fields  # noqa: F401
@@ -263,6 +264,36 @@ def _apply_site_aniso(row: Dict[str, str], mean: Optional[AniMeanTensor]) -> Non
         row["method_codes"] = f"{codes}:{aniso_method}" if codes else aniso_method
 
 
+def _site_rows_with_aniso(base_row: Dict[str, str], means: List[Dict[str, str]],
+                          aniso_means) -> List[Dict[str, str]]:
+    """Lignes sites.txt d'un site : une par direction moyenne (`means`), la
+    moyenne d'anisotropie de MEME correction de pendage fusionnee dans
+    chacune ; les corrections d'anisotropie sans direction correspondante
+    (ex. AMS en coordonnees specimen, ou tilt 100 sans direction tectonique)
+    donnent une ligne propre. Bug corrige - signale par l'utilisateur ("les
+    tenseurs moyens par site ne sont exportes qu'en in situ") : seule la
+    PREMIERE moyenne du .pmagani (tilt 0) etait lue, puis recopiee sur
+    toutes les lignes de direction du site, tectoniques comprises."""
+    if isinstance(aniso_means, AniMeanTensor):
+        aniso_means = [aniso_means]
+    pending = {}
+    for am in aniso_means or []:
+        pending.setdefault(_mean_tilt_correction(am), am)
+    rows = []
+    for mean in means:
+        row = dict(base_row)
+        row.update(mean)
+        _apply_site_aniso(row, pending.pop(mean.get("dir_tilt_correction", ""), None))
+        rows.append(row)
+    for am in pending.values():
+        row = dict(base_row)
+        _apply_site_aniso(row, am)
+        rows.append(row)
+    if not rows:
+        rows.append(dict(base_row))
+    return rows
+
+
 _C_SUFFIX_RE = re.compile(r"_[a-z]{1,2}$")
 
 
@@ -359,7 +390,7 @@ def _site_mean_rows(site: str, results: List[FitResult]) -> List[Dict[str, str]]
 def build_sites_rows(
     samples: List[SelectedSample], results: List[FitResult],
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
-    aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
+    aniso_mean_tensors: Optional[Dict[str, List[AniMeanTensor]]] = None,
     include_site_only_means: bool = True,
 ) -> List[List[str]]:
     """`include_site_only_means` : False quand l'utilisateur n'exporte
@@ -384,7 +415,7 @@ def build_sites_rows(
     explicite utilisateur ("the export do not include the Tilt corrected
     results that should appear on a second line").
 
-    `aniso_mean_tensors` (site -> AniMeanTensor 'A0' deja calcule, voir
+    `aniso_mean_tensors` (site -> liste des AniMeanTensor deja calcules, une par correction de pendage, voir
     anisotropy_site_magic_fields) : demande explicite utilisateur
     ("l'exportation de l'AMS (niveau specimen et sites)"), meme principe
     que `aniso_tensors` niveau specimen (build_specimens_rows) - fusionne
@@ -424,13 +455,8 @@ def build_sites_rows(
             "age_high": age_high, "age_unit": age_unit,
         }
         _apply_site_metadata(base_row, (site_metadata or {}).get(site))
-        _apply_site_aniso(base_row, (aniso_mean_tensors or {}).get(site))
         means = _site_mean_rows(site, results)
-        if not means:
-            rows.append([base_row.get(col, "") for col in _SITES_HEADER])
-        for mean in means:
-            row = dict(base_row)
-            row.update(mean)
+        for row in _site_rows_with_aniso(base_row, means, (aniso_mean_tensors or {}).get(site)):
             rows.append([row.get(col, "") for col in _SITES_HEADER])
 
     # Sites connus SEULEMENT via une moyenne archivee ("mean: <site>"),
@@ -470,10 +496,7 @@ def build_sites_rows(
             "method_codes": "FS-FD:GE-WGS84:FS-LOC-GPS",
         }
         _apply_site_metadata(base_row, (site_metadata or {}).get(site))
-        _apply_site_aniso(base_row, (aniso_mean_tensors or {}).get(site))
-        for mean in means:
-            row = dict(base_row)
-            row.update(mean)
+        for row in _site_rows_with_aniso(base_row, means, (aniso_mean_tensors or {}).get(site)):
             rows.append([row.get(col, "") for col in _SITES_HEADER])
     return rows
 
@@ -1800,21 +1823,24 @@ def _merge_extra_rows(
 _GEOLOGY_COLUMNS = ("geologic_classes", "lithologies", "geologic_types")
 
 
-def _fill_extra_specimens_geology(extra: List[Dict[str, str]], specimens_rows: List[List[str]]) -> None:
+def _fill_extra_specimens_geology(extra: List[Dict[str, str]], specimens_rows: List[List[str]],
+                                  samples_rows: Optional[List[List[str]]] = None) -> None:
     """Classe/lithologie/type d'un specimen ajoute (ex. K-T) repris d'un
     specimen paleomag du MEME echantillon - sinon colonnes requises vides
-    a tous les niveaux (verifie avec magic_check sur Beagle)."""
-    idx = {c: _SPECIMENS_HEADER.index(c) for c in ("sample",) + _GEOLOGY_COLUMNS}
-    by_sample: Dict[str, List[str]] = {}
-    for row in specimens_rows:
-        by_sample.setdefault(row[idx["sample"]], row)
+    a tous les niveaux (verifie avec magic_check sur Beagle). Repli sur la
+    ligne samples.txt pour un echantillon sans specimen paleomag exporte
+    (`metadata_samples` d'export_to_magic)."""
+    by_sample: Dict[str, Dict[str, str]] = {}
+    for header, table in ((_SPECIMENS_HEADER, specimens_rows), (_SAMPLES_HEADER, samples_rows or [])):
+        for row in table:
+            by_sample.setdefault(row[header.index("sample")], dict(zip(header, row)))
     for r in extra:
         ref = by_sample.get(r.get("sample", ""))
         if ref is None:
             continue
         for c in _GEOLOGY_COLUMNS:
             if not r.get(c):
-                r[c] = ref[idx[c]]
+                r[c] = ref.get(c, "")
 
 
 def export_to_magic(
@@ -1827,10 +1853,11 @@ def export_to_magic(
     anisotropy_skip: Optional[set] = None,
     pmagint_rows: Optional[Dict[str, Dict[str, str]]] = None,
     aniso_tensors: Optional[Dict[str, AniTensor]] = None,
-    aniso_mean_tensors: Optional[Dict[str, AniMeanTensor]] = None,
+    aniso_mean_tensors: Optional[Dict[str, List[AniMeanTensor]]] = None,
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     include_site_only_means: bool = True,
     extra_tables: Optional[Dict[str, List[Dict[str, str]]]] = None,
+    metadata_samples: Optional[List[SelectedSample]] = None,
 ) -> MagicExportResult:
     """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
     les resultats de paleointensite deja archives dans .pmagint
@@ -1845,7 +1872,7 @@ def export_to_magic(
     deja calcule, voir calcul.read_ani_tensor) : meme principe, colonnes
     aniso_s/aniso_ftest* - demande explicite utilisateur ("il manque aussi
     les données d'anisotropie au niveau du fichier specimens (prendre les
-    A0)"). `aniso_mean_tensors` (site -> AniMeanTensor 'A0' deja calcule,
+    A0)"). `aniso_mean_tensors` (site -> liste des AniMeanTensor deja calcules, une par correction de pendage,
     voir calcul.read_ani_mean_tensor) : meme principe au niveau SITE
     plutot que specimen, colonnes aniso_v1/v2/v3/aniso_p... dans
     sites.txt - demande explicite utilisateur ("l'exportation de l'AMS
@@ -1860,11 +1887,27 @@ def export_to_magic(
 
     os.makedirs(out_dir, exist_ok=True)
 
+    # `metadata_samples` : echantillons sans mesure exportee mais porteurs
+    # de donnees de magnetisme des roches (`extra_tables`, ex. hysteresis
+    # de 11TU5607, non selectionne faute de desaimantation) - signale par
+    # l'utilisateur (magic_check : "specimens ... sample 11TU5607 is not
+    # present in table samples"). Ils ne fournissent QUE les lignes sites/
+    # locations/samples (mesures retirees), jamais specimens/measurements.
+    selected_samples = {e.magic_sample.strip() or e.id for e in ordered}
+    meta_only = [
+        _dc_replace(e, mesures=[]) for e in (metadata_samples or [])
+        if (e.magic_sample.strip() or e.id) not in selected_samples
+    ]
+    meta_ordered = sorted(
+        ordered + meta_only,
+        key=lambda e: (e.magic_site.strip(), e.magic_sample.strip(), e.id.strip()),
+    )
+
     sites_rows = build_sites_rows(
-        ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors,
+        meta_ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors,
         include_site_only_means=include_site_only_means)
-    locations_rows = build_locations_rows(ordered, continent_ocean, country, region)
-    samples_rows = build_samples_rows(ordered)
+    locations_rows = build_locations_rows(meta_ordered, continent_ocean, country, region)
+    samples_rows = build_samples_rows(meta_ordered)
     specimens_rows = build_specimens_rows(
         ordered, results, pmagint_rows=pmagint_rows, aniso_tensors=aniso_tensors)
     measurements_rows = build_measurements_rows(
@@ -1880,7 +1923,7 @@ def export_to_magic(
     # Donnees de magnetisme des roches (K-T, hysteresis...) - seulement
     # specimens/measurements : les echantillons/sites viennent du .prmag.
     if extra_tables:
-        _fill_extra_specimens_geology(extra_tables.get("specimens", []), specimens_rows)
+        _fill_extra_specimens_geology(extra_tables.get("specimens", []), specimens_rows, samples_rows)
         files = [
             (fn, tn, *_merge_extra_rows(hdr, rows, extra_tables.get(tn, [])))
             if tn in ("specimens", "measurements") else (fn, tn, hdr, rows)
