@@ -748,22 +748,59 @@ _ANISO_MAGIC_INFO = {
 # cote AMS_Py.exporter_magic_dialog (voir son docstring pour le detail des
 # colonnes verifiees contre le data model reel) - ici pour le tenseur natif
 # 'A0' de STARpaleomag_Py (calcul.AniTensor), pas le format AMS_Py.
-# aniso_tilt_correction="-1" (coordonnees specimen) : aniso_s est exporte
-# BRUT, sans reorientation - meme raisonnement/meme valeur que cote AMS_Py
-# (deja l'hypothese par defaut de pmagpy.ipmag quand la colonne est
-# absente).
-def anisotropy_specimen_magic_fields(tensor: AniTensor) -> Dict[str, str]:
+# aniso_tilt_correction="-1" (coordonnees specimen) : aniso_s BRUT.
+# `ech` fourni : aussi "0" (geographique) et "100" (tectonique, si pendage
+# non nul), comme les convertisseurs AMS de PmagPy (k15, sufar4) - demande
+# explicite utilisateur ("OK pour la modif et l'export en -1, 0 et 100") :
+# ipmag.aniso_magic ne reoriente pas lui-meme, il ne trace que les reperes
+# presents dans la table.
+_ANISO_FRAME_LABELS = {"-1": "specimen coordinates", "0": "geographic coordinates",
+                       "100": "tilt-corrected coordinates"}
+
+
+def _rotate_tensor(s: Tuple[float, ...], fn) -> Tuple[float, ...]:
+    """s = (s11, s22, s33, s12, s23, s13) ; `fn(x, y, z) -> (x', y', z')`
+    est la rotation des directions (corfor/corpen, les MEMES que pour les
+    directions de build_specimens_rows) : M' = R M R^T, R ayant pour
+    colonnes les images des axes du specimen."""
+    m = [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]]
+    cols = [fn(*e) for e in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))]
+    r = [[cols[j][i] for j in range(3)] for i in range(3)]
+    rm = [[sum(r[i][k] * m[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+    o = [[sum(rm[i][k] * r[j][k] for k in range(3)) for j in range(3)] for i in range(3)]
+    return (o[0][0], o[1][1], o[2][2], o[0][1], o[1][2], o[0][2])
+
+
+def anisotropy_specimen_frames(tensor: AniTensor, ech: SelectedSample) -> Dict[str, Dict[str, str]]:
+    """aniso_tilt_correction -> champs specimens, pour -1, 0 et 100."""
+    base = anisotropy_specimen_magic_fields(tensor)
+    if not base:
+        return {}
+    trace = tensor.k11 + tensor.k22 + tensor.k33
+    s = tuple(v / trace for v in (tensor.k11, tensor.k22, tensor.k33,
+                                  tensor.k12, tensor.k23, tensor.k13))
+    sg = _rotate_tensor(s, lambda x, y, z: corfor(x, y, z, ech.cin, ech.caz))
+    frames = {"-1": base, "0": anisotropy_specimen_magic_fields(tensor, sg, "0")}
+    if ech.dip != 0.0:
+        st = _rotate_tensor(sg, lambda x, y, z: corpen(x, y, z, ech.dip, ech.str_))
+        frames["100"] = anisotropy_specimen_magic_fields(tensor, st, "100")
+    return frames
+
+
+def anisotropy_specimen_magic_fields(tensor: AniTensor, s: Optional[Tuple[float, ...]] = None,
+                                     tilt: str = "-1") -> Dict[str, str]:
     trace = tensor.k11 + tensor.k22 + tensor.k33
     if not trace:
         return {}
     aniso_type, _method_codes = _ANISO_MAGIC_INFO.get(tensor.code2, ("AMS", "LP-X"))
-    s1, s2, s3 = tensor.k11 / trace, tensor.k22 / trace, tensor.k33 / trace
-    s4, s5, s6 = tensor.k12 / trace, tensor.k23 / trace, tensor.k13 / trace
+    if s is None:
+        s = (tensor.k11 / trace, tensor.k22 / trace, tensor.k33 / trace,
+             tensor.k12 / trace, tensor.k23 / trace, tensor.k13 / trace)
     out = {
         "aniso_type": aniso_type,
-        "aniso_s": f"{s1:.6f}:{s2:.6f}:{s3:.6f}:{s4:.6f}:{s5:.6f}:{s6:.6f}",
-        "aniso_tilt_correction": "-1",
-        "description": f"{aniso_type} tensor from STARpaleomag_Py, specimen coordinates",
+        "aniso_s": ":".join(f"{v:.6f}" for v in s),
+        "aniso_tilt_correction": tilt,
+        "description": f"{aniso_type} tensor from STARpaleomag_Py, {_ANISO_FRAME_LABELS[tilt]}",
     }
     n_pos = tensor.n_positions
     if n_pos is None and tensor.code2 == "A0":
@@ -1112,14 +1149,14 @@ def build_specimens_rows(
     'A0' deja calcule, voir calcul.read_ani_tensor) : quand presents pour
     un specimen, leurs champs (paleointensity_magic_fields/
     anisotropy_specimen_magic_fields) sont fusionnes sur la PREMIERE ligne
-    de ce specimen SEULEMENT (bare row si aucun resultat directionnel,
-    sinon la 1ere ligne directionnelle - coordonnees echantillon) - PAS
-    repete sur les lignes IS/tectonique du meme specimen (ni le resultat
-    de paleointensite ni le tenseur d'anisotropie ne dependent de l'etat
-    de correction d'orientation directionnelle, le dupliquer serait juste
-    du bruit) - demande explicite utilisateur ("in export to Magic, it is
-    not asking for Paleointensity" puis "il manque aussi les données
-    d'anisotropie au niveau du fichier specimens (prendre les A0)")."""
+    de ce specimen SEULEMENT pour la paleointensite (bare row si aucun
+    resultat directionnel, sinon la 1ere ligne directionnelle) ; le
+    tenseur d'anisotropie est ecrit dans chaque repere (-1/0/100, voir
+    anisotropy_specimen_frames), sur la 1ere ligne directionnelle du meme
+    repere ou sur une ligne propre - demande explicite utilisateur ("in
+    export to Magic, it is not asking for Paleointensity", "il manque
+    aussi les données d'anisotropie au niveau du fichier specimens
+    (prendre les A0)" puis "l'export en -1, 0 et 100")."""
     rows = []
     for ech in samples:
         # Porteur de metadonnees de site sans vraie mesure - voir la meme
@@ -1145,39 +1182,44 @@ def build_specimens_rows(
             "dip": _num(-ech.cin, 1), "volume": volume, "weight": weight,
         }
 
-        extra_fields = {}
-        extra_codes = []
+        pint_fields = {}
         pint_row = (pmagint_rows or {}).get(ech.id)
         if pint_row is not None:
-            extra_fields.update(paleointensity_magic_fields(pint_row))
-            extra_codes.append("LP-PI-TRM")
+            pint_fields = paleointensity_magic_fields(pint_row)
+        aniso_frames: Dict[str, Dict[str, str]] = {}
+        aniso_method = ""
         tensor = (aniso_tensors or {}).get(ech.id)
         if tensor is not None:
-            aniso_fields = anisotropy_specimen_magic_fields(tensor)
-            if aniso_fields:
-                extra_fields.update(aniso_fields)
-                _aniso_type, aniso_method = _ANISO_MAGIC_INFO.get(tensor.code2, ("AMS", "LP-X"))
-                extra_codes.append(aniso_method)
+            aniso_frames = anisotropy_specimen_frames(tensor, ech)
+            _aniso_type, aniso_method = _ANISO_MAGIC_INFO.get(tensor.code2, ("AMS", "LP-X"))
 
-        dir_rows = _dir_rows_for_specimen(ech, results)
-        if not dir_rows:
-            method_codes = base_method_codes
-            for code in extra_codes:
-                if code not in method_codes.split(":"):
+        def add_codes(method_codes: str, codes: List[str]) -> str:
+            for code in codes:
+                if code and code not in method_codes.split(":"):
                     method_codes += f":{code}"
-            row = dict(base, method_codes=method_codes, **extra_fields)
-            rows.append([row.get(col, "") for col in _SPECIMENS_HEADER])
-            continue
+            return method_codes
 
+        # Tenseur de chaque repere sur la 1ere ligne directionnelle du MEME
+        # repere (dir_tilt_correction = aniso_tilt_correction) ; reperes
+        # sans ligne directionnelle -> ligne propre. Paleointensite : 1ere
+        # ligne seulement (independante du repere).
+        dir_rows = _dir_rows_for_specimen(ech, results) or [{}]
+        pending = dict(aniso_frames)
         for i, dr in enumerate(dir_rows):
             extra = dr.pop("_method_codes_extra", "")
             method_codes = base_method_codes + (f":{extra}" if extra else "")
-            row_fields = extra_fields if i == 0 else {}
-            if row_fields:
-                for code in extra_codes:
-                    if code not in method_codes.split(":"):
-                        method_codes += f":{code}"
+            row_fields: Dict[str, str] = {}
+            if i == 0 and pint_fields:
+                row_fields.update(pint_fields)
+                method_codes = add_codes(method_codes, ["LP-PI-TRM"])
+            frame = dr.get("dir_tilt_correction", "-1")
+            if frame in pending:
+                row_fields.update(pending.pop(frame))
+                method_codes = add_codes(method_codes, [aniso_method])
             row = dict(base, method_codes=method_codes, **dr, **row_fields)
+            rows.append([row.get(col, "") for col in _SPECIMENS_HEADER])
+        for frame_fields in pending.values():
+            row = dict(base, method_codes=add_codes(base_method_codes, [aniso_method]), **frame_fields)
             rows.append([row.get(col, "") for col in _SPECIMENS_HEADER])
     return rows
 
