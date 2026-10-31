@@ -46,6 +46,7 @@ from dataclasses import replace as _dc_replace
 from calcul import FitResult, AniTensor, AniMeanTensor
 from complete_sample_info import _read_table_rows
 from age_fields import parse_age, _AGE_UNIT_PATTERNS, normalize_age_fields  # noqa: F401
+from age_fields import _num as _age_number
 
 # ---------------------------------------------------------------------------
 # Age : equivalent de `checkage` (fichiers_magic.f:2225), etendu pour
@@ -387,11 +388,42 @@ def _site_mean_rows(site: str, results: List[FitResult]) -> List[Dict[str, str]]
     return rows
 
 
+_GEOLOGY_COLUMNS = ("geologic_classes", "lithologies", "geologic_types")
+
+
+def _cumulated_geology(samples: List[SelectedSample], group_of) -> Dict[str, Dict[str, str]]:
+    """Groupe (site, location) -> classes/types/lithologies cumules sur ses
+    specimens, dans l'ordre rencontre (ex. site de calcaires recoupe par un
+    dyke : "Sedimentary:Igneous") ; "Not Specified" retire des qu'une vraie
+    valeur existe."""
+    found: Dict[str, Dict[str, List[str]]] = {}
+    for ech in samples:
+        group = group_of(ech).strip()
+        if not group:
+            continue
+        fields = found.setdefault(group, {c: [] for c in _GEOLOGY_COLUMNS})
+        for col, value in zip(_GEOLOGY_COLUMNS, (ech.magic_gc, ech.magic_li, ech.magic_smt)):
+            for term in value.split(":"):
+                term = term.strip()
+                if term and term not in fields[col]:
+                    fields[col].append(term)
+    return {
+        group: {c: ":".join([t for t in terms if t != "Not Specified"] or terms)
+                for c, terms in fields.items()}
+        for group, fields in found.items()
+    }
+
+
+def _site_geology(samples: List[SelectedSample]) -> Dict[str, Dict[str, str]]:
+    return _cumulated_geology(samples, lambda ech: ech.magic_site)
+
+
 def build_sites_rows(
     samples: List[SelectedSample], results: List[FitResult],
     site_metadata: Optional[Dict[str, Dict[str, str]]] = None,
     aniso_mean_tensors: Optional[Dict[str, List[AniMeanTensor]]] = None,
     include_site_only_means: bool = True,
+    geology_samples: Optional[List[SelectedSample]] = None,
 ) -> List[List[str]]:
     """`include_site_only_means` : False quand l'utilisateur n'exporte
     qu'une PARTIE du fichier - la seconde boucle plus bas (sites connus
@@ -424,6 +456,12 @@ def build_sites_rows(
     contrairement a dir_dec/dir_inc)."""
     rows = []
     seen = []
+    # `geology_samples` : tous les specimens du fichier charge, meme non
+    # exportes - une selection (option s) peut ne garder qu'une des roches
+    # du site.
+    geology = _site_geology(sorted(
+        list(samples) + list(geology_samples or []),
+        key=lambda e: (e.magic_site.strip(), e.magic_sample.strip(), e.id.strip())))
     for ech in samples:
         site = ech.magic_site.strip()
         if not site or site in seen:
@@ -440,13 +478,13 @@ def build_sites_rows(
             "site": site,
             "citations": "This study",
             "location": ech.magic_loc,
-            "geologic_classes": ech.magic_gc,
+            "geologic_classes": geology[site]["geologic_classes"],
             "lat": _num(ech.lat),
             "lon": _num(_wrap_lon(ech.rlong)),
             "elevation": elevation,
             "formation": ech.magic_fm,
-            "lithologies": ech.magic_li,
-            "geologic_types": ech.magic_smt,
+            "lithologies": geology[site]["lithologies"],
+            "geologic_types": geology[site]["geologic_types"],
             "bed_dip_direction": _num(_bed_dip_direction(ech.str_, ech.dip), 1),
             "bed_dip": _num(ech.dip, 1),
             "geographic_precision": "0.0001",
@@ -536,6 +574,7 @@ def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict
         samples, key=lambda e: (e.magic_site.strip(), e.magic_sample.strip(), e.id.strip()))
     rows: List[Dict[str, str]] = []
     seen: set = set()
+    geology = _site_geology(ordered)
     for ech in ordered:
         site = ech.magic_site.strip()
         if not site or site in seen:
@@ -546,9 +585,9 @@ def build_site_metadata_preview_rows(samples: List[SelectedSample]) -> List[Dict
             "site": site,
             "lat": _num(ech.lat) if has_latlon else "",
             "lon": _num(_wrap_lon(ech.rlong)) if has_latlon else "",
-            "geologic_classes": ech.magic_gc,
-            "geologic_types": ech.magic_smt,
-            "lithologies": ech.magic_li,
+            "geologic_classes": geology[site]["geologic_classes"],
+            "geologic_types": geology[site]["geologic_types"],
+            "lithologies": geology[site]["lithologies"],
             "formation": ech.magic_fm,
             "location": ech.magic_loc,
             "age": ech.magic_age,
@@ -571,10 +610,40 @@ def write_site_metadata_preview(path: str, rows: List[Dict[str, str]]) -> None:
             f.write("\t".join(row.get(col, "") for col in _SITE_METADATA_PREVIEW_HEADER) + "\n")
 
 
+_AGE_UNIT_IN_MA = {"ga": 1000.0, "ma": 1.0, "ka": 1.0e-3, "kya": 1.0e-3, "years bp": 1.0e-6}
+
+
+def _location_age_fields(members: List[SelectedSample]) -> Tuple[str, str, str, str]:
+    """Intervalle couvrant les ages de tous les specimens de la location
+    (age, age_low, age_high, age_unit) : `age` n'est garde que s'ils ont
+    tous le meme age. Unites differentes : tout en Ma, ou champs vides si
+    l'une n'est pas convertible (Years AD...) plutot qu'un faux intervalle."""
+    ages = {normalize_age_fields(m.magic_age, m.magic_age_low, m.magic_age_high, m.magic_age_unit)
+            for m in members}
+    ages.discard(("", "", "", ""))
+    if len(ages) <= 1:
+        return next(iter(ages), ("", "", "", ""))
+    units = {a[3] for a in ages}
+    unit = units.pop() if len(units) == 1 else "Ma"
+    bounds = []
+    for age, low, high, age_unit in ages:
+        factor = 1.0 if age_unit == unit else _AGE_UNIT_IN_MA.get(age_unit.lower())
+        if factor is None:
+            return ("", "", "", "")
+        for value in (low, high) if (low or high) else (age,):
+            number = _age_number(value)
+            if number is not None:
+                bounds.append(number * factor)
+    if not bounds:
+        return ("", "", "", "")
+    return ("", f"{min(bounds):.10g}", f"{max(bounds):.10g}", unit)
+
+
 def build_locations_rows(
     samples: List[SelectedSample],
     continent_ocean: str = "", country: str = "", region: str = "",
     description: str = "", location_type: str = "Region",
+    geology_samples: Optional[List[SelectedSample]] = None,
 ) -> List[List[str]]:
     """Un `location` MagIC peut regrouper plusieurs sites ; ici on genere
     UNE ligne par valeur distincte de `magic_loc`, avec les bornes
@@ -588,7 +657,15 @@ def build_locations_rows(
     (voir data_model3 : `validations: [cv("location_type"), required()]`,
     "Region" est le premier exemple donne) - laisser vide (comportement
     precedent) produisait un fichier locations.txt invalide au sens du
-    modele MagIC."""
+    modele MagIC.
+
+    `geologic_classes`/`lithologies` et intervalle d'age : cumul sur les
+    sites exportes de la location, specimens non selectionnes de ces sites
+    compris (`geology_samples`), comme les lignes de sites.txt. Pas de `geologic_types` : la
+    table locations du modele MagIC n'a pas cette colonne."""
+    exported_sites = {ech.magic_site.strip() for ech in samples}
+    pool = list(samples) + [g for g in geology_samples or [] if g.magic_site.strip() in exported_sites]
+    geology = _cumulated_geology(pool, lambda ech: ech.magic_loc)
     groups: Dict[str, List[SelectedSample]] = {}
     for ech in samples:
         loc = ech.magic_loc.strip()
@@ -601,17 +678,13 @@ def build_locations_rows(
         members = groups[loc]
         lats = [m.lat for m in members]
         lons = [_wrap_lon(m.rlong) for m in members]
-        gc = next((m.magic_gc for m in members if m.magic_gc), "")
-        li = next((m.magic_li for m in members if m.magic_li), "")
-        first_aged = next((m for m in members if m.magic_age or m.magic_age_low or m.magic_age_high), None)
-        age, age_low, age_high, age_unit = normalize_age_fields(
-            *((first_aged.magic_age, first_aged.magic_age_low, first_aged.magic_age_high,
-               first_aged.magic_age_unit) if first_aged else ("", "", "", "")))
+        age, age_low, age_high, age_unit = _location_age_fields(
+            [m for m in pool if m.magic_loc.strip() == loc])
         age_sigma = ""
         row = {
             "location": loc,
-            "geologic_classes": gc,
-            "lithologies": li,
+            "geologic_classes": geology[loc]["geologic_classes"],
+            "lithologies": geology[loc]["lithologies"],
             "age": age, "age_sigma": age_sigma, "age_low": age_low,
             "age_high": age_high, "age_unit": age_unit,
             "lat_n": _num(max(lats)), "lat_s": _num(min(lats)),
@@ -1862,9 +1935,6 @@ def _merge_extra_rows(
     return header, rows
 
 
-_GEOLOGY_COLUMNS = ("geologic_classes", "lithologies", "geologic_types")
-
-
 def _fill_extra_specimens_geology(extra: List[Dict[str, str]], specimens_rows: List[List[str]],
                                   samples_rows: Optional[List[List[str]]] = None) -> None:
     """Classe/lithologie/type d'un specimen ajoute (ex. K-T) repris d'un
@@ -1900,6 +1970,7 @@ def export_to_magic(
     include_site_only_means: bool = True,
     extra_tables: Optional[Dict[str, List[Dict[str, str]]]] = None,
     metadata_samples: Optional[List[SelectedSample]] = None,
+    geology_samples: Optional[List[SelectedSample]] = None,
 ) -> MagicExportResult:
     """Equivalent (mode classique, ichoixexport==1) de `export2magic`, PLUS
     les resultats de paleointensite deja archives dans .pmagint
@@ -1947,8 +2018,9 @@ def export_to_magic(
 
     sites_rows = build_sites_rows(
         meta_ordered, results, site_metadata=site_metadata, aniso_mean_tensors=aniso_mean_tensors,
-        include_site_only_means=include_site_only_means)
-    locations_rows = build_locations_rows(meta_ordered, continent_ocean, country, region)
+        include_site_only_means=include_site_only_means, geology_samples=geology_samples)
+    locations_rows = build_locations_rows(
+        meta_ordered, continent_ocean, country, region, geology_samples=geology_samples)
     samples_rows = build_samples_rows(meta_ordered)
     specimens_rows = build_specimens_rows(
         ordered, results, pmagint_rows=pmagint_rows, aniso_tensors=aniso_tensors)

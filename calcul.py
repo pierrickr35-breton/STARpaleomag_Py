@@ -2469,6 +2469,54 @@ def available_mean_orientations(path: str, pattern: str = "*") -> List[int]:
     return sorted(found)
 
 
+def other_orientation_means(
+    results: List[FitResult], path: Optional[str]
+) -> Tuple[List[FitResult], List[str]]:
+    """Export MagIC d'une selection de moyennes (modes 'm'/'s', une seule
+    orientation, voir _load_mean_results) : cherche dans le .pmagres, pour
+    chaque moyenne selectionnee, sa ligne dans l'autre orientation IS/TC
+    (meme site, meme composante) - demande explicite utilisateur ("quand
+    une moyenne est selectionnee, ecrire aussi sa ligne dans l'autre
+    orientation"). Retourne (moyennes a ajouter, moyennes sans autre
+    orientation dans le fichier). Une liste de codes vide dans le fichier
+    reprend celle de la moyenne selectionnee si le n est le meme."""
+    selected = [r for r in results if r.id[:5] == "mean:" and r.par3_mean in (2.0, 3.0)]
+    if not selected or not path or not os.path.exists(path):
+        return [], []
+    # Un site peut avoir plusieurs moyennes de meme composante (ex. 11TU64
+    # de Beagle) : chacune retrouve sa propre ligne, d'abord par sa liste.
+    pool: Dict[tuple, List[FitResult]] = {}
+    for res in _iter_result_lines(path):
+        if res.id[:5] == "mean:" and res.par3_mean in (2.0, 3.0):
+            pool.setdefault((res.id, res.component, res.par3_mean), []).append(res)
+    loaded: Dict[tuple, int] = {}
+    for r in selected:
+        key = (r.id, r.component, r.par3_mean)
+        loaded[key] = loaded.get(key, 0) + 1
+        lines = pool.get(key, [])
+        same = next((x for x in lines if (x.liste, x.dec, x.inc) == (r.liste, r.dec, r.inc)), None)
+        if same is not None:
+            lines.remove(same)
+    added, missing = [], []
+    for r in selected:
+        other_key = (r.id, r.component, 5.0 - r.par3_mean)
+        if loaded.get(other_key, 0) > 0:
+            loaded[other_key] -= 1
+            continue
+        lines = pool.get(other_key, [])
+        other = (next((x for x in lines if x.liste == r.liste), None)
+                 or next((x for x in lines if x.nb == r.nb), None)
+                 or (lines[0] if lines else None))
+        if other is None:
+            missing.append(r.id[6:].strip())
+            continue
+        lines.remove(other)
+        if not other.liste.replace("codes:", "").strip() and other.nb == r.nb:
+            other = replace(other, liste=r.liste)
+        added.append(other)
+    return added, missing
+
+
 def _load_site_results(
     path: str, pattern: str, iorient: int, component: str = "*", donnees=None,
 ) -> List[FitResult]:

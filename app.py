@@ -73,6 +73,7 @@ from calcul import (
     load_results,
     recompute_fit_geometry,
     available_mean_orientations,
+    other_orientation_means,
     list_mdf,
     compute_mean_intensity,
     compute_mean_susceptibility,
@@ -357,13 +358,17 @@ def _resource_path(*parts: str) -> str:
     return os.path.join(base, *parts)
 
 
+_ALL_LOCATIONS = "* (all)"
+
+
 class STARpaleomagApp:
     def __init__(self, root):
         self.root = root
         self.root.title("STARpaleomag_Py - Paleomagnetism")
         self._maximize_window()
 
-        self.donnees = []  # Stockage des données d'échantillons (List[Pmag])
+        self._location_box = None  # menu deroulant des locations, voir _setup_location_bar
+        self.donnees = []  # Stockage des données d'échantillons (List[Pmag]), voir la propriete donnees
         self.selection = []  # Dernière sélection (List[SelectedSample])
         self.results = []  # Ajustements de droite (List[FitResult], equivalent tr/nbres)
         self.results_path = None  # equivalent filr - fichier .r, fixe au chargement des donnees
@@ -387,6 +392,7 @@ class STARpaleomagApp:
         self._setup_menu()
         self._setup_shortcuts()
 
+        self._setup_location_bar()
         self.paned_window = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.paned_window.pack(fill=tk.BOTH, expand=True)
 
@@ -2797,6 +2803,16 @@ class STARpaleomagApp:
                         f"[Export to MagIC] {os.path.basename(extra_path)}: "
                         f"{len(tables.get('specimens', []))} specimen(s), "
                         f"{len(tables.get('measurements', []))} measurement(s) added.\n")
+                # Magnetisme des roches d'une autre location que celle choisie.
+                in_location = {(p.magic_sample.strip() or p.id) for p in self.donnees}
+                other_samples = {(p.magic_sample.strip() or p.id) for p in self._all_donnees} - in_location
+                other_specs = {r.get("specimen", "") for r in extra_tables.get("specimens", [])
+                               if r.get("sample", "") in other_samples}
+                if other_specs:
+                    extra_tables["specimens"] = [r for r in extra_tables["specimens"]
+                                                 if r.get("specimen", "") not in other_specs]
+                    extra_tables["measurements"] = [r for r in extra_tables.get("measurements", [])
+                                                    if r.get("specimen", "") not in other_specs]
                 sel_samples = {(e.magic_sample.strip() or e.id) for e in self.selection}
                 extra_specs = extra_tables.get("specimens", [])
                 orphans = sorted({r.get("sample", "") for r in extra_specs} - sel_samples)
@@ -3003,6 +3019,9 @@ class STARpaleomagApp:
                 and t.export != "N"
             })
             donnees_by_id = {p.id.strip().upper(): p for p in self.donnees}
+            # Specimen d'une autre location que celle choisie : ni exporte
+            # ni signale comme absent du .prmag.
+            other_location_ids = {p.id.strip().upper() for p in self._all_donnees} - set(donnees_by_id)
             n_from_prmag = 0
             n_outside_selection = 0
             orphan_ids = []
@@ -3022,7 +3041,7 @@ class STARpaleomagApp:
                         continue
                     export_samples.append(_build_selected_sample(p, p.mesures))
                     n_from_prmag += 1
-                else:
+                elif extra_id.upper() not in other_location_ids:
                     orphan_ids.append(extra_id)
             if n_outside_selection:
                 self._afficher(
@@ -3085,9 +3104,20 @@ class STARpaleomagApp:
         if not out_dir:
             return
 
+        export_results = self.results if want_results else []
+        if want_results:
+            other_means, no_other = other_orientation_means(self.results, self.results_path)
+            export_results = self.results + other_means
+            if other_means or no_other:
+                self._afficher(
+                    f"[Export to MagIC] {len(other_means)} site mean(s) added in the other "
+                    f"orientation (IS/TC) from the .pmagres; {len(no_other)} without one"
+                    f"{': ' + ', '.join(no_other) if no_other else ''}.\n"
+                )
+
         try:
             result = export_to_magic(
-                export_samples, self.results if want_results else [], out_dir,
+                export_samples, export_results, out_dir,
                 lab_analysts=lab_analysts,
                 continent_ocean=continent, country=country, region=region,
                 anisotropy_kind_by_specimen=anisotropy_kind_by_specimen,
@@ -3099,6 +3129,7 @@ class STARpaleomagApp:
                 include_site_only_means=selection_is_complete,
                 extra_tables=extra_tables,
                 metadata_samples=metadata_samples,
+                geology_samples=[_build_selected_sample(p, []) for p in self.donnees],
             )
         except OSError as e:
             self._showerror("Error", f"MagIC export failed:\n{e}")
@@ -5286,6 +5317,73 @@ class STARpaleomagApp:
                     f"total {len(self.selection)} sample(s), {nb_mesures} measurement(s)\n")
         self.text_area.see(tk.END)
 
+    @property
+    def donnees(self):
+        """Echantillons de la location choisie (tous si "* (all)") : tout le
+        programme ne voit que ceux-la - demande explicite utilisateur ("la
+        selection des mesures et resultats restent contraintes dans cette
+        location"). Le fichier complet reste dans self._all_donnees."""
+        return self._donnees_view
+
+    @donnees.setter
+    def donnees(self, value):
+        # Un chargement repart toujours sur l'ensemble du fichier.
+        self._all_donnees = value
+        self._location = "*"
+        self._apply_location()
+        if self._location_box is not None:
+            self._location_box["values"] = [_ALL_LOCATIONS] + sorted(
+                {p.magic_loc.strip() for p in value if p.magic_loc.strip()})
+            self._location_box.set(_ALL_LOCATIONS)
+
+    def _apply_location(self):
+        self._donnees_view = self._all_donnees if self._location == "*" else [
+            p for p in self._all_donnees if p.magic_loc.strip() == self._location]
+        self._location_ids = {p.id.strip().upper() for p in self._donnees_view}
+        self._location_sites = {p.magic_site.strip() for p in self._donnees_view}
+
+    def _setup_location_bar(self):
+        bar = ttk.Frame(self.root)
+        bar.pack(fill=tk.X)
+        ttk.Label(bar, text="Location:").pack(side=tk.LEFT, padx=(8, 4), pady=2)
+        self._location_box = ttk.Combobox(bar, state="readonly", width=40, values=[_ALL_LOCATIONS])
+        self._location_box.set(_ALL_LOCATIONS)
+        self._location_box.pack(side=tk.LEFT, pady=2)
+        self._location_box.bind("<<ComboboxSelected>>", self._on_location_selected)
+
+    def _result_in_location(self, r) -> bool:
+        if self._location == "*":
+            return True
+        if r.id[:5] == "mean:":
+            return r.id[5:].strip() in self._location_sites
+        return r.id.strip().upper() in self._location_ids
+
+    def _on_location_selected(self, _event=None):
+        chosen = self._location_box.get()
+        chosen = "*" if chosen == _ALL_LOCATIONS else chosen
+        # Pas de changement pendant une question en console : ses reponses
+        # s'appliqueraient a d'autres donnees que celles de son debut.
+        if getattr(self, "_console_input_active", False):
+            self._location_box.set(_ALL_LOCATIONS if self._location == "*" else self._location)
+            self._afficher("Answer or cancel (Escape) the current question before changing the location.\n")
+            return
+        self._location_box.selection_clear()
+        if chosen == self._location:
+            self.text_area.focus_set()
+            return
+        self._location = chosen
+        self._apply_location()
+        n_sel, n_res = len(self.selection), len(self.results)
+        self.selection = [e for e in self.selection if e.id.strip().upper() in self._location_ids]
+        self.results = [r for r in self.results if self._result_in_location(r)]
+        self._afficher(
+            f"Location: {_ALL_LOCATIONS if chosen == '*' else chosen} - "
+            f"{len(self.donnees)} of {len(self._all_donnees)} sample(s), "
+            f"{len(self._location_sites - {''})} site(s). "
+            f"Selection: {n_sel - len(self.selection)} sample(s) and "
+            f"{n_res - len(self.results)} result(s) outside it removed.\n")
+        self.text_area.focus_set()
+
     def _pick_from_list(self, title, items, allow_all=True):
         """Fenetre modale avec une Listbox pour choisir UN element a la
         souris (double-clic ou bouton Select) - PAS dans le Fortran
@@ -7263,6 +7361,7 @@ class STARpaleomagApp:
         # seule fois au chargement plutot qu'a chaque affichage - demande
         # explicite utilisateur ("to draw the line on the zijderveld plot we
         # can redo the calculation").
+        loaded = [r for r in loaded if self._result_in_location(r)]
         new_matches = [recompute_fit_geometry(r, self.donnees) for r in loaded]
         # equivalent de selres (dataselect.f) : accumule sur la selection
         # existante, comme selmes (voir ouvrir_selection_dialog) - seul
