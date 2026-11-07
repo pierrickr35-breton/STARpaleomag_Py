@@ -1,12 +1,16 @@
 import copy
+import math
 import io
 import os
+import shutil
 import re
 import subprocess
 import sys
 import tkinter as tk
 import webbrowser
 from tkinter import ttk, filedialog, messagebox
+
+import numpy as np
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -42,7 +46,10 @@ from selection import (
     polere,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
-from auto_interpretation import propose_components, propose_components_for_site, format_suggestions
+from auto_interpretation import (
+    AUTO_MIN_K, AUTO_MIN_SPECIMENS, automatic_results, propose_components, propose_components_for_site,
+    format_suggestions, remove_spurious_steps,
+)
 from calcul import (
     AniTensor,
     FitResult,
@@ -54,6 +61,11 @@ from calcul import (
     fit_from_redo_file,
     fisher_from_measurements,
     fisher_from_results,
+    split_outliers,
+    OUTLIER_ASD_FACTOR,
+    AUTO_OUTLIER_MIN_DEG,
+    write_results_file,
+    append_results_block,
     build_site_mean_result,
     site_lat_lon_from_donnees,
     site_of_result,
@@ -102,6 +114,7 @@ from calcul import (
     compute_anicor_factor,
     _ANI_CODE2,
     _correct_dec_inc,
+    _unit_vector,
     mean_components,
 )
 from zijderveld import build_zijderveld_figure, draw_zijderveld
@@ -374,6 +387,11 @@ class STARpaleomagApp:
         self.results_path = None  # equivalent filr - fichier .r, fixe au chargement des donnees
         self.data_file_path = None  # chemin du .ren/.prmag/.txt charge - voir _load_data_file
         self._archived_ids = None  # cache des `c` deja utilises dans results_path (voir _save_result)
+        # fichier resultats du fichier de donnees d'ou vient chaque specimen
+        # selectionne - la selection est gardee a l'ouverture d'un autre
+        # fichier (voir _load_data_file) : un ajustement sur un specimen de
+        # l'ancien fichier s'archive dans SON .pmagres, pas dans le nouveau
+        self._sample_results_path = {}
         self._results_path_mtime = None  # date de derniere lecture de results_path - voir ouvrir_selres_dialog
         self._arm_holder_background = None  # equivalent xholarm/yholarm/zholarm (holderarm), pour Anisotropy
         self.entete = ""  # Préfixe de sélection (equivalent selentete)
@@ -544,6 +562,8 @@ class STARpaleomagApp:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label=self._labeled("Open Pmag file...", "importpc"),
                                command=self._menu_cmd("pmagfile-open", self.ouvrir_fichier_ren))
+        file_menu.add_command(label="List samples of the open file...",
+                               command=self._menu_cmd("pmagfile-list", self.afficher_liste_echantillons))
         file_menu.add_separator()
         file_menu.add_command(label="Import Starmac legacy files...",
                                command=self._menu_cmd("pmagfile-legacy", self.ouvrir_convert_legacy_dialog))
@@ -660,6 +680,14 @@ class STARpaleomagApp:
                                   command=self._menu_cmd("results-fitting", self.ouvrir_ajusligredo_dialog))
         results_menu.add_command(label="Auto-interpret (suggest components)...",
                                   command=self._menu_cmd("results-fitting", self.ouvrir_autointerpretation_dialog))
+        # le mode site par site d'abord, c'est le mode normal - demande
+        # explicite utilisateur ("l'autointerpretation par site et
+        # validation est en fait plus pratique pour l'utilisateur") ; le
+        # mode tout automatique reste pour une vue d'ensemble / comparaison
+        results_menu.add_command(label="Auto-interpret site by site, with validation...",
+                                  command=self._menu_cmd("results-fitting", self.interpretation_auto_par_site))
+        results_menu.add_command(label="Auto-interpret all, without validation (separate file, overview)...",
+                                  command=self._menu_cmd("results-fitting", self.interpretation_toute_automatique))
         results_menu.add_separator()
         results_menu.add_command(label="Evaluate interpretations...",
                                   command=self._menu_cmd("results-quality", self.evaluer_interpretations))
@@ -1155,6 +1183,45 @@ class STARpaleomagApp:
         if fichier_path:
             self._load_data_file(fichier_path)
 
+    def _tag_selection(self, samples, overwrite: bool = True) -> None:
+        """Note le .pmagres du fichier d'ou viennent `samples` (voir
+        self._sample_results_path et _archive_only)."""
+        for ech in samples:
+            key = ech.id.strip()
+            if overwrite or key not in self._sample_results_path:
+                self._sample_results_path[key] = self.results_path
+
+    def afficher_liste_echantillons(self):
+        """Liste des echantillons du fichier ouvert dans une fenetre
+        separee (non modale) - demande explicite utilisateur ("un menu
+        sous open pmag file avec la liste dans une fenetre exterieure") ;
+        elle n'est plus ecrite dans la fenetre texte a l'ouverture."""
+        if not self.donnees:
+            self._showinfo("No data", "No data file is open.")
+            return
+        top = tk.Toplevel(self.root)
+        name = os.path.basename(self.data_file_path or "")
+        top.title(f"Samples - {name}")
+        frame = ttk.Frame(top)
+        frame.pack(fill=tk.BOTH, expand=True)
+        text = tk.Text(frame, font=("Courier", 12), wrap=tk.NONE, width=80, height=40)
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text.insert(tk.END, f"File: {name}\nNumber of samples: {len(self.donnees)}\n"
+                            "----------------------------------------\n")
+        for sample in self.donnees:
+            # "Dip" (pas "Inc") - demande explicite utilisateur : ce
+            # champ est sample.cin (le pendage de la carotte, DIFF_
+            # WITH_MAGIC), jamais une inclinaison paleomagnetique.
+            # Colonnes alignees (police Courier) - "align the columns".
+            text.insert(tk.END,
+                        f"ID: {sample.id:<12} | Measurements: {sample.nbmes:>3} | "
+                        f"Dip: {sample.cin:>6.1f} | Az: {sample.caz:>6.1f}\n")
+        text.configure(state=tk.DISABLED)
+        ttk.Button(top, text="Close", command=top.destroy).pack(side=tk.BOTTOM, pady=6)
+
     def _load_data_file(self, fichier_path: str, announce: bool = True) -> bool:
         """Charge `fichier_path` (.ren/.prmag/.txt) dans self.donnees/
         self.results_path et l'affiche - factorise depuis
@@ -1168,38 +1235,43 @@ class STARpaleomagApp:
         Retourne True si le chargement a reussi."""
         try:
             if fichier_path.lower().endswith(".prmag"):
-                self.donnees = read_prmag_file(fichier_path)
+                donnees = read_prmag_file(fichier_path)
             else:
-                self.donnees = read_ren_file(fichier_path)
-            self.selection = []
+                donnees = read_ren_file(fichier_path)
+            self.donnees = donnees
+            # selection et resultats en memoire GARDES - demande explicite
+            # utilisateur ("ne pas afficher la liste des echantillons ni
+            # effacer la fenetre, ni les donnees en memoire") ; Init
+            # selection / Init results les vident. Les specimens deja
+            # selectionnes restent attaches a leur propre .pmagres.
+            self._tag_selection(self.selection, overwrite=False)
             # equivalent filr=fil1(1:(nlen-4))//'.r' : fichier resultats
             # derive du fichier de donnees (meme dossier, extension .r)
             self.results_path = results_path_for(fichier_path)
             self.data_file_path = fichier_path
             self._archived_ids = None  # relit le fichier .r au prochain archivage
+            # date de reference du NOUVEAU .pmagres : sinon le prochain
+            # "Select results..." le croit modifie (date de l'ancien
+            # fichier) et vide les resultats en memoire
+            self._results_path_mtime = (os.path.getmtime(self.results_path)
+                                        if os.path.exists(self.results_path) else None)
 
-            # Réinitialisation et affichage dans la zone de texte
-            self.text_area.delete("1.0", tk.END)
-            self.text_area.insert(
-                tk.END,
+            # la fenetre texte n'est plus effacee et la liste des
+            # echantillons n'y est plus ecrite (menu "List samples of the
+            # open file...", fenetre separee)
+            kept = []
+            if self.selection:
+                kept.append(f"{len(self.selection)} selected sample(s)")
+            if self.results:
+                kept.append(f"{len(self.results)} result(s)")
+            self._afficher(
+                "\n----------------------------------------\n"
                 f"File loaded: {os.path.basename(fichier_path)}\n"
                 f"Number of samples: {len(self.donnees)}\n"
-                "----------------------------------------\n\n"
+                + (f"Still in memory from before: {', '.join(kept)} "
+                   "(Init selection / Init results to clear them)\n" if kept else "")
+                + "----------------------------------------\n"
             )
-
-            for sample in self.donnees:
-                # "Dip" (pas "Inc") - demande explicite utilisateur : ce
-                # champ est sample.cin (le pendage de la carotte, DIFF_
-                # WITH_MAGIC), jamais une inclinaison paleomagnetique -
-                # "Inc" pretait a confusion. Colonnes alignees (ID/
-                # Measurements/Dip/Az a largeur fixe) - police Courier de
-                # text_area (monospace), demande explicite utilisateur
-                # ("align the columns").
-                self.text_area.insert(
-                    tk.END,
-                    f"ID: {sample.id:<12} | Measurements: {sample.nbmes:>3} | "
-                    f"Dip: {sample.cin:>6.1f} | Az: {sample.caz:>6.1f}\n"
-                )
 
             # Controle de coherence .pmagani <-> .prmag DES L'OUVERTURE
             # (pas seulement au moment d'un export MagIC) - demande
@@ -1217,8 +1289,7 @@ class STARpaleomagApp:
                 if orphans:
                     shown = ", ".join(orphans[:20])
                     more = f", ... ({len(orphans) - 20} more)" if len(orphans) > 20 else ""
-                    self.text_area.insert(
-                        tk.END,
+                    self._afficher(
                         f"\nWARNING: {len(orphans)} specimen(s) in {os.path.basename(ani_path)} "
                         f"have NO counterpart in this .prmag - mismatched files? "
                         f"{shown}{more}\n"
@@ -4155,6 +4226,7 @@ class STARpaleomagApp:
                 self._afficher(f"{sample_id}: sample not found in the loaded data.\n")
                 continue
             self.selection = [ech]
+            self._tag_selection(self.selection)
 
             try:
                 tmin, tmax = float(row.get("t1", "n.d")), float(row.get("t2", "n.d"))
@@ -4376,6 +4448,7 @@ class STARpaleomagApp:
             # Delete some data, export SVG...) ne voyaient pas
             # l'echantillon comme selectionne apres l'avoir revisite ici.
             self.selection = [ech]
+            self._tag_selection(self.selection)
 
             # orientation=1 (echantillon) FORCE, pas self.orientation.get()
             # - Fortran (plotpaleoint2.f/visi_Paleoint.f) : "iorient=1"
@@ -4560,7 +4633,7 @@ class STARpaleomagApp:
             if pause is None:
                 return
 
-    def afficher_visres(self):
+    def afficher_visres(self, results=None, mean_review=None):
         """Equivalent GUI de `visres` ("data+interpretation",
         plotorthog.f:8-149) : boucle sur CHAQUE résultat de self.results
         INDIVIDUELLEMENT (pas regroupé par échantillon) - pour cat1 in
@@ -4605,7 +4678,14 @@ class STARpaleomagApp:
         interpretation_quality.evaluate_result) - demande explicite
         utilisateur ("dans l'option data+interpretation, est-ce possible
         de lister l'évaluation de l'échantillon?")."""
-        if not self.results:
+        # `results` : liste a parcourir a la place de self.results (mode
+        # tout automatique site par site, avant validation).
+        # `mean_review` : dict (site, composante) -> entree de
+        # _review_site_mean (meme mode) ; chaque moyenne affichee est alors
+        # revue (liste des resultats, retrait, acceptation/refus).
+        if results is None:
+            results = self.results
+        if not results:
             self._showwarning(
                 "No results", "No results saved (see Calcul > Ajustement...).")
             return
@@ -4616,7 +4696,7 @@ class STARpaleomagApp:
 
         self.text_area.insert(tk.END, "\n--- Data + interpretation (Escape to stop) ---\n", "prompt")
         traite = 0
-        for r in self.results:
+        for r in results:
             if r.cat1 not in ("L", "P", "f", "F"):
                 continue
 
@@ -4647,7 +4727,7 @@ class STARpaleomagApp:
                 # `c` combines) - vide si self.results ne contient que des
                 # moyennes (ex. charge avec carselect='m'), auquel cas la
                 # moyenne seule est quand meme tracee.
-                components = mean_components(r, self.results)
+                components = mean_components(r, results)
                 traite += 1
                 self._clear_figure()
                 self.fig.set_size_inches(5.5, 5.5, forward=True)
@@ -4659,7 +4739,16 @@ class STARpaleomagApp:
 
                 dec, inc = _correct_dec_inc(r, self.orientation.get())
                 n_txt = f", {len(components)} individual result(s)" if components else ""
-                self._afficher(f"{r.id}: dec={dec:.1f}  inc={inc:.1f}{n_txt}\n")
+                # a95 (mad) et k (tx[0]) d'une moyenne - demande explicite
+                # utilisateur ("add the a95 and k")
+                self._afficher(f"{r.id} ({r.component or 'A'}): dec={dec:.1f}  inc={inc:.1f}  a95={r.mad:.1f}  "
+                               f"k={r.tx[0]:.1f}  N={r.nb}{n_txt}\n")
+                key = (r.id.split(":", 1)[1].strip(), r.component or "A")
+                if mean_review is not None and key in mean_review:
+                    if self._review_site_mean(key, mean_review[key]) == "stop":
+                        mean_review["_stopped"] = True
+                        return
+                    continue
                 decision = self._console_input("Next (Enter) / stop (Escape): ", "")
                 if decision is None:
                     return
@@ -4721,6 +4810,109 @@ class STARpaleomagApp:
                 "No line/plane/mean type result found (or the referenced "
                 "specimens are not loaded in self.donnees).",
             )
+
+    def _review_site_mean(self, key, entry):
+        """Revue d'une moyenne de site du mode site par site - demande
+        explicite utilisateur ("when giving the mean result for a site, can
+        you list the results and indicate those at more than 2 times the
+        standard deviation and ask if you want to remove a line before to
+        accept that mean. for the same site we can accept a component and
+        eventually refus the other mean if there are two mean components").
+
+        `entry` : {"members": resultats de la moyenne, "left": resultats
+        ecartes automatiquement (split_outliers), "means": [moyenne in situ,
+        moyenne apres pendage]}. Liste chaque resultat avec son ecart a la
+        moyenne (axial, distance au grand cercle pour un plan, comme
+        split_outliers) et signale ceux a plus de OUTLIER_ASD_FACTOR
+        ecarts-types angulaires (ecart-type des seuls resultats de la
+        moyenne). Numeros = retirer de la moyenne, +numero = y remettre un
+        resultat ecarte (le resultat specimen reste ecrit dans les deux
+        cas, comme un outlier automatique) ; la moyenne (in situ ET apres
+        pendage) est recalculee et retracee. y/Entree = accepter, n =
+        refuser la moyenne (les resultats specimen restent), d = refuser la
+        moyenne ET ne pas ecrire les resultats specimen de cette
+        composante. Renseigne entry["decision"] ; retourne "stop" sur
+        Echap."""
+        site, comp = key
+        orient = float(self.orientation.get())
+
+        def deviation(res, mean_vec):
+            dec, inc = _correct_dec_inc(res, orient)
+            ang = math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(_unit_vector(dec, inc), mean_vec))))))
+            return abs(90.0 - ang) if res.cat1 == "P" else min(ang, 180.0 - ang)
+
+        while True:
+            members, left = entry["members"], entry["left"]
+            mean = next(m for m in entry["means"] if m.par3_mean == orient)
+            mean_vec = _unit_vector(*_correct_dec_inc(mean, orient))
+            devs = [deviation(x, mean_vec) for x in members]
+            asd = math.sqrt(sum(d * d for d in devs) / (len(devs) - 1)) if len(devs) > 1 else 0.0
+            limit = OUTLIER_ASD_FACTOR * asd
+            rows_head = f"  {'#':>3s} {'specimen':<11s} {'type':<5s} {'steps':<8s} {'dec':>5s} {'inc':>5s} {'MAD':>4s} {'dev':>5s}"
+            pool = sorted(members + left, key=lambda x: (x.id.strip(), x.step_first))
+            rows = [f"  results of mean {site} {comp}:",
+                    f"  angular standard deviation {asd:.1f} deg, {OUTLIER_ASD_FACTOR:g} x sd = {limit:.1f} deg",
+                    rows_head]
+            for n, x in enumerate(pool, 1):
+                d = deviation(x, mean_vec)
+                dec, inc = _correct_dec_inc(x, orient)
+                tag = ("  left out" if x in left
+                       else f"  ** > {OUTLIER_ASD_FACTOR:g} sd" if d > limit else "")
+                kind = "plane" if x.cat1 == "P" else "line"
+                steps = f"{x.step_first:g}-{x.step_last:g}"
+                rows.append(f"  {n:3d} {x.id.strip():<11s} {kind:<5s} {steps:<8s} "
+                            f"{dec:5.1f} {inc:5.1f} {x.mad:4.1f} {d:5.1f}{tag}")
+            # question en plusieurs lignes courtes - demande explicite
+            # utilisateur ("the line are too long and difficult to read")
+            rows += [f"  Mean {site} {comp}:",
+                     "    numbers = remove from the mean (e.g. 3 7), +number = restore",
+                     "    y = accept the mean",
+                     "    n = refuse the mean (specimen results kept)",
+                     "    d = refuse the mean and its specimen results"]
+            self._afficher("\n".join(rows) + "\n")
+            answer = self._console_input(f"Mean {site} {comp} - your choice [y]: ", "y")
+            if answer is None:
+                return "stop"
+            answer = answer.strip().lower() or "y"
+            if answer in ("y", "n", "d"):
+                entry["decision"] = answer
+                verdict = {"y": "accepted", "n": "refused (specimen results kept)",
+                           "d": "refused, specimen results of this component not written"}[answer]
+                self._afficher(f"Mean {site} {comp}: {verdict}.\n")
+                return None
+            remove, restore = set(), set()
+            try:
+                for tok in answer.replace(",", " ").split():
+                    (restore if tok.startswith("+") else remove).add(int(tok.lstrip("+")))
+            except ValueError:
+                self._afficher("Answer not understood.\n")
+                continue
+            if any(not 1 <= i <= len(pool) for i in remove | restore):
+                self._afficher(f"Numbers must be between 1 and {len(pool)}.\n")
+                continue
+            new_members = [x for n, x in enumerate(pool, 1)
+                           if (x in members and n not in remove) or (x in left and n in restore)]
+            if len(new_members) < AUTO_MIN_SPECIMENS:
+                self._afficher(f"A mean needs at least {AUTO_MIN_SPECIMENS} results - not changed.\n")
+                continue
+            entry["members"] = new_members
+            entry["left"] = [x for x in pool if x not in new_members]
+            lat, lon = site_lat_lon_from_donnees(site, self.donnees) or (0.0, 0.0)
+            entry["means"] = [build_site_mean_result(
+                fisher_from_results(new_members, orientation=o, combine_antipodal=True),
+                new_members, site, o, lat, lon, component=comp) for o in (2, 3)]
+            mean = next(m for m in entry["means"] if m.par3_mean == orient)
+            if entry["means"][0].tx[0] < AUTO_MIN_K:
+                self._afficher(f"Warning: k in situ = {entry['means'][0].tx[0]:.1f} < {AUTO_MIN_K:g}.\n")
+            self._clear_figure()
+            self.fig.set_size_inches(5.5, 5.5, forward=True)
+            build_stereo_results_figure([mean] + new_members, orientation=self.orientation.get(),
+                                        nbech=len(new_members), fig=self.fig)
+            self._fit_figure_to_data()
+            self._redraw_canvas()
+            dec, inc = _correct_dec_inc(mean, orient)
+            self._afficher(f"New {mean.id} {comp}:\n  dec={dec:.1f}  inc={inc:.1f}  a95={mean.mad:.1f}  "
+                           f"k={mean.tx[0]:.1f}  N={mean.nb}\n")
 
     def ouvrir_convertthelli_dialog(self):
         """Equivalent GUI de `convertthelli` ("Thellier >> NRM") : convertit
@@ -5038,6 +5230,18 @@ class STARpaleomagApp:
         et n'archivent qu'une fois la sauvegarde confirmee par l'utilisateur."""
         if not self.results_path:
             return
+        own_path = self._sample_results_path.get((fit.id or "").strip(), self.results_path)
+        if own_path and own_path != self.results_path:
+            # specimen selectionne avant l'ouverture du fichier courant :
+            # archive dans le .pmagres de SON fichier
+            try:
+                archivres(fit, own_path, None)
+                self._afficher(f"({fit.id.strip()} archived in {os.path.basename(own_path)}, "
+                               "the results file of the data file it comes from)\n")
+            except OSError as e:
+                self._showwarning("Archiving failed",
+                                  f"The result is in memory but could not be written to {own_path}:\n{e}")
+            return
         try:
             _, self._archived_ids = archivres(fit, self.results_path, self._archived_ids)
             # Met a jour la date connue APRES notre propre ecriture - sinon
@@ -5311,6 +5515,7 @@ class STARpaleomagApp:
         # existante (nbech n'est jamais remis a zero dans selmes lui-meme,
         # seul initmes/"Init list" le fait) - ne remplace pas self.selection.
         self.selection = self.selection + new_matches
+        self._tag_selection(new_matches)
         nb_mesures = sum(len(s.mesures) for s in self.selection)
         self.text_area.insert(
             tk.END, f"Selection: +{len(new_matches)} sample(s) - "
@@ -5467,6 +5672,7 @@ class STARpaleomagApp:
             demag1=demag1, demag2=demag2, verbose=False,
         )
         self.selection = self.selection + new_matches
+        self._tag_selection(new_matches)
         nb_mesures = sum(len(s.mesures) for s in self.selection)
         self._afficher(
             f"Site selection « {site} »: +{len(new_matches)} sample(s) - "
@@ -5769,6 +5975,210 @@ class STARpaleomagApp:
                     self.results.remove(fit)
                 break  # echantillon suivant
 
+    def interpretation_toute_automatique(self):
+        """Mode tout automatique (auto_interpretation.automatic_results) -
+        demande explicite utilisateur ("OUI" a la proposition de l'ajouter
+        en option du menu) : toutes les suggestions de la selection
+        archivees (A = 1re, B = 2e) plus les moyennes de site A/B in situ
+        et apres pendage, dans un fichier SEPARE <base>_auto.pmagres, pour
+        ne jamais toucher aux interpretations manuelles du .pmagres.
+
+        Copie aussi les donnees en <base>_auto.prmag (et le .pmagani s'il
+        existe) puis propose de les ouvrir - demande explicite utilisateur
+        ("le programme cree un fichier auto.pmagres mais pas un
+        auto.prmag ? comment visualiser le auto.pmagres") : l'application
+        associe un .pmagres a ses donnees par le nom de base (voir
+        results_path_for), un _auto.pmagres seul n'etait donc visible
+        nulle part. Relance depuis un _auto.prmag deja ouvert, ecrit dans
+        son propre _auto.pmagres (pas de _auto_auto)."""
+        if not self.selection:
+            self._showwarning("No selection", "Select some samples first.")
+            return
+        if not self.results_path or not getattr(self, "data_file_path", None):
+            self._showerror("Error", "Load a .prmag file first.")
+            return
+        base, ext = os.path.splitext(self.data_file_path)
+        auto_base = base if base.endswith("_auto") else base + "_auto"
+        auto_data_path = auto_base + ext
+        out_path = results_path_for(auto_data_path)
+        if os.path.exists(out_path):
+            answer = self._console_input(
+                f"{os.path.basename(out_path)} already exists - overwrite it (y/N): ", "n")
+            if answer is None or answer.strip().lower() != "y":
+                return
+        self._reduce_grm_before_fit()
+        foreign = [ech.id.strip() for ech in self.selection
+                   if self._sample_results_path.get(ech.id.strip(), self.results_path) != self.results_path]
+        if foreign:
+            self._showwarning(
+                "Selection from another file",
+                f"{len(foreign)} selected sample(s) come from a previously opened file "
+                f"({', '.join(foreign[:5])}{'...' if len(foreign) > 5 else ''}).\n"
+                "Use Init selection, then select samples of the open file.")
+            return
+        viable = [ech for ech in self.selection if len(ech.mesures) >= 2]
+        auto = automatic_results(viable, self.donnees)
+        write_results_file(out_path, auto.specimens, auto.means)
+        if auto_data_path != self.data_file_path:
+            shutil.copy2(self.data_file_path, auto_data_path)
+            ani = ani_path_for(self.data_file_path)
+            if os.path.exists(ani):
+                shutil.copy2(ani, ani_path_for(auto_data_path))
+
+        lines = [f"\n--- Automatic interpretation written to {out_path} ---",
+                 f"{len(auto.specimens)} specimen result(s) (A = first suggestion, B = second), "
+                 f"{len(auto.means)} site mean(s) (in situ + tilt corrected, at least "
+                 f"{AUTO_MIN_SPECIMENS} specimens)"]
+        if auto.outliers:
+            lines.append(f"Left out of the means (more than {OUTLIER_ASD_FACTOR:g} angular standard "
+                         f"deviations and {AUTO_OUTLIER_MIN_DEG:g} deg from the mean):")
+            lines += [f"  {site:10s} {comp}  {spec:12s} {dev:5.1f} deg" for site, comp, spec, dev in auto.outliers]
+        if auto.scattered:
+            lines.append(f"Means not reported, too scattered (k < {AUTO_MIN_K:g} in situ):")
+            lines += [f"  {site:10s} {comp}  N={n:<3d} k={k:.1f}" for site, comp, n, k in auto.scattered]
+        if auto.excluded:
+            lines.append("Left out of the means by the site-level checks:")
+            lines += [f"  {site:10s} {spec:12s} {why}" for site, spec, why in auto.excluded]
+        if auto.spurious:
+            lines.append("Isolated measurement errors left out (in memory only, like Remove step):")
+            lines += [f"  {spec:12s} {step}: {why}" for spec, step, why in auto.spurious]
+        if auto.not_written:
+            lines.append("Suggestions not written:")
+            lines += [f"  {spec:12s} {why}" for spec, why in auto.not_written]
+        lines.append(f"Data copied to {os.path.basename(auto_data_path)}: open it to look at the "
+                     f"automatic results; your own .pmagres is not changed.")
+        self._afficher("\n".join(lines) + "\n")
+        if auto_data_path != self.data_file_path:
+            answer = self._console_input(
+                f"Open {os.path.basename(auto_data_path)} now (Y/n): ", "y")
+            if answer is not None and answer.strip().lower() != "n":
+                self._load_data_file(auto_data_path, announce=False)
+
+    def interpretation_auto_par_site(self):
+        """Mode automatique SITE PAR SITE avec validation - demande
+        explicite utilisateur ("est-ce possible de le faire site par
+        site: a la fin de l'ajustement passer par le menu data +
+        visualisation et ensuite demander a l'utilisateur de valider
+        results+moyenne, et ensuite passer au site suivant. dans le
+        fichier pmagres encadrer le bloc de resultats par deux lignes #
+        automated determination for site :").
+
+        Pour chaque site de la selection (magic_site) : automatic_results
+        sur ses specimens, affichage des resultats et des moyennes par
+        data+interpretation (afficher_visres, Entree = suivant, Echap =
+        fin de l'affichage), puis question : y = ecrire dans le .pmagres
+        du fichier ouvert (bloc encadre, voir calcul.append_results_block),
+        n = passer au site suivant, q = arreter. Les resultats valides
+        sont aussi ajoutes a self.results."""
+        if not self.selection:
+            self._showwarning("No selection", "Select some samples first.")
+            return
+        if not self.results_path or not getattr(self, "data_file_path", None):
+            self._showerror("Error", "Load a .prmag file first.")
+            return
+        foreign = [ech.id.strip() for ech in self.selection
+                   if self._sample_results_path.get(ech.id.strip(), self.results_path) != self.results_path]
+        if foreign:
+            self._showwarning(
+                "Selection from another file",
+                f"{len(foreign)} selected sample(s) come from a previously opened file "
+                f"({', '.join(foreign[:5])}{'...' if len(foreign) > 5 else ''}).\n"
+                "Use Init selection, then select samples of the open file.")
+            return
+        self._reduce_grm_before_fit()
+        by_site = {}
+        no_site = []
+        for ech in self.selection:
+            if len(ech.mesures) < 2:
+                continue
+            site = (ech.magic_site or "").strip()
+            if site:
+                by_site.setdefault(site, []).append(ech)
+            else:
+                no_site.append(ech.id.strip())
+        if not by_site:
+            self._showwarning("No site", "None of the selected samples has a site (magic_site).")
+            return
+        if no_site:
+            self._afficher(f"{len(no_site)} sample(s) without a site skipped: "
+                           f"{', '.join(no_site[:10])}{'...' if len(no_site) > 10 else ''}\n")
+        saved_sites = 0
+        sites = sorted(by_site)
+        for n_site, site in enumerate(sites, 1):
+            existing = {r.c for r in _iter_result_lines(self.results_path)}
+            ids = {ech.id.strip() for ech in by_site[site]}
+            already = sum(1 for r in _iter_result_lines(self.results_path) if r.id.strip() in ids)
+            auto = automatic_results(by_site[site], self.donnees, existing_ids=existing)
+            lines = [f"\n=== Site {site} ({n_site}/{len(sites)}): {len(by_site[site])} specimen(s), "
+                     f"{len(auto.specimens)} result(s), {len(auto.means)} mean(s) (in situ + tilt corrected) ==="]
+            if already:
+                lines.append(f"Note: {os.path.basename(self.results_path)} already holds {already} "
+                             f"result(s) for specimens of this site.")
+            for m in auto.means:
+                if m.par3_mean == float(self.orientation.get()):
+                    dec, inc = _correct_dec_inc(m, self.orientation.get())
+                    lines.append(f"  mean {m.component}: dec={dec:.1f} inc={inc:.1f} "
+                                 f"a95={m.mad:.1f} k={m.tx[0]:.1f} N={m.nb}")
+            lines += [f"  {spec} ({comp}): line {dev:.1f} deg from the mean, replaced by a great circle "
+                      f"{a:g}-{b:g}" for _s, comp, spec, dev, a, b in auto.far_to_plane]
+            lines += [f"  left out: {spec} ({comp}, {dev:.1f} deg from the mean)"
+                      for _s, comp, spec, dev in auto.outliers]
+            lines += [f"  mean {comp} not reported: N={n} k={k:.1f} (k < {AUTO_MIN_K:g})"
+                      for _s, comp, n, k in auto.scattered]
+            lines += [f"  left out: {spec} ({why})" for _s, spec, why in auto.excluded]
+            lines += [f"  not written: {spec} ({why})" for spec, why in auto.not_written]
+            lines += [f"  measurement error left out: {spec} step {step} ({why})"
+                      for spec, step, why in auto.spurious]
+            self._afficher("\n".join(lines) + "\n")
+            if not auto.specimens:
+                continue
+            # revue de chaque moyenne (composante) - voir _review_site_mean
+            review = {}
+            for m in auto.means:
+                key = (site, m.component or "A")
+                if key not in review:
+                    members = mean_components(m, auto.specimens)
+                    out_ids = {spec for s_, c_, spec, _d in auto.outliers if (s_, c_) == key}
+                    review[key] = {"members": members, "means": [],
+                                   "left": [x for x in auto.specimens if x.id in out_ids
+                                            and (x.component or "A") == key[1] and x not in members]}
+                review[key]["means"].append(m)
+            self.afficher_visres(results=auto.specimens + auto.means, mean_review=review)
+            if review.pop("_stopped", False):
+                self._afficher(f"Site {site}: not saved.\n")
+                break
+            specimens = list(auto.specimens)
+            means = []
+            for (_s, comp), entry in review.items():
+                decision = entry.get("decision", "y")
+                if decision == "y":
+                    means += entry["means"]
+                elif decision == "d":
+                    drop = {id(x) for x in entry["members"] + entry["left"]}
+                    specimens = [x for x in specimens if id(x) not in drop]
+            if not specimens:
+                self._afficher(f"Site {site}: nothing left to save.\n")
+                continue
+            summary = ", ".join(f"{m.component} N={m.nb}" for m in means if m.par3_mean == 2.0) or "none"
+            answer = self._console_input(
+                f"Site {site}: save {len(specimens)} result(s) and mean(s) {summary}?\n"
+                "  y = save / n = skip / q = stop [n]: ", "n")
+            choice = "q" if answer is None else (answer.strip().lower() or "n")
+            if choice == "y":
+                append_results_block(self.results_path, site, specimens, means)
+                self._results_path_mtime = os.path.getmtime(self.results_path)
+                self._archived_ids = None
+                self.results = self.results + specimens + means
+                saved_sites += 1
+                self._afficher(f"Site {site}: {len(specimens)} result(s) and {len(means)} "
+                               f"mean(s) saved.\n")
+            elif choice == "q":
+                break
+            else:
+                self._afficher(f"Site {site}: not saved.\n")
+        self._afficher(f"\n--- Site-by-site automatic interpretation: {saved_sites} site(s) saved in "
+                       f"{os.path.basename(self.results_path)} ---\n")
+
     def ouvrir_autointerpretation_dialog(self):
         """Pas dans le Fortran (aucun equivalent) - demande explicite
         utilisateur ("une routine intelligente qui ferait des
@@ -5820,13 +6230,52 @@ class STARpaleomagApp:
             else:
                 no_site.append(ech)
 
+        # vue de SITE complete - demande explicite utilisateur ("in the
+        # menu autointerpret (sample by sample), can you take into account
+        # the view at the site level (for example to identify a lightning
+        # strike) as in the menu site before to provide your best
+        # estimate") : l'analyse de site porte sur TOUS les specimens du
+        # site dans le fichier ouvert, pas seulement les selectionnes
+        # (un seul specimen selectionne n'avait aucun contexte : ni
+        # foudre, ni grands cercles, ni lettre A/B de site). Seuls les
+        # specimens selectionnes sont ensuite proposes.
         suggestions_by_id = {}
-        for echs in by_site.values():
-            suggestions_by_id.update(propose_components_for_site(echs))
+        site_lines = []
+        selected_ids = {ech.id for ech in viable}
+        others_all = None
+        for site, echs in sorted(by_site.items()):
+            if others_all is None:
+                others_all = [e for e in select_samples(self.donnees, "*", step_min=0, step_max=2000,
+                                                        demag1="*", demag2="*", verbose=False)
+                              if e.id not in selected_ids and len(e.mesures) >= 2]
+            others = [e for e in others_all if (e.magic_site or "").strip() == site]
+            if others:
+                reduce_grm_before_fit(others, method=1)
+            for spec, step, why in remove_spurious_steps(echs + others):
+                site_lines.append(f"  {spec}: step {step} left out as a measurement error ({why})")
+            site_suggestions = propose_components_for_site(echs + others)
+            suggestions_by_id.update({e.id: site_suggestions[e.id] for e in echs})
+            all_sg = [sg for sgs in site_suggestions.values() for sg in sgs]
+            facts = []
+            lightning = sorted(e for e, sgs in site_suggestions.items() if any(sg.site_outlier for sg in sgs))
+            if lightning:
+                facts.append(f"probable lightning: {', '.join(x.strip() for x in lightning)}")
+            notes = " ".join(n for sg in all_sg for n in sg.notes)
+            if "site analysed by great-circle intersection" in notes:
+                facts.append("analysed by great-circle intersection")
+            if "high-temperature component not isolated" in notes:
+                facts.append("high-temperature component from lines + great circles")
+            site_lines.append(f"  site {site}: {len(echs)} selected, analysed with "
+                              f"{len(echs) + len(others)} specimen(s)"
+                              + (f" - {'; '.join(facts)}" if facts else ""))
+        for spec, step, why in remove_spurious_steps(no_site):
+            site_lines.append(f"  {spec}: step {step} left out as a measurement error ({why})")
         for ech in no_site:
             suggestions_by_id[ech.id] = propose_components(ech)
 
         self.text_area.insert(tk.END, "\n--- Auto-interpretation (suggestions, Escape to stop) ---\n", "prompt")
+        if site_lines:
+            self._afficher("Site-level view:\n" + "\n".join(site_lines) + "\n")
         for ech in viable:
             suggestions = suggestions_by_id[ech.id]
             if not suggestions:
@@ -5839,16 +6288,18 @@ class STARpaleomagApp:
             # distinguent visuellement, meme convention que ajuslig).
             candidates = {}  # label -> FitResult
             for s in suggestions:
-                jdeb = next((i + 1 for i, m in enumerate(ech.mesures) if m.etape == s.step_first), None)
-                jfin = next((i + 1 for i, m in enumerate(ech.mesures) if m.etape == s.step_last), None)
-                if jdeb is None or jfin is None:
-                    continue
+                # indices du segment (comme automatic_results) : retrouver
+                # le palier par sa valeur echouait sur un palier mesure 2 fois
+                jdeb, jfin = s.index_first + 1, s.index_last + 1
                 numcomp = 1 if s.label == "primary" else 2
                 if s.kind == "plane":
                     fit = fit_plane(ech, jdeb, jfin, numcomp=numcomp)
                 else:
                     fit = fit_line(ech, jdeb, jfin, anchored=s.anchored, numcomp=numcomp)
                 if fit is not None:
+                    # lettre de composante du site (A/B, voir
+                    # propose_components_for_site)
+                    fit.component = s.component or ("A" if s.label == "primary" else "B")
                     candidates[s.label] = fit
 
             self._afficher(format_suggestions(ech.id, suggestions))
@@ -6991,9 +7442,41 @@ class STARpaleomagApp:
             self._showerror("Error", str(e))
             return
         self._afficher(self._format_fisher(stats, "Fisher on the results (lines)"))
-        self._archive_fisher_mean(stats, combine_antipodal)
+        kept = self._exclude_outliers(combine_antipodal)
+        if kept is None:
+            return
+        if len(kept) != len(self.results):
+            stats = fisher_from_results(
+                kept, orientation=self.orientation.get(), combine_antipodal=combine_antipodal)
+            self._afficher(self._format_fisher(stats, "Fisher on the results without the outliers"))
+        self._archive_fisher_mean(stats, combine_antipodal, kept)
 
-    def _archive_fisher_mean(self, stats, combine_antipodal=False):
+    def _exclude_outliers(self, combine_antipodal):
+        """Signale les resultats a plus de OUTLIER_ASD_FACTOR ecarts-types
+        angulaires de la moyenne (calcul.split_outliers) et propose de les
+        retirer - demande explicite utilisateur ("une direction a plus de 2
+        fois l'ecart-type angulaire peut etre consideree comme outlier").
+        Test en in situ si l'affichage est en coordonnees echantillon (des
+        directions de specimens differents n'y sont pas comparables).
+        Retourne les resultats a garder, ou None si l'utilisateur annule."""
+        orientation = self.orientation.get()
+        sample_of = {e.id: (e.magic_sample or "").strip() for e in (self.donnees or [])}
+        kept, rejected, asd = split_outliers(
+            self.results, orientation=orientation if orientation != 1 else 2,
+            combine_antipodal=combine_antipodal, sample_of=sample_of)
+        if not rejected:
+            return list(self.results)
+        lines = [f"Possible outlier(s), more than {OUTLIER_ASD_FACTOR:g} x the angular "
+                 f"standard deviation ({asd:.1f} deg) from the mean, or from the other cores "
+                 f"when a sister specimen of the same core disagrees:"]
+        lines += [f"  {r.id:12s} {r.cat1}  {r.step_first:g}-{r.step_last:g}  {d:5.1f} deg" for r, d in rejected]
+        self._afficher("\n".join(lines) + "\n")
+        answer = self._console_input(f"Exclude {len(rejected)} outlier(s) from the mean (Y/n): ", "y")
+        if answer is None:
+            return None
+        return kept if answer.strip().lower() != "n" else list(self.results)
+
+    def _archive_fisher_mean(self, stats, combine_antipodal=False, results=None):
         """Propose d'archiver `stats` (calcule par fisher_resultats) comme
         un resultat "mean:" - demande le site, la composante de
         magnetisation (A/B/C..., voir calcul.FitResult.component -
@@ -7029,7 +7512,8 @@ class STARpaleomagApp:
         # meme regroupement que fisher_from_results (L/f/s + P, PAS
         # uniquement 'L') - demande explicite utilisateur ("when lines and
         # planes are selected for a fisher result, use the combined L & P").
-        contributing = [r for r in self.results if r.cat1 in _LINE_LIKE_CAT1 or r.cat1 == "P"]
+        source = self.results if results is None else results
+        contributing = [r for r in source if r.cat1 in _LINE_LIKE_CAT1 or r.cat1 == "P"]
         # site_of_result (magic_site du specimen correspondant, PAS les 6
         # premiers caracteres de l'id) - demande explicite utilisateur,
         # apres renommage de site ("in the calculation of a mean for a

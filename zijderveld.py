@@ -21,6 +21,7 @@ Absoft generique) :
   blanc, verticale), type 5 (plus, graduations).
 """
 
+import copy
 import math
 from typing import List, Optional
 
@@ -428,9 +429,17 @@ def draw_zijderveld(
         # PAS applique au Zijderveld lui-meme (deja distingue par son
         # propre segment rouge/vert superpose, voir plus haut dans cette
         # fonction).
+        # Memes mesures que le Zijderveld (mesures_zij, sans acquisition
+        # d'IRM ni thermique d'IRM) - demande explicite utilisateur
+        # ("lors de la visualisation des donnees + resultats ... ne pas
+        # selectionner les acquisitions d'ARI") : avec toutes les mesures,
+        # un fit AF archive en Oersted (ex. 200-1000) mettait en bleu les
+        # paliers d'acquisition IRM 200..900 mT du meme specimen.
         highlight_ranges = [(fit.step_first, fit.step_last) for fit in matching_fits]
+        ech_zij = copy.copy(ech)
+        ech_zij.mesures = mesures_zij
         draw_stereo_measurements(
-            ctx, [ech], r_mini, orientation, point_size=0.18 * dimster / 10.0,
+            ctx, [ech_zij], r_mini, orientation, point_size=0.18 * dimster / 10.0,
             highlight_ranges=highlight_ranges,
         )
         # Resultat (point pour une ligne, grand cercle pour un plan) EN

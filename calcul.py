@@ -596,6 +596,132 @@ def fisher_from_results(
     return replace(stats, n_flipped=n_flipped)
 
 
+OUTLIER_ASD_FACTOR = 2.0  # voir split_outliers
+# en mode tout automatique, ecart minimal pour rejeter (un site tres groupe,
+# ecart-type 4 deg, perdait sinon des directions a 8 deg - demande explicite
+# utilisateur : "en mode tout automatique mettre un seuil a 10 deg")
+AUTO_OUTLIER_MIN_DEG = 10.0
+
+
+def _unit_vector(dec: float, inc: float) -> np.ndarray:
+    d, i = math.radians(dec), math.radians(inc)
+    return np.array([math.cos(i) * math.cos(d), math.cos(i) * math.sin(d), math.sin(i)])
+
+
+def split_outliers(
+    results: List[FitResult], orientation: int = 2, combine_antipodal: bool = False,
+    factor: float = OUTLIER_ASD_FACTOR, min_deviation: float = 0.0,
+    sample_of: Optional[Dict[str, str]] = None,
+) -> Tuple[List[FitResult], List[Tuple[FitResult, float]], float]:
+    """Separe les resultats a plus de `factor` ecarts-types angulaires de
+    la moyenne de Fisher - demande explicite utilisateur ("une direction a
+    plus de 2 fois l'ecart-type angulaire peut etre consideree comme
+    outlier"), apres 14XL1915A (227/12 en repere specimen, ecarte a la
+    main de la moyenne 14XL19) qui faisait tomber k de 165 a 42 dans la
+    moyenne automatique.
+
+    Ecart d'une ligne = angle a la moyenne (axial si `combine_antipodal`,
+    le groupe minoritaire etant inverse dans la moyenne) ; ecart d'un plan
+    = distance de la moyenne au grand cercle. Ecart-type angulaire =
+    sqrt(somme des ecarts^2 / (N-1)), le csd de fisher_mean etendu aux
+    plans. Une seule passe : la moyenne est calculee AVEC les directions
+    testees (pas d'elimination en cascade). Rien n'est rejete s'il
+    resterait moins de 3 resultats. `min_deviation` : ecart en dessous
+    duquel on ne rejette jamais (AUTO_OUTLIER_MIN_DEG en mode automatique).
+
+    `sample_of` (id specimen -> echantillon/carotte, magic_sample) : test
+    supplementaire des specimens SOEURS - demande explicite utilisateur
+    (14XL04 : 14XL0405G/0406G, desaimantation thermique de la GRM acquise
+    en fin d'AF, 91/0 en repere specimen, quasi antiparalleles a leurs
+    soeurs A/B ; regroupes par polarite ils entraient dans la moyenne,
+    "la considerer comme un outlier pour le site"). Deux specimens d'une
+    meme carotte portent la meme composante avec la MEME polarite : une
+    ligne a plus de la limite (orientee, sans inversion) de sa soeur est
+    rejetee si elle est aussi a plus de la limite de la moyenne des AUTRES
+    carottes (orientee vers la polarite majoritaire) alors qu'une soeur y
+    est conforme. Puis le test des 2 ecarts-types sur ce qui reste.
+
+    Retourne (gardes, [(rejete, ecart en deg)], ecart-type angulaire)."""
+    usable = [r for r in results if r.cat1 in _LINE_LIKE_CAT1 or r.cat1 == "P"]
+    if len(usable) < 4:
+        return list(results), [], 0.0
+    sisters: List[Tuple[FitResult, float]] = []
+    if sample_of:
+        sisters = _split_on_sisters(usable, orientation, factor, min_deviation, sample_of)
+        if sisters:
+            out = {id(r) for r, _ in sisters}
+            usable = [r for r in usable if id(r) not in out]
+            results = [r for r in results if id(r) not in out]
+    kept, rejected, asd = _split_on_asd(results, usable, orientation, combine_antipodal,
+                                        factor, min_deviation)
+    return kept, sisters + rejected, asd
+
+
+def _deviations(usable, orientation, combine_antipodal):
+    """Ecarts (deg) a la moyenne de Fisher de `usable` - voir split_outliers."""
+    stats = fisher_from_results(usable, orientation=orientation, combine_antipodal=combine_antipodal)
+    mean = _unit_vector(stats.dec, stats.inc)
+    deviations = []
+    for r in usable:
+        dec, inc = _correct_dec_inc(r, orientation)
+        cosang = max(-1.0, min(1.0, float(np.dot(_unit_vector(dec, inc), mean))))
+        ang = math.degrees(math.acos(cosang))
+        if r.cat1 == "P":
+            dev = abs(90.0 - ang)
+        elif combine_antipodal:
+            dev = min(ang, 180.0 - ang)
+        else:
+            dev = ang
+        deviations.append(dev)
+    asd = math.sqrt(sum(d * d for d in deviations) / (len(usable) - 1))
+    return deviations, asd
+
+
+def _split_on_asd(results, usable, orientation, combine_antipodal, factor, min_deviation):
+    if len(usable) < 4:
+        return list(results), [], 0.0
+    deviations, asd = _deviations(usable, orientation, combine_antipodal)
+    limit = max(factor * asd, min_deviation)
+    rejected = [(r, d) for r, d in zip(usable, deviations) if d > limit]
+    if not rejected or len(usable) - len(rejected) < 3:
+        return list(results), [], asd
+    out = {id(r) for r, _ in rejected}
+    return [r for r in results if id(r) not in out], rejected, asd
+
+
+def _split_on_sisters(usable, orientation, factor, min_deviation, sample_of):
+    """Test des specimens soeurs de split_outliers. Limite = celle du test
+    des ecarts-types, ecart-type calcule polarites regroupees (sinon une
+    soeur inversee gonflerait la limite au point de ne plus se detecter) ;
+    angles ORIENTES (deux soeurs n'ont jamais des polarites opposees)."""
+    _, asd = _deviations(usable, orientation, True)
+    limit = max(factor * asd, min_deviation)
+    vec = {id(r): _unit_vector(*_correct_dec_inc(r, orientation))
+           for r in usable if r.cat1 in _LINE_LIKE_CAT1}
+    by_sample: Dict[str, List[FitResult]] = {}
+    for r in usable:
+        if id(r) in vec and sample_of.get(r.id):
+            by_sample.setdefault(sample_of[r.id], []).append(r)
+
+    def angle(a, b):
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(a, b))))))
+
+    rejected: List[Tuple[FitResult, float]] = []
+    for sample, group in by_sample.items():
+        if len(group) < 2 or max(angle(vec[id(a)], vec[id(b)]) for a in group for b in group) <= limit:
+            continue
+        others = [r for r in usable if sample_of.get(r.id) != sample]
+        if len(others) < 2:
+            continue
+        ref = fisher_from_results(others, orientation=orientation, combine_antipodal=True)
+        ref_vec = _unit_vector(ref.dec, ref.inc)
+        dev = {id(r): angle(vec[id(r)], ref_vec) for r in group}
+        if min(dev.values()) > limit:
+            continue
+        rejected += [(r, dev[id(r)]) for r in group if dev[id(r)] > limit]
+    return rejected if len(usable) - len(rejected) >= 3 else []
+
+
 # ---------------------------------------------------------------------------
 # ajusplans / planar : ajustement de plan (grand cercle) par ACP - meme
 # principe que linear_fit, mais le pole du plan est le vecteur propre de la
@@ -1909,6 +2035,69 @@ def archivres(
         f.flush()
         os.fsync(f.fileno())
     return c, existing_ids
+
+
+AUTO_BLOCK_MARK = "# automated determination for site : "
+
+
+def append_results_block(path: str, site: str, specimen_results: List[FitResult],
+                         mean_results: List[FitResult]) -> None:
+    """Ajoute les resultats automatiques VALIDES d'un site au .pmagres
+    `path`, encadres par deux lignes "# automated determination for site :
+    <site>" - demande explicite utilisateur ("dans le fichier pmagres
+    encadrer le bloc de resultats par deux lignes # automated
+    determination for site :"). Le fichier a deux sections (specimens,
+    puis moyennes) : un bloc encadre va a la fin de chacune, comme
+    archivres. Ces lignes "#" sont ignorees a la lecture
+    (_iter_result_lines : seul "#site mean..." change de section).
+    Les `c` doivent deja etre uniques dans `path` (voir
+    auto_interpretation.automatic_results, existing_ids)."""
+    mark = AUTO_BLOCK_MARK + site
+    lines: List[str] = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="iso-8859-1", errors="replace") as f:
+            lines = f.read().splitlines()
+    if not lines:
+        lines = [_SPECIMEN_HEADER, _cols_header(_SPECIMEN_FIELDS)]
+    mean_header_idx = next(
+        (i for i, l in enumerate(lines) if "site mean" in l.strip().lower() and l.strip().startswith("#")),
+        None,
+    )
+    if specimen_results:
+        block = [mark] + [_format_result_line(r).rstrip("\n") for r in specimen_results] + [mark]
+        if mean_header_idx is None:
+            lines += block
+        else:
+            insert_idx = mean_header_idx
+            while insert_idx > 0 and not lines[insert_idx - 1].strip():
+                insert_idx -= 1
+            lines[insert_idx:insert_idx] = block
+    if mean_results:
+        if mean_header_idx is None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines += [_MEAN_HEADER, _cols_header(_MEAN_FIELDS)]
+        lines += [mark] + [_format_result_line(r).rstrip("\n") for r in mean_results] + [mark]
+    with open(path, "w", encoding="iso-8859-1", errors="replace", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def write_results_file(path: str, specimen_results: List[FitResult], mean_results: List[FitResult]) -> None:
+    """Ecrit un .pmagres complet (ecrase `path`) : section specimens puis
+    section moyennes - pour un fichier genere d'un bloc (mode tout
+    automatique, auto_interpretation.automatic_results), plutot qu'un
+    archivres par resultat qui relit et reecrit le fichier a chaque fois."""
+    lines = [_SPECIMEN_HEADER, _cols_header(_SPECIMEN_FIELDS)]
+    lines += [_format_result_line(r).rstrip("\n") for r in specimen_results]
+    if mean_results:
+        lines += ["", _MEAN_HEADER, _cols_header(_MEAN_FIELDS)]
+        lines += [_format_result_line(r).rstrip("\n") for r in mean_results]
+    with open(path, "w", encoding="iso-8859-1", errors="replace", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def import_published_means(
