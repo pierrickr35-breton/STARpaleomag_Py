@@ -46,6 +46,7 @@ from selection import (
     polere,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
+from interpretation_audit import audit_results, format_site_section
 from auto_interpretation import (
     AUTO_MIN_K, AUTO_MIN_SPECIMENS, automatic_results, propose_components, propose_components_for_site,
     format_suggestions, remove_spurious_steps,
@@ -124,6 +125,8 @@ from susceptibility import build_susceptibility_figure
 from svgwriter import SVGWriter
 from paleointensity import (
     compute_arai,
+    drop_earlier_nrm,
+    auto_arai_interval,
     fit_arai_line,
     fit_arai_direction,
     fit_arai_direction_corrected,
@@ -137,7 +140,21 @@ from paleointensity import (
     build_paleoint_review_figure,
     draw_arai,
     write_pmagint_line,
+    AUTO_PINT_MAX_CHECK,
+    AUTO_PINT_MAX_DANG,
+    AUTO_PINT_MAX_K_ORIGIN,
+    AUTO_PINT_MAX_MAD,
+    AUTO_PINT_SITE_MAX_WG,
+    AUTO_PINT_SITE_MIN_N,
+    site_intensity_means,
+    AUTO_PINT_NRM_START_MAX_ANGLE,
+    AUTO_PINT_NRM_START_MIN_LOSS,
+    AUTO_PINT_MAX_SSE,
+    AUTO_PINT_MIN_F,
+    AUTO_PINT_MIN_Q,
     read_pmagint,
+    evaluate_pmagint,
+    format_pmagint_evaluation,
 )
 from paleointensity_magic import compute_magic_paleointensity, format_magic_paleointensity
 from datatools import (
@@ -708,6 +725,10 @@ class STARpaleomagApp:
         paleoint_menu = tk.Menu(menubar, tearoff=0)
         paleoint_menu.add_command(label="Paleointensity interpretation",
                                    command=self._menu_cmd("paleoint-view", self.afficher_arai))
+        paleoint_menu.add_command(label="Automatic paleointensity, overview (no file written)...",
+                                   command=self._menu_cmd("paleoint-view", self.afficher_arai_auto_overview))
+        paleoint_menu.add_command(label="Evaluate paleointensity estimates (.pmagint)...",
+                                   command=self._menu_cmd("paleoint-view", self.evaluer_paleointensites))
         paleoint_menu.add_command(label="View batch of Paleoint Results (from .pmagint, read-only)...",
                                    command=self._menu_cmd("paleoint-view", self.ouvrir_view_pmagint_dialog))
         paleoint_menu.add_command(label="Rapid view/recompute from redo file...",
@@ -3663,6 +3684,47 @@ class STARpaleomagApp:
         self._save_result(fit)
         self._afficher(f"Anchored direction saved to .pmagres as component A: {len(self.results)}\n")
 
+    def _drop_earlier_nrm(self, ech):
+        """Voir paleointensity.drop_earlier_nrm : NRM repetee avant les
+        chauffes -> seule la derniere est gardee (en memoire)."""
+        removed = drop_earlier_nrm(ech)
+        if removed:
+            self._afficher(
+                f"{ech.id}: NRM measured {len(removed) + 1} times before the heatings - the last one is "
+                f"used as NRM0, {len(removed)} earlier one(s) left out (in memory only)\n")
+
+    def _auto_arai_text(self, points, auto):
+        """Texte de la proposition automatique (auto_arai_interval) -
+        regles de l'utilisateur, voir paleointensity.AUTO_PINT_*."""
+        lines = []
+        if auto.failed_check is not None:
+            c = auto.failed_check
+            done_at = points[auto.n_max].temp if auto.n_max < len(points) else c.temp
+            lines.append(
+                f" pTRM check failed: step {c.temp:g} re-tested after {done_at:g} differs by "
+                f"{100 * auto.check_gap:.0f}% of the TRM (limit {100 * AUTO_PINT_MAX_CHECK:.0f}%)\n"
+                f"   -> steps from {done_at:g} on are not used")
+        if auto.from_nrm:
+            lines.append(
+                f" Start from the NRM: the first step ({points[1].temp:g}) removed "
+                f"{100 * auto.nrm_loss:.0f}% of the NRM, parallel to the ChRM ({auto.nrm_angle:.0f} deg)\n"
+                f"   -> virtual NRM point (0,1) added as point 1 (step 0), the other points are renumbered +1")
+        if auto.n1 is None:
+            lines.append(f" Automatic interpretation: REJECTED - {auto.reason}")
+        else:
+            f = auto.fit
+            d = auto.direction
+            lines.append(
+                f" Automatic interpretation: steps {auto.n1}-{auto.n2} "
+                f"({points[auto.n1 - 1].temp:g}-{points[auto.n2 - 1].temp:g})\n"
+                f"   f={f.f:.2f}  q={f.qq:.1f}  H={f.h:.1f}  MAD={d.free_mad:.1f}  DANG={d.dang:.1f}")
+        lines.append(
+            f"   (rules: NRM goes to the origin (MAD<={AUTO_PINT_MAX_MAD:g}, DANG<={AUTO_PINT_MAX_DANG:g}), "
+            f"f>={AUTO_PINT_MIN_F:g}, q>={AUTO_PINT_MIN_Q:g},\n"
+            f"    linear (circle-fit SSE<={AUTO_PINT_MAX_SSE:g}), diagram not curved from the NRM to n2 (|k|<={AUTO_PINT_MAX_K_ORIGIN:g}),\n"
+            f"    lowest start, stop before a failed pTRM check)")
+        return "\n" + "\n".join(lines) + "\n"
+
     def _arai_step_tables(self, ech, points, checks, arno):
         """Tableau des pas NRM/TRM + tableau des controles pTRM (texte) -
         extrait tel quel de afficher_arai pour etre partage avec le dialogue
@@ -3944,6 +4006,7 @@ class STARpaleomagApp:
             # sans condition en tete de routine, ignore le reglage
             # d'orientation de l'appli - demande explicite utilisateur
             # ("the combined plots should be in sample coordinates").
+            self._drop_earlier_nrm(ech)
             points, checks, arno = compute_arai(ech, orientation=1)
             if len(points) < 2:
                 continue  # pas de codes N/R/V/P exploitables pour cet echantillon
@@ -4014,10 +4077,21 @@ class STARpaleomagApp:
             self._current_graphic = ("arai", ech.id)
             self._refresh_current_graphic()
 
+            auto = auto_arai_interval(points, checks, ech, hlab)
+            if auto.from_nrm:
+                # point NRM virtuel (0,1) en tete : la numerotation des
+                # points (et donc ni,nj) decale de 1, diagramme redessine
+                points = auto.points
+                self._arai_state = (ech, points, checks, arno, None, hlab)
+                self._refresh_current_graphic()
+            self._afficher(self._auto_arai_text(points, auto))
+            auto_default = f"{auto.n1} {auto.n2}" if auto.n1 is not None else "0"
+
             while True:
                 range_s = self._console_input(
-                    f" calculation of the slope between steps ni,nj (1-{len(points)}, Return = skip): ",
-                    "0")
+                    f" calculation of the slope between steps ni,nj (1-{len(points)}, "
+                    f"Return = {'automatic ' + auto_default if auto.n1 is not None else 'skip'}): ",
+                    auto_default)
                 if range_s is None:
                     return
                 parts = range_s.split()
@@ -4124,6 +4198,178 @@ class STARpaleomagApp:
                 "No diagram",
                 "No selected sample has usable paleointensity measurements (N/R/V/P codes).",
             )
+
+    def afficher_arai_auto_overview(self):
+        """Proposition automatique (auto_arai_interval) pour toute la
+        selection, en tableau - rien n'est ecrit : la validation se fait
+        dans "Paleointensity interpretation", ou la proposition est la
+        reponse par defaut. Champ de labo : detecte (treat_dc_field ou
+        commentaire), comme dans ce dialogue ; sans champ, H n'est pas
+        calcule mais l'intervalle est propose."""
+        if not self.selection:
+            self._showwarning("No selection", "Select some samples first.")
+            return
+        out = ["", "--- Automatic paleointensity (overview, nothing written) ---",
+               f"{'specimen':<14}{'steps':>8}{'T1-T2':>12}{'N':>4}{'f':>6}{'q':>6}"
+               f"{'MAD':>6}{'DANG':>6}{'Hlab':>6}{'H':>7}  note"]
+        n_ok = n_rej = 0
+        hs = []
+        site_entries = {}  # site -> [(specimen, H, q, N)] des specimens acceptes
+        # comparaison avec les interpretations deja archivees (.pmagint :
+        # manuelles, ou valeurs publiees rejouees par "Rapid view/recompute
+        # from redo file" apres un import MagIC) - demande utilisateur
+        # (tester l'automatique sur d'autres jeux, contributions MagIC)
+        archived = {}
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        if pmagint_path and os.path.exists(pmagint_path):
+            try:
+                archived = read_pmagint(pmagint_path)
+            except Exception:
+                archived = {}
+        redo_ref = {}
+        ref_name = os.path.basename(pmagint_path) if archived else ""
+        if not archived:
+            # pas de .pmagint : comparaison possible avec un fichier redo
+            # (specimen Tmin Tmax ...), p. ex. redo_pint_contribution_NUM.txt
+            # ecrit par l'import MagIC = intervalles publies ; H y est
+            # recalcule sur ces intervalles, rien n'est ecrit.
+            ans = self._console_input(
+                "No .pmagint to compare with - compare with a redo file (specimen Tmin Tmax, "
+                "e.g. redo_pint_contribution_NUM.txt from a MagIC import)? y/N: ", "N")
+            if ans is None:
+                return
+            if ans.strip().lower() == "y":
+                path = filedialog.askopenfilename(
+                    title="Redo file (specimen Tmin Tmax)",
+                    initialdir=os.path.dirname(self.results_path) if self.results_path else None)
+                if path:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            parts = line.split()
+                            if len(parts) >= 3:
+                                try:
+                                    redo_ref[parts[0]] = (float(parts[1]), float(parts[2]))
+                                except ValueError:
+                                    pass
+                    ref_name = os.path.basename(path)
+        cmp_d, cmp_archived_only, cmp_auto_only = [], 0, 0
+        for ech in self.selection:
+            if len(ech.mesures) < 2:
+                continue
+            self._drop_earlier_nrm(ech)
+            points, checks, arno = compute_arai(ech, orientation=1)
+            if len(points) < 2:
+                continue
+            _method, hlab = detect_method_and_hlab(ech.mesures, ech.com)
+            auto = auto_arai_interval(points, checks, ech, float(hlab or 0.0))
+            points = auto.points
+            cut = "start from the NRM (first step removed " \
+                f"{100 * auto.nrm_loss:.0f}%, {auto.nrm_angle:.0f} deg from the ChRM)" if auto.from_nrm else ""
+            if auto.failed_check is not None and auto.n_max < len(points):
+                cut += ("; " if cut else "") + f"from {points[auto.n_max].temp:g} on left out: pTRM check {100 * auto.check_gap:.0f}% of the TRM"
+            arch = archived.get(ech.id.strip())
+            if arch is None and ech.id.strip() in redo_ref and hlab:
+                t1, t2 = redo_ref[ech.id.strip()]
+                raw = [p for p in points if p.k != -1]  # sans le point NRM virtuel eventuel
+                i1 = next((i for i, p in enumerate(raw, 1) if abs(p.temp - t1) < 0.5), None)
+                i2 = next((i for i, p in enumerate(raw, 1) if abs(p.temp - t2) < 0.5), None)
+                if t1 == 0 and i1 is None:
+                    i1 = 1
+                if i1 and i2 and i2 - i1 >= 1:
+                    arch = {"t1": f"{t1:g}", "t2": f"{t2:g}",
+                            "H": f"{fit_arai_line(raw, i1, i2, hlab=float(hlab)).h:.2f}"}
+            arch_h = None
+            if arch is not None:
+                try:
+                    arch_h = float(arch.get("H", ""))
+                except ValueError:
+                    arch_h = None
+            if auto.n1 is None:
+                n_rej += 1
+                note = f"REJECTED: {auto.reason}"
+                if arch_h is not None:
+                    cmp_archived_only += 1
+                    note += f" | ref {arch.get('t1')}-{arch.get('t2')} H={arch_h:.1f}"
+                out.append(f"{ech.id:<14}{'-':>8}{'':>12}{'':>4}{'':>6}{'':>6}{'':>6}{'':>6}"
+                           f"{hlab or 0:>6g}{'':>7}  {note}")
+                continue
+            n_ok += 1
+            f, d = auto.fit, auto.direction
+            if arch_h and hlab:
+                dpct = 100.0 * (f.h - arch_h) / arch_h
+                cmp_d.append(dpct)
+                cut += ("; " if cut else "") + f"ref {arch.get('t1')}-{arch.get('t2')} H={arch_h:.1f} ({dpct:+.0f}%)"
+            elif archived or redo_ref:
+                cmp_auto_only += 1
+                cut += ("; " if cut else "") + "not in the reference"
+            h = f"{f.h:7.1f}" if hlab else f"{'n.d':>7}"
+            if hlab:
+                hs.append(f.h)
+                site_key = (getattr(ech, "magic_site", "") or "").strip() or "(no site)"
+                site_entries.setdefault(site_key, []).append(
+                    (ech.id.strip(), f.h, f.qq, auto.n2 - auto.n1 + 1))
+            out.append(
+                f"{ech.id:<14}{f'{auto.n1}-{auto.n2}':>8}"
+                f"{f'{points[auto.n1 - 1].temp:g}-{points[auto.n2 - 1].temp:g}':>12}"
+                f"{auto.n2 - auto.n1 + 1:>4}{f.f:6.2f}{f.qq:6.1f}{d.free_mad:6.1f}{d.dang:6.1f}"
+                f"{hlab or 0:>6g}{h}  {cut}")
+        if n_ok + n_rej == 0:
+            self._showinfo("No diagram", "No selected sample has usable paleointensity measurements.")
+            return
+        summary = f"{n_ok} accepted, {n_rej} rejected"
+        if hs:
+            m = sum(hs) / len(hs)
+            sd = math.sqrt(sum((x - m) ** 2 for x in hs) / (len(hs) - 1)) if len(hs) > 1 else 0.0
+            summary += f" - mean H of the accepted = {m:.1f} +/- {sd:.1f} uT (N={len(hs)})"
+        out.append(summary)
+        if site_entries:
+            out.append("")
+            out.append(
+                "Site means of the accepted specimens - weighted = q/sqrt(N-2) as in StereoUtils "
+                "Mean paleointensity (Prevot et al. 1985);")
+            out.append(
+                f"flagged when the weighted and geometric means differ by more than "
+                f"{100 * AUTO_PINT_SITE_MAX_WG:.0f}% (N >= {AUTO_PINT_SITE_MIN_N}):")
+            out.append(f"{'site':<14}{'N':>4}{'mean':>8}{'sd':>7}{'geom':>8}{'weighted':>10}{'wtd/geom':>10}")
+            for site, entries in sorted(site_entries.items()):
+                st = site_intensity_means(entries)
+                g = f"{st['geom']:8.1f}" if st["geom"] else f"{'n.d':>8}"
+                w = f"{st['weighted']:10.1f}" if st["weighted"] else f"{'n.d':>10}"
+                r = f"{st['ratio']:10.2f}" if st["ratio"] else f"{'':>10}"
+                out.append(f"{site:<14}{st['n']:>4}{st['arith']:8.1f}{st['sd']:7.1f}{g}{w}{r}"
+                           + ("  <-- not coherent" if st["flagged"] else ""))
+                if not st["flagged"]:
+                    continue
+                if st["suspect"] is not None:
+                    sp, wo = st["suspect"], st["without"]
+                    out.append(
+                        f"{'':14}    isolated specimen {sp[0]} (H={sp[1]:.1f}, q={sp[2]:.0f}, N={sp[3]}): "
+                        f"without it weighted {wo['weighted']:.1f}, geom {wo['geom']:.1f} - to be checked/removed")
+                else:
+                    out.append(f"{'':14}    no single isolated specimen - the specimens disagree "
+                               f"(H, q, share of the weight):")
+                    out.append(f"{'':14}    " + ", ".join(
+                        f"{s} {h:.1f} q={q:.0f} {100 * share:.0f}%" for s, h, q, n, share in st["spread"]))
+        if archived or redo_ref:
+            line = f"Compared with {ref_name}: {len(cmp_d)} in both"
+            if cmp_d:
+                ad = sorted(abs(x) for x in cmp_d)
+                med = ad[len(ad) // 2] if len(ad) % 2 else (ad[len(ad) // 2 - 1] + ad[len(ad) // 2]) / 2
+                line += (f" (H within 5%: {sum(x < 5 for x in ad)}, within 10%: {sum(x < 10 for x in ad)}, "
+                         f"median |dH| {med:.1f}%)")
+            line += f", {cmp_archived_only} only in the reference (rejected here), {cmp_auto_only} accepted here only"
+            out.append(line)
+        out.append(
+            f"Rules: NRM goes to the origin (MAD<={AUTO_PINT_MAX_MAD:g}, DANG<={AUTO_PINT_MAX_DANG:g}), "
+            f"f>={AUTO_PINT_MIN_F:g}, q>={AUTO_PINT_MIN_Q:g},")
+        out.append(
+            f"linear (circle-fit SSE<={AUTO_PINT_MAX_SSE:g}), diagram not curved from the NRM to n2 (|k|<={AUTO_PINT_MAX_K_ORIGIN:g}), lowest possible start,\n"
+            f"no step from a pTRM check differing by > {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM;")
+        out.append(
+            f"start from the NRM (0,1) when the first step removed >= {100 * AUTO_PINT_NRM_START_MIN_LOSS:.0f}% "
+            f"of the NRM within {AUTO_PINT_NRM_START_MAX_ANGLE:g} deg of the ChRM.")
+        out.append("To validate and save: Paleointensity interpretation (the proposal is the default answer).")
+        self._afficher("\n".join(out) + "\n")
 
     def ouvrir_view_pmagint_dialog(self):
         """Vue en lot READ-ONLY des interpretations DEJA archivees dans
@@ -4238,6 +4484,7 @@ class STARpaleomagApp:
             except ValueError:
                 hlab_stored = 0.0
 
+            self._drop_earlier_nrm(ech)
             points, checks, arno = compute_arai(ech, orientation=1)
             if len(points) < 2:
                 self._afficher(f"{sample_id}: no usable paleointensity measurements (N/R/V/P).\n")
@@ -4455,6 +4702,7 @@ class STARpaleomagApp:
             # sans condition en tete de routine, ignore le reglage
             # d'orientation de l'appli - demande explicite utilisateur
             # ("the combined plots should be in sample coordinates").
+            self._drop_earlier_nrm(ech)
             points, checks, arno = compute_arai(ech, orientation=1)
             if len(points) < 2:
                 self._afficher(f"{sample_id}: no usable paleointensity measurements (N/R/V/P).\n")
@@ -7613,8 +7861,37 @@ class STARpaleomagApp:
         if not self.results:
             self._showwarning("No results", "Run one or more line/plane fits first, or load some via Select results...")
             return
-        reports = evaluate_results(self.results, self.donnees)
-        self._afficher(format_quality_report(reports) + "\n")
+        # controles ajoutes depuis l'interpretation automatique (paliers
+        # aberrants, traitements melanges, ecart a la proposition auto,
+        # controles de site) - voir interpretation_audit.py
+        self._afficher("Evaluating (the automatic interpretation of each site is computed for comparison)...\n")
+        self.root.update_idletasks()
+        reports, site_lines = audit_results(self.results, self.donnees)
+        self._afficher(format_quality_report(reports) + "\n\n" + format_site_section(site_lines) + "\n")
+
+    def evaluer_paleointensites(self):
+        """Evaluation des paleointensites archivees dans le .pmagint du
+        fichier ouvert - demande explicite utilisateur ("ajouter un menu
+        evaluations paleointensity estimates") : regles de l'interpretation
+        automatique, comparaison avec la proposition automatique, coherence
+        des moyennes de site (voir paleointensity.evaluate_pmagint). Rien
+        n'est ecrit."""
+        if not self.donnees:
+            self._showwarning("No data", "Load a .prmag file first.")
+            return
+        path = pmagint_path_for(self.results_path) if self.results_path else None
+        if not path or not os.path.exists(path):
+            path = filedialog.askopenfilename(
+                title="Paleointensity estimates (.pmagint)",
+                filetypes=[("Paleointensity", "*.pmagint"), ("All files", "*.*")],
+                initialdir=os.path.dirname(self.results_path) if self.results_path else None)
+            if not path:
+                return
+        rows = read_pmagint(path)
+        self._afficher(f"\n--- Evaluate paleointensity estimates: {os.path.basename(path)} ---\n")
+        self.root.update_idletasks()
+        evals, site_lines = evaluate_pmagint(rows, self.donnees)
+        self._afficher(format_pmagint_evaluation(evals, site_lines, os.path.basename(path)) + "\n")
 
     def reinitialiser_resultats(self):
         """Equivalent GUI de `initres`."""

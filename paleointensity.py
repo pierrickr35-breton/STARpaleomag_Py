@@ -86,6 +86,30 @@ def _cartest(ctype: str, table: str) -> int:
     return idx + 1 if idx >= 0 else -1
 
 
+def drop_earlier_nrm(ech: SelectedSample) -> List[Measurement]:
+    """NRM mesuree plusieurs fois avant les chauffes ("0N0" puis "0N2",
+    mesures separees dans le temps) : retire de ech.mesures, EN MEMOIRE
+    seulement (comme le menu Remove step), toutes les mesures 'N' du bloc
+    initial sauf la DERNIERE, la plus proche du debut de l'experience -
+    choix explicite utilisateur ("prendre le N2" ; "le plus simple est de
+    l'enlever de la selection en memoire, sans changer la routine de
+    calcul") : compute_arai et le calcul PmagPy parallele voient alors la
+    meme NRM0. Ne fait rien pour un specimen sans sequence de
+    paleointensite (R/V/S). Retourne les mesures retirees."""
+    mesures = ech.mesures
+    if not any(m.cod1 in ("R", "V", "S") for m in mesures):
+        return []
+    first = next((i for i, m in enumerate(mesures) if m.cod1 == "N"), None)
+    if first is None:
+        return []
+    last = first
+    while last + 1 < len(mesures) and mesures[last + 1].cod1 == "N":
+        last += 1
+    removed = mesures[first:last]
+    del mesures[first:last]
+    return removed
+
+
 def _step_of(m: Measurement) -> float:
     """Valeur de pas a AFFICHER/UTILISER en calcul (AraiPoint.temp,
     PtrmCheck.temp). `Measurement.etape` est desormais directement cette
@@ -582,15 +606,20 @@ def compute_arai(
                 j = -1
                 break
         if not found:
+            # recherche vers l'avant : le Fortran (plotpaleoint2.f:3370,
+            # "j=i+1 ; if(iet(j).eq.etap) go to 3370") teste l'etape AVANT
+            # d'accepter un R - auparavant le R du pas suivant etait
+            # accepte meme a une autre etape : une NRM re-mesuree ("0N2"
+            # apres "0N0", 18 specimens VarSec) devenait un faux point
+            # d'Arai a 0 degC (TRM = N2-R120, NRM = 0) qui faussait la
+            # courbure k et decalait la numerotation. Le Fortran saute ce
+            # pas (message 1999).
             j = i + 1
-            while j < n:
+            while j < n and mesures[j].etape == etap:
                 if mesures[j].cod1 == "R":
                     found = True
                     break
                 j += 1
-                if j < n and mesures[j].etape != etap:
-                    j = n
-                    break
         if not found:
             continue
         p = get_point(k)
@@ -820,6 +849,303 @@ def angle_between_vectors(
         return None
     cosang = sum(v1[i] * v2[i] for i in range(3)) / (n1 * n2)
     return math.degrees(math.acos(max(-1.0, min(1.0, cosang))))
+
+
+# --- Interpretation automatique de la paleointensite ---------------------
+# Regles de l'utilisateur (demande explicite, 2026-11-07) :
+#   1) la NRM doit avoir, au moins sur l'intervalle choisi, une composante
+#      qui va a l'origine (ACP libre lineaire, et proche de l'ancree) ;
+#   2) segment lineaire sur au moins 45 % de la NRM (f de Coe) ;
+#   3) le segment demarre aux basses temperatures (les evolutions
+#      chimiques ont lieu a haute temperature) : on retient le premier
+#      debut possible, pas le meilleur q ;
+#   4) rejet si q < 5 ;
+#   5) des qu'un controle pTRM differe significativement de la mesure
+#      d'origine, plus aucune etape a partir de celle ou il a ete fait.
+AUTO_PINT_MIN_F = 0.45
+AUTO_PINT_MIN_Q = 5.0
+AUTO_PINT_MAX_MAD = 15.0     # ACP libre sur les vecteurs NRM de l'intervalle
+AUTO_PINT_MAX_DANG = 10.0    # angle libre/ancree : la composante va a l'origine
+AUTO_PINT_MIN_POINTS = 3
+# Linearite du segment : courbure de Paterson |k| (cercle ajuste sur le
+# segment, arai_curvature) et beta = sigma(b)/|b|. Sans elles, "la fin la
+# plus haute" deborde sur la partie courbe du diagramme.
+# k' (n1..n2 seuls, PmagPy int_k_prime / CCRIT) : desactive - ne dit rien
+# du comportement de (0,1) a n1 (avis utilisateur), voir AUTO_PINT_MAX_K_ORIGIN.
+AUTO_PINT_MAX_CURV = None
+AUTO_PINT_MAX_BETA = None
+# SSE du cercle ajuste sur le segment (arai_curvature, points normalises
+# par leur maximum) : seuil retenu apres essais contre 302 interpretations
+# manuelles (95 % des segments manuels sont sous 0.0044) - meilleur que la
+# courbure k seule et que le test des deux demi-pentes, qui reste
+# disponible (AUTO_PINT_MAX_SLOPE_DIFF) mais desactive.
+AUTO_PINT_MAX_SSE = 0.004
+# Courbure de tout le diagramme, du point (0,1) (NRM initiale) jusqu'a la
+# fin du segment - le k de la ligne de resultats/.pmagint (curv0) : un
+# segment peut etre lineaire alors que le diagramme est nettement courbe
+# des la premiere etape (11CL6917A : segment 200-480 k=0.34, diagramme
+# k=0.65) - demande explicite utilisateur.
+# Choix utilisateur : c'est ce segment (0,1)->n2 qui compte - k' (n1..n2)
+# ignore le comportement entre la NRM et n1, et au-dela de n2 les points
+# sont de toute facon rejetes.
+AUTO_PINT_MAX_K_ORIGIN = 0.4  # choix utilisateur (0.164 de Paterson rejetait 35/160 VarSec)
+# pentes des deux moities du segment (point milieu partage) : ecart relatif
+# maximal |b1-b2|/max(|b1|,|b2|) - un diagramme plat puis raide (NRM qui
+# ne decroit pas aux basses temperatures) ou raide puis plat (NRM epuisee
+# alors que la TRM continue) n'est pas un segment lineaire.
+AUTO_PINT_MAX_SLOPE_DIFF = None  # 0.4 essaye : 264/302 a 10 % contre 268 avec la SSE seule
+
+
+def _rma_slope(sub: List[AraiPoint]) -> float:
+    m = len(sub)
+    xm = sum(p.xp for p in sub) / m
+    ym = sum(p.yp for p in sub) / m
+    x2 = sum((p.xp - xm) ** 2 for p in sub)
+    y2 = sum((p.yp - ym) ** 2 for p in sub)
+    return -math.sqrt(y2 / x2) if x2 > 0 else 0.0
+
+
+def half_slope_difference(points: List[AraiPoint], n1: int, n2: int) -> float:
+    """Ecart relatif des pentes des deux moitiees de points[n1..n2]."""
+    sub = points[n1 - 1:n2]
+    h = len(sub) // 2
+    b1, b2 = _rma_slope(sub[:h + 1]), _rma_slope(sub[h:])
+    big = max(abs(b1), abs(b2))
+    return abs(b1 - b2) / big if big > 0 else 0.0
+# ecart |pTRM check - pTRM d'origine| rapporte a la TRM totale acquise
+# (max des TRM/NRM0 du diagramme) : rapporte au seul pTRM du palier cible,
+# l'ecart est enorme aux basses temperatures ou ce pTRM est minuscule
+# (calibre sur les interpretations manuelles VarSec/Miriam/Isla Mala).
+AUTO_PINT_MAX_CHECK = 0.10
+# Depart de la NRM (point virtuel (0,1), comme la ruse R/V a 25 degC) -
+# demande explicite utilisateur : en principe le 1er palier NRM->T1 peut
+# enlever une aimantation parasite, mais pour une titanomagnetite riche en
+# Ti la 1re temperature peut etre trop haute et enlever beaucoup de la
+# composante elle-meme. Ajoute si le 1er palier a enleve au moins
+# MIN_LOSS de la NRM ET que le vecteur enleve (NRM - T1) est a moins de
+# MAX_ANGLE de la ChRM du segment (meme composante, pas un parasite) ET
+# que le segment prolonge passe toutes les autres regles.
+AUTO_PINT_NRM_START_MIN_LOSS = 0.20
+AUTO_PINT_NRM_START_MAX_ANGLE = 15.0
+
+
+@dataclass
+class AutoAraiResult:
+    """Proposition automatique pour un specimen. n1/n2 None = rejete
+    (`reason` dit pourquoi). `n_max` = dernier point utilisable apres le
+    test des controles pTRM ; `failed_check` = le controle qui a coupe."""
+    n1: Optional[int] = None
+    n2: Optional[int] = None
+    fit: Optional["AraiFit"] = None
+    direction: Optional[AraiDirection] = None
+    n_max: int = 0
+    failed_check: Optional[PtrmCheck] = None
+    check_gap: float = 0.0
+    reason: str = ""
+    # liste de points sur laquelle n1/n2 sont definis : `points` d'entree,
+    # ou [point NRM virtuel (0,1)] + points quand from_nrm (voir
+    # AUTO_PINT_NRM_START_*) - les appelants doivent l'utiliser
+    points: List[AraiPoint] = field(default_factory=list)
+    from_nrm: bool = False
+    nrm_loss: float = 0.0    # fraction de NRM enlevee par le 1er palier
+    nrm_angle: float = 0.0   # angle (NRM -> T1) / ChRM du segment
+
+
+def ptrm_check_cutoff(
+    points: List[AraiPoint], checks: List[PtrmCheck], max_gap: float = AUTO_PINT_MAX_CHECK,
+) -> Tuple[int, Optional[PtrmCheck], float]:
+    """Dernier point (1-based) utilisable : le premier controle pTRM dont
+    l'ecart a la mesure d'origine depasse `max_gap` x TRM totale exclut le
+    point ou il a ete fait (c.k, mesure apres les chauffes R/V de ce pas -
+    l'alteration a eu lieu au plus tard pendant ces chauffes) et tous les
+    suivants. Retourne (n_max, controle fautif ou None, ecart relatif)."""
+    if not points:
+        return 0, None, 0.0
+    total = max(p.xp for p in points)
+    pos = {p.k: i for i, p in enumerate(points, start=1)}
+    n_max = len(points)
+    worst = None, 0.0
+    for c in sorted((c for c in checks if c.k in pos), key=lambda c: pos[c.k]):
+        gap = abs(c.xt - c.xtptrm) / total if total > 0 else 0.0
+        if gap > max_gap:
+            return pos[c.k] - 1, c, gap
+    return n_max, worst[0], worst[1]
+
+
+def _is_nrm_point(p: AraiPoint) -> bool:
+    return p.xp == 0.0 and abs(p.yp - 1.0) < 1e-9
+
+
+def _auto_arai_core(
+    points: List[AraiPoint], checks: List[PtrmCheck], ech: SelectedSample, hlab: float,
+) -> AutoAraiResult:
+    out = AutoAraiResult(points=points)
+    origin = [] if points and _is_nrm_point(points[0]) else [(0.0, 1.0)]
+    n_max, bad, gap = ptrm_check_cutoff(points, checks)
+    out.n_max, out.failed_check, out.check_gap = n_max, bad, gap
+    if n_max < AUTO_PINT_MIN_POINTS:
+        out.reason = (f"pTRM check failed too early (step {bad.temp:g} re-tested at "
+                      f"{points[n_max].temp:g}, gap {100 * gap:.0f}% of the TRM)" if bad
+                      else "not enough points")
+        return out
+    h_stats = hlab if hlab else 1.0  # q/f/g ne dependent pas de Hlab, fit_arai_line les saute si 0
+    best_fail = None  # (f, q, raison) du meilleur essai, pour expliquer un rejet
+    for n1 in range(1, n_max - AUTO_PINT_MIN_POINTS + 2):
+        for n2 in range(n_max, n1 + AUTO_PINT_MIN_POINTS - 2, -1):
+            fit = fit_arai_line(points, n1, n2, hlab=h_stats)
+            if fit.f < AUTO_PINT_MIN_F:
+                break  # n2 plus petit => f encore plus petit
+            why = None
+            if fit.qq < AUTO_PINT_MIN_Q:
+                why = f"q={fit.qq:.1f} < {AUTO_PINT_MIN_Q:g}"
+            elif AUTO_PINT_MAX_BETA is not None and fit.b and fit.sigma / abs(fit.b) > AUTO_PINT_MAX_BETA:
+                why = f"scattered (beta {fit.sigma / abs(fit.b):.2f})"
+            elif AUTO_PINT_MAX_SLOPE_DIFF is not None and half_slope_difference(points, n1, n2) > AUTO_PINT_MAX_SLOPE_DIFF:
+                why = f"not linear (slopes of the two halves differ by {100 * half_slope_difference(points, n1, n2):.0f}%)"
+            elif AUTO_PINT_MAX_CURV is not None and n2 - n1 >= 3 and abs(k_seg := arai_curvature(
+                    [p.xp for p in points[n1 - 1:n2]], [p.yp for p in points[n1 - 1:n2]]).k) > AUTO_PINT_MAX_CURV:
+                why = f"curved Arai segment (|k'|={abs(k_seg):.2f} > {AUTO_PINT_MAX_CURV:g})"
+            elif AUTO_PINT_MAX_K_ORIGIN is not None and len(origin) + n2 >= 4 and abs(k_origin := arai_curvature(
+                    [o[0] for o in origin] + [p.xp for p in points[:n2]],
+                    [o[1] for o in origin] + [p.yp for p in points[:n2]]).k) > AUTO_PINT_MAX_K_ORIGIN:
+                why = f"Arai diagram curved from the NRM (k={k_origin:.2f} > {AUTO_PINT_MAX_K_ORIGIN:g})"
+            elif AUTO_PINT_MAX_SSE is not None and n2 - n1 >= 3 and arai_curvature(
+                    [p.xp for p in points[n1 - 1:n2]], [p.yp for p in points[n1 - 1:n2]]).sse > AUTO_PINT_MAX_SSE:
+                why = f"not linear (circle-fit SSE > {AUTO_PINT_MAX_SSE:g})"
+            else:
+                d = fit_arai_direction(points, n1, n2, ech, orientation=1)
+                if d.free_mad is None or d.free_mad > AUTO_PINT_MAX_MAD:
+                    why = f"NRM not linear (MAD {d.free_mad if d.free_mad is not None else 99:.0f})"
+                elif d.dang is None or d.dang > AUTO_PINT_MAX_DANG:
+                    why = f"NRM does not go to the origin (DANG {d.dang if d.dang is not None else 99:.0f})"
+            if why is None:
+                if not hlab:
+                    fit = fit_arai_line(points, n1, n2, hlab=0.0)
+                    fit.f, fit.qq = fit_arai_line(points, n1, n2, hlab=1.0).f, fit_arai_line(points, n1, n2, hlab=1.0).qq
+                out.n1, out.n2, out.fit, out.direction = n1, n2, fit, d
+                return out
+            if best_fail is None or fit.qq > best_fail[1]:
+                best_fail = (fit.f, fit.qq, f"{points[n1 - 1].temp:g}-{points[n2 - 1].temp:g}: {why}")
+    if best_fail is None:
+        out.reason = f"no segment with f >= {AUTO_PINT_MIN_F:g} before the failed pTRM check" if bad \
+            else f"no segment with f >= {AUTO_PINT_MIN_F:g}"
+    else:
+        out.reason = f"no acceptable segment (best try {best_fail[2]})"
+    return out
+
+
+def virtual_nrm_point(ech: SelectedSample) -> Optional[AraiPoint]:
+    """Point NRM (0,1), palier 0 - meme point que la ruse R/V a 25 degC
+    (voir AUTO_PINT_NRM_START_*). k=-1 : aucun controle pTRM n'y est
+    rattache."""
+    nrm0 = nrm0_vector(ech, orientation=1)
+    if nrm0 is None:
+        return None
+    sx, sy, sz = nrm0
+    return AraiPoint(
+        k=-1, temp=0.0, xp=0.0, yp=1.0, nrm_vec=tuple(nrm0),
+        decl=math.degrees(math.atan2(sy, sx)) % 360.0,
+        aincl=math.degrees(math.atan2(sz, math.hypot(sx, sy))))
+
+
+def auto_arai_interval(
+    points: List[AraiPoint], checks: List[PtrmCheck], ech: SelectedSample, hlab: float,
+    allow_nrm_start: bool = True,
+) -> AutoAraiResult:
+    """Propose l'intervalle n1..n2 selon les regles AUTO_PINT_* (voir plus
+    haut). Debut le plus bas possible ; pour ce debut, la fin la plus haute
+    qui satisfait toutes les regles (avant la coupure pTRM). Si le 1er
+    palier a enleve beaucoup de NRM parallelement a la ChRM, essaie aussi
+    de partir du point NRM (0,1) (AUTO_PINT_NRM_START_*) - n1/n2 sont alors
+    definis sur `result.points` (point virtuel en tete, temp 0)."""
+    out = _auto_arai_core(points, checks, ech, hlab)
+    if (not allow_nrm_start or not points or _is_nrm_point(points[0])
+            or 1.0 - points[0].yp < AUTO_PINT_NRM_START_MIN_LOSS
+            or (out.n1 is not None and out.n1 != 1)):
+        return out
+    virt = virtual_nrm_point(ech)
+    if virt is None:
+        return out
+    nrm0 = virt.nrm_vec
+    alt = _auto_arai_core([virt] + points, checks, ech, hlab)
+    if alt.n1 != 1 or alt.n2 is None or alt.n2 - 1 < 2:
+        return out
+    chrm = fit_arai_direction(points, 1, alt.n2 - 1, ech, orientation=1).anchored_specimen_frame
+    removed = tuple(nrm0[i] - points[0].nrm_vec[i] for i in range(3))
+    ang = angle_between_vectors(removed, chrm)
+    if ang is None or ang > AUTO_PINT_NRM_START_MAX_ANGLE:
+        return out
+    alt.from_nrm = True
+    alt.nrm_loss = 1.0 - points[0].yp
+    alt.nrm_angle = ang
+    return alt
+
+
+# --- Moyennes de site des paleointensites automatiques --------------------
+# Ponderation de MEANPAL (StereoUtils, pmagoutils.f:602-606, Prevot et al.
+# 1985) : poids q/sqrt(N-2). Critere de coherence propose par l'utilisateur
+# (plutot qu'un nombre minimal de points - "3 points avec un tres bon
+# echantillon peut donner une tres bonne paleointensite") : si la moyenne
+# ponderee et la moyenne geometrique different de plus de
+# AUTO_PINT_SITE_MAX_WG, un specimen a fort poids est incoherent avec les
+# autres ; on cherche celui dont le retrait retablit la coherence.
+AUTO_PINT_SITE_MAX_WG = 0.10
+AUTO_PINT_SITE_MIN_N = 3
+
+
+def _site_means(entries):
+    hs = [h for _, h, _, _ in entries]
+    arith = sum(hs) / len(hs)
+    geom = math.exp(sum(math.log(h) for h in hs) / len(hs)) if all(h > 0 for h in hs) else None
+    w = [(h, q / math.sqrt(n - 2)) for _, h, q, n in entries if n > 2 and q > 0]
+    tot = sum(k for _, k in w)
+    wtd = sum(h * k for h, k in w) / tot if tot > 0 else None
+    sd = math.sqrt(sum((h - arith) ** 2 for h in hs) / (len(hs) - 1)) if len(hs) > 1 else 0.0
+    return arith, geom, wtd, sd
+
+
+# un specimen n'est propose au retrait que s'il est ISOLE : son retrait
+# retablit la coherence ET son H differe d'un facteur >= ce seuil de la
+# mediane des autres (GHI02D02, contribution 19491 : 185 uT pour ~22).
+# Sinon (sites a deux groupes, ex. Miriam SO1320 : 21-30 uT a q faible
+# contre 56-61 uT a q fort), aucun retrait n'est propose : retirer le
+# specimen qui "retablit" le rapport y enleverait le meilleur specimen.
+AUTO_PINT_SITE_OUTLIER_FACTOR = 2.0
+
+
+def site_intensity_means(entries):
+    """`entries` = [(specimen, H, q, N)] d'un site. Retourne un dict :
+    n, arith, sd, geom, weighted, ratio (ponderee/geometrique), flagged ;
+    si flagged : suspect = (specimen, H, q, N) isole a retirer (ou None)
+    avec les moyennes sans lui (without), et `spread` = specimens tries
+    par H avec leur part du poids total (pour juger d'un site a deux
+    groupes)."""
+    arith, geom, wtd, sd = _site_means(entries)
+    out = {"n": len(entries), "arith": arith, "sd": sd, "geom": geom, "weighted": wtd,
+           "ratio": None, "flagged": False, "suspect": None, "without": None, "spread": []}
+    if geom and wtd:
+        out["ratio"] = wtd / geom
+        out["flagged"] = (len(entries) >= AUTO_PINT_SITE_MIN_N
+                          and abs(out["ratio"] - 1.0) > AUTO_PINT_SITE_MAX_WG)
+    if not out["flagged"]:
+        return out
+    weights = {e[0]: (e[2] / math.sqrt(e[3] - 2) if e[3] > 2 and e[2] > 0 else 0.0) for e in entries}
+    tot = sum(weights.values()) or 1.0
+    out["spread"] = [(e[0], e[1], e[2], e[3], weights[e[0]] / tot) for e in sorted(entries, key=lambda e: e[1])]
+    for e in entries:
+        rest = [x for x in entries if x[0] != e[0]]
+        a2, g2, w2, sd2 = _site_means(rest)
+        if not (g2 and w2) or abs(w2 / g2 - 1.0) > AUTO_PINT_SITE_MAX_WG:
+            continue
+        others = sorted(x[1] for x in rest)
+        med = others[len(others) // 2] if len(others) % 2 else (others[len(others) // 2 - 1] + others[len(others) // 2]) / 2
+        if med > 0 and e[1] > 0 and abs(math.log(e[1] / med)) >= math.log(AUTO_PINT_SITE_OUTLIER_FACTOR):
+            if out["suspect"] is None or abs(math.log(e[1] / med)) > out["_dev"]:
+                out["suspect"] = e
+                out["_dev"] = abs(math.log(e[1] / med))
+                out["without"] = {"arith": a2, "geom": g2, "weighted": w2, "sd": sd2}
+    out.pop("_dev", None)
+    return out
 
 
 @dataclass
@@ -1583,3 +1909,172 @@ def read_pmagint(path: str) -> Dict[str, Dict[str, str]]:
                 continue
             out[parts[0]] = dict(zip(_PMAGINT_HEADER, parts))
     return out
+
+
+
+# --- Evaluation des paleointensites archivees (.pmagint) -------------------
+# Menu "Evaluate paleointensity estimates..." - demande explicite
+# utilisateur (2026-11-08). Applique a chaque intervalle archive les regles
+# de l'interpretation automatique (AUTO_PINT_*), compare a la proposition
+# automatique, et controle la coherence des moyennes de site (ponderee
+# q/sqrt(N-2) contre geometrique, voir site_intensity_means). Rien n'est
+# ecrit.
+
+@dataclass
+class PintEvaluation:
+    specimen: str
+    site: str
+    t1: float
+    t2: float
+    n: int
+    h_saved: Optional[float]
+    q_saved: Optional[float]
+    h_live: Optional[float] = None
+    grade: str = "good"           # good / marginal / poor / unrecomputable
+    notes: List[str] = field(default_factory=list)
+    auto: str = ""
+    h_site: Optional[float] = None  # H utilise pour la moyenne de site (corrige si disponible)
+    h_site_kind: str = "H"
+
+
+_PINT_GRADE_ORDER = {"unrecomputable": 0, "poor": 1, "marginal": 2, "good": 3}
+
+
+def _num(row: Dict[str, str], key: str) -> Optional[float]:
+    try:
+        v = float(row.get(key, ""))
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def evaluate_pmagint(rows: Dict[str, Dict[str, str]], donnees) -> Tuple[List[PintEvaluation], List[str]]:
+    """`rows` = read_pmagint(...). Retourne (evaluations, lignes de site)."""
+    import copy as _copy
+    by_id = {s.id.strip(): s for s in donnees}
+    evals: List[PintEvaluation] = []
+    for sid, row in rows.items():
+        t1, t2 = _num(row, "t1"), _num(row, "t2")
+        ev = PintEvaluation(specimen=sid, site="", t1=t1 or 0.0, t2=t2 or 0.0,
+                            n=int(_num(row, "N") or 0), h_saved=_num(row, "H"), q_saved=_num(row, "q"))
+        for key, kind in (("HcorCool", "HcorCool"), ("Hcorani", "Hcorani"), ("H", "H")):
+            v = _num(row, key)
+            if v is not None:
+                ev.h_site, ev.h_site_kind = v, kind
+                break
+        evals.append(ev)
+        ech = by_id.get(sid)
+        if ech is None or t1 is None or t2 is None:
+            ev.grade = "unrecomputable"
+            ev.notes.append("specimen not in the open data file" if ech is None else "t1/t2 missing")
+            continue
+        ev.site = (getattr(ech, "magic_site", "") or "").strip()
+        e = _copy.deepcopy(ech)
+        drop_earlier_nrm(e)
+        points, checks, _arno = compute_arai(e, orientation=1)
+        hlab = _num(row, "Hlab") or float(detect_method_and_hlab(e.mesures, e.com)[1] or 0.0)
+        pts = list(points)
+        if t1 == 0 and not any(abs(p.temp) < 0.5 for p in pts):
+            virt = virtual_nrm_point(e)
+            if virt is not None:
+                pts = [virt] + pts
+        n1 = next((i for i, p in enumerate(pts, 1) if abs(p.temp - t1) < 0.5), None)
+        n2 = next((i for i, p in enumerate(pts, 1) if abs(p.temp - t2) < 0.5), None)
+        if n1 is None or n2 is None or n2 - n1 < 1 or not hlab:
+            ev.grade = "unrecomputable"
+            ev.notes.append(f"interval {t1:g}-{t2:g} not found in the Arai points" if hlab else "no lab field")
+            continue
+        fit = fit_arai_line(pts, n1, n2, hlab=hlab)
+        ev.h_live = fit.h
+        poor, marginal = [], []
+        if ev.h_saved and abs(fit.h - ev.h_saved) > 0.02 * ev.h_saved:
+            ev.notes.append(f"H recomputed = {fit.h:.1f} (saved {ev.h_saved:.1f}) - measurements changed since?")
+        n_max, bad, gap = ptrm_check_cutoff(pts, checks)
+        if bad is not None and n_max < n2:
+            done_at = pts[n_max].temp if n_max < len(pts) else bad.temp
+            poor.append(f"the interval goes past a failed pTRM check (step {bad.temp:g} re-tested after "
+                        f"{done_at:g} differs by {100 * gap:.0f}% of the TRM)")
+        if fit.qq < AUTO_PINT_MIN_Q:
+            poor.append(f"q = {fit.qq:.1f} < {AUTO_PINT_MIN_Q:g}")
+        if fit.f < AUTO_PINT_MIN_F:
+            poor.append(f"f = {fit.f:.2f} < {AUTO_PINT_MIN_F:g}")
+        origin = [] if _is_nrm_point(pts[0]) else [(0.0, 1.0)]
+        if len(origin) + n2 >= 4:
+            k = arai_curvature([o[0] for o in origin] + [p.xp for p in pts[:n2]],
+                               [o[1] for o in origin] + [p.yp for p in pts[:n2]]).k
+            if abs(k) > AUTO_PINT_MAX_K_ORIGIN:
+                marginal.append(f"Arai diagram curved from the NRM to the end of the interval "
+                                f"(|k| = {abs(k):.2f} > {AUTO_PINT_MAX_K_ORIGIN:g})")
+        if n2 - n1 >= 3:
+            sse = arai_curvature([p.xp for p in pts[n1 - 1:n2]], [p.yp for p in pts[n1 - 1:n2]]).sse
+            if sse > AUTO_PINT_MAX_SSE:
+                marginal.append(f"segment not linear (circle-fit SSE {sse:.4f} > {AUTO_PINT_MAX_SSE:g})")
+        d = fit_arai_direction(pts, n1, n2, e, orientation=1)
+        if d.free_mad is not None and d.free_mad > AUTO_PINT_MAX_MAD:
+            marginal.append(f"NRM not linear (MAD {d.free_mad:.1f} > {AUTO_PINT_MAX_MAD:g})")
+        if d.dang is not None and d.dang > AUTO_PINT_MAX_DANG:
+            marginal.append(f"NRM does not go to the origin (DANG {d.dang:.1f} > {AUTO_PINT_MAX_DANG:g})")
+        ev.notes = poor + marginal + ev.notes
+        ev.grade = "poor" if poor else ("marginal" if marginal else "good")
+        a = auto_arai_interval(points, checks, e, hlab)
+        if a.n1 is None:
+            ev.auto = f"automatic: rejected - {a.reason}"
+        else:
+            ap = a.points
+            dh = 100.0 * (a.fit.h - fit.h) / fit.h if fit.h else 0.0
+            same = abs(ap[a.n1 - 1].temp - t1) < 0.5 and abs(ap[a.n2 - 1].temp - t2) < 0.5
+            ev.auto = (f"automatic: {ap[a.n1 - 1].temp:g}-{ap[a.n2 - 1].temp:g} H={a.fit.h:.1f} "
+                       f"({'same interval' if same else f'{dh:+.0f}%'})")
+
+    # moyennes de site sur les valeurs archivees
+    site_lines: List[str] = []
+    by_site: Dict[str, list] = {}
+    for ev in evals:
+        if ev.site and ev.h_site and ev.q_saved and ev.n:
+            by_site.setdefault(ev.site, []).append((ev.specimen, ev.h_site, ev.q_saved, ev.n))
+    for site in sorted(by_site):
+        st = site_intensity_means(by_site[site])
+        g = f"{st['geom']:7.1f}" if st["geom"] else f"{'n.d':>7}"
+        w = f"{st['weighted']:9.1f}" if st["weighted"] else f"{'n.d':>9}"
+        r = f"{st['ratio']:9.2f}" if st["ratio"] else f"{'':>9}"
+        site_lines.append(f"{site:<14}{st['n']:>4}{st['arith']:8.1f}{st['sd']:7.1f}{g}{w}{r}"
+                          + ("  <-- not coherent" if st["flagged"] else ""))
+        if st["flagged"]:
+            if st["suspect"] is not None:
+                sp, wo = st["suspect"], st["without"]
+                site_lines.append(f"{'':18}isolated specimen {sp[0]} (H={sp[1]:.1f}, q={sp[2]:.0f}, N={sp[3]}): "
+                                  f"without it weighted {wo['weighted']:.1f}, geom {wo['geom']:.1f}")
+            else:
+                site_lines.append(f"{'':18}no single isolated specimen - the specimens disagree: " + ", ".join(
+                    f"{s} {h:.1f} q={q:.0f} {100 * share:.0f}%" for s, h, q, n, share in st["spread"]))
+    return evals, site_lines
+
+
+def format_pmagint_evaluation(evals: List[PintEvaluation], site_lines: List[str], source: str) -> str:
+    if not evals:
+        return "No paleointensity estimate to evaluate."
+    counts: Dict[str, int] = {}
+    for ev in evals:
+        counts[ev.grade] = counts.get(ev.grade, 0) + 1
+    summary = ", ".join(f"{g}: {counts[g]}" for g in ("unrecomputable", "poor", "marginal", "good") if g in counts)
+    out = [f"Paleointensity estimates evaluation - {source} - {len(evals)} specimen(s) - {summary}",
+           f"Rules of the automatic interpretation: pTRM checks <= {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM, "
+           f"q >= {AUTO_PINT_MIN_Q:g}, f >= {AUTO_PINT_MIN_F:g} (poor otherwise);",
+           f"|k| NRM->n2 <= {AUTO_PINT_MAX_K_ORIGIN:g}, SSE <= {AUTO_PINT_MAX_SSE:g}, MAD <= {AUTO_PINT_MAX_MAD:g}, "
+           f"DANG <= {AUTO_PINT_MAX_DANG:g} (marginal otherwise). Nothing is changed.", ""]
+    for ev in sorted(evals, key=lambda e: (_PINT_GRADE_ORDER.get(e.grade, 9), e.specimen)):
+        h = f"H={ev.h_saved:.1f}" if ev.h_saved is not None else "H=n.d"
+        q = f"q={ev.q_saved:.1f}" if ev.q_saved is not None else ""
+        out.append(f"[{ev.grade:>14s}] {ev.specimen:<13s} {ev.t1:g}-{ev.t2:g}  N={ev.n}  {h}  {q}"
+                   + (f"  | {ev.auto}" if ev.auto else ""))
+        for note in ev.notes:
+            out.append(f"                 -> {note}")
+    if site_lines:
+        kinds = sorted({ev.h_site_kind for ev in evals if ev.h_site is not None})
+        out += ["", f"Site means of the archived estimates ({'/'.join(kinds)}; corrected value used when "
+                    f"available) - weighted = q/sqrt(N-2) as in StereoUtils Mean paleointensity;",
+                f"flagged when the weighted and geometric means differ by more than "
+                f"{100 * AUTO_PINT_SITE_MAX_WG:.0f}% (N >= {AUTO_PINT_SITE_MIN_N}):",
+                f"{'site':<14}{'N':>4}{'mean':>8}{'sd':>7}{'geom':>7}{'weighted':>9}{'wtd/geom':>9}"]
+        out += site_lines
+    return "\n".join(out)
