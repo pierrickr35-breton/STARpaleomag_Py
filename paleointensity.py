@@ -300,12 +300,18 @@ def _compute_arai_coe(
         cod1 = mesures[i].cod1
         if cod1 in ("X", "Y", "Z"):  # voir docstring : Q/L/F non filtres ici, fidele au Fortran
             continue
+        if cod1 == "M":
+            # controle de queue de pTRM (MagIC LT-PTRM-MD, code 'M' invente
+            # par convert_magic_to_r) : un controle, pas un pas en champ -
+            # traite comme tel il fabriquait un faux point (SHRO1a, 19939)
+            continue
 
         if cod1 == "S":
             k = _cartest(mesures[i].cod2, table)
             if k < 0:
                 continue
             p = get_point(k)
+            p.has_nrm = True
             p.yp = math.sqrt(xs[i] ** 2 + ys[i] ** 2 + zs[i] ** 2) / arno
             p.nrm_vec = (xs[i], ys[i], zs[i])
             p.decl = math.degrees(math.atan2(ys[i], xs[i])) % 360.0
@@ -395,24 +401,31 @@ def _compute_arai_coe(
                 j = -1
                 break
         if not found:
+            # vers l'avant : meme etape exigee AVANT d'accepter un S (meme
+            # correction que la branche Thellier, voir compute_arai)
             j = i + 1
-            while j < n:
+            while j < n and mesures[j].etape == etap:
                 if mesures[j].cod1 == "S":
                     found = True
                     break
                 j += 1
-                if j < n and mesures[j].etape != etap:
-                    j = n
-                    break
         if not found:
             continue
         p = get_point(k)
+        p.has_trm = True
         p.xp = vecdiff(i, j)
         dx, dy, dz = xs[i] - xs[j], ys[i] - ys[j], zs[i] - zs[j]
         p.dec = math.degrees(math.atan2(dy, dx)) % 360.0
         p.winc = math.degrees(math.atan2(dz, math.hypot(dx, dy)))  # PAS de '-' ici, voir docstring
         p.temp = _step_of(mesures[i])
 
+    # pas incomplets (pas en champ nul S sans son pas en champ R, ou
+    # l'inverse) : pas de point d'Arai - auparavant traces avec une
+    # coordonnee nulle (SHRO1a, 19939 : 400 degC sans pas en champ ->
+    # point (0 ; 0.52) ; 440 degC sans pas en champ nul -> (0.06 ; 0)),
+    # ce qui faussait courbure et q
+    points = {k: p for k, p in points.items()
+              if getattr(p, "has_nrm", False) and getattr(p, "has_trm", False)}
     return points, checks
 
 
@@ -951,25 +964,82 @@ class AutoAraiResult:
     nrm_angle: float = 0.0   # angle (NRM -> T1) / ChRM du segment
 
 
+# Un controle rate ISOLE (le suivant passe) n'est pas une alteration :
+# l'alteration chimique est irreversible, les controles suivants
+# echoueraient aussi - demande utilisateur ("le critere des pTRM est
+# parfois difficile a utiliser", SHLI4i de la contribution 19939 : 200 ->
+# 100 degC 15 %, puis 400-580 degC tous < 2 %, palier 200 degC anormal).
+# Seul un controle rate CONFIRME par le suivant (ou le dernier controle)
+# coupe la sequence.
+AUTO_PINT_CHECK_NEEDS_CONFIRMATION = True
+
+
 def ptrm_check_cutoff(
     points: List[AraiPoint], checks: List[PtrmCheck], max_gap: float = AUTO_PINT_MAX_CHECK,
+    isolated: Optional[list] = None,
 ) -> Tuple[int, Optional[PtrmCheck], float]:
     """Dernier point (1-based) utilisable : le premier controle pTRM dont
-    l'ecart a la mesure d'origine depasse `max_gap` x TRM totale exclut le
-    point ou il a ete fait (c.k, mesure apres les chauffes R/V de ce pas -
-    l'alteration a eu lieu au plus tard pendant ces chauffes) et tous les
-    suivants. Retourne (n_max, controle fautif ou None, ecart relatif)."""
+    l'ecart a la mesure d'origine depasse `max_gap` x TRM totale, et qui
+    est confirme par le controle suivant (voir AUTO_PINT_CHECK_NEEDS_
+    CONFIRMATION), exclut le point ou il a ete fait (c.k, mesure apres les
+    chauffes R/V de ce pas - l'alteration a eu lieu au plus tard pendant
+    ces chauffes) et tous les suivants. Les controles rates isoles sont
+    ajoutes a `isolated` [(controle, ecart)] s'il est fourni. Retourne
+    (n_max, controle fautif ou None, ecart relatif)."""
     if not points:
         return 0, None, 0.0
     total = max(p.xp for p in points)
     pos = {p.k: i for i, p in enumerate(points, start=1)}
-    n_max = len(points)
-    worst = None, 0.0
-    for c in sorted((c for c in checks if c.k in pos), key=lambda c: pos[c.k]):
-        gap = abs(c.xt - c.xtptrm) / total if total > 0 else 0.0
-        if gap > max_gap:
-            return pos[c.k] - 1, c, gap
-    return n_max, worst[0], worst[1]
+    ordered = sorted((c for c in checks if c.k in pos), key=lambda c: pos[c.k])
+    gaps = [abs(c.xt - c.xtptrm) / total if total > 0 else 0.0 for c in ordered]
+    for i, (c, gap) in enumerate(zip(ordered, gaps)):
+        if gap <= max_gap:
+            continue
+        if AUTO_PINT_CHECK_NEEDS_CONFIRMATION and i + 1 < len(ordered) and gaps[i + 1] <= max_gap:
+            if isolated is not None:
+                isolated.append((c, gap))
+            continue
+        return pos[c.k] - 1, c, gap
+    return len(points), None, 0.0
+
+
+# Choix de la fin du segment parmi les fins acceptables d'un meme debut -
+# AZB4a (19939) : 200-530 (q 18.9, beta 0.028) plus solide que 200-560
+# (q 16.9) que donnait "la fin la plus haute" ("highest").
+#   "highest" : fin la plus haute qui passe toutes les regles ;
+#   "max_q"   : fin qui maximise q ;
+#   "near_q"  : fin la plus haute dont q >= AUTO_PINT_END_Q_FRACTION x q max.
+AUTO_PINT_END_RULE = "near_q"  # choix utilisateur (2026-11-09) apres AZB4a
+AUTO_PINT_END_Q_FRACTION = 0.9
+
+
+AUTO_PINT_END_RESIDUAL = 0.05
+
+
+def _end_point_off(points, n1, n2) -> float:
+    """Ecart vertical du dernier point n2 a la droite ajustee sur n1..n2-1,
+    rapporte a l'etendue en NRM de ce segment."""
+    if n2 - n1 < 2:
+        return 0.0
+    f = fit_arai_line(points, n1, n2 - 1, hlab=0.0)
+    p = points[n2 - 1]
+    span = abs(points[n1 - 1].yp - points[n2 - 2].yp) or 1.0
+    return abs(p.yp - (f.a + f.b * p.xp)) / span
+
+
+def _choose_end(valid, points=None, n1=None):
+    """`valid` = [(n2, fit, direction)] tries par n2 decroissant."""
+    if AUTO_PINT_END_RULE == "highest" or len(valid) == 1:
+        return valid[0]
+    if AUTO_PINT_END_RULE == "residual":
+        for v in valid:
+            if _end_point_off(points, n1, v[0]) <= AUTO_PINT_END_RESIDUAL:
+                return v
+        return valid[-1]
+    qmax = max(v[1].qq for v in valid)
+    if AUTO_PINT_END_RULE == "max_q":
+        return max(valid, key=lambda v: v[1].qq)
+    return next(v for v in valid if v[1].qq >= AUTO_PINT_END_Q_FRACTION * qmax)
 
 
 def _is_nrm_point(p: AraiPoint) -> bool:
@@ -991,6 +1061,7 @@ def _auto_arai_core(
     h_stats = hlab if hlab else 1.0  # q/f/g ne dependent pas de Hlab, fit_arai_line les saute si 0
     best_fail = None  # (f, q, raison) du meilleur essai, pour expliquer un rejet
     for n1 in range(1, n_max - AUTO_PINT_MIN_POINTS + 2):
+        valid = []  # (n2, fit, direction) acceptables pour ce debut
         for n2 in range(n_max, n1 + AUTO_PINT_MIN_POINTS - 2, -1):
             fit = fit_arai_line(points, n1, n2, hlab=h_stats)
             if fit.f < AUTO_PINT_MIN_F:
@@ -1019,13 +1090,20 @@ def _auto_arai_core(
                 elif d.dang is None or d.dang > AUTO_PINT_MAX_DANG:
                     why = f"NRM does not go to the origin (DANG {d.dang if d.dang is not None else 99:.0f})"
             if why is None:
-                if not hlab:
-                    fit = fit_arai_line(points, n1, n2, hlab=0.0)
-                    fit.f, fit.qq = fit_arai_line(points, n1, n2, hlab=1.0).f, fit_arai_line(points, n1, n2, hlab=1.0).qq
-                out.n1, out.n2, out.fit, out.direction = n1, n2, fit, d
-                return out
+                valid.append((n2, fit, d))
+                if AUTO_PINT_END_RULE == "highest":
+                    break
+                continue
             if best_fail is None or fit.qq > best_fail[1]:
                 best_fail = (fit.f, fit.qq, f"{points[n1 - 1].temp:g}-{points[n2 - 1].temp:g}: {why}")
+        if valid:
+            n2, fit, d = _choose_end(valid, points, n1)
+            if not hlab:
+                fit = fit_arai_line(points, n1, n2, hlab=0.0)
+                f1 = fit_arai_line(points, n1, n2, hlab=1.0)
+                fit.f, fit.qq = f1.f, f1.qq
+            out.n1, out.n2, out.fit, out.direction = n1, n2, fit, d
+            return out
     if best_fail is None:
         out.reason = f"no segment with f >= {AUTO_PINT_MIN_F:g} before the failed pTRM check" if bad \
             else f"no segment with f >= {AUTO_PINT_MIN_F:g}"
@@ -1937,7 +2015,33 @@ class PintEvaluation:
     h_site_kind: str = "H"
 
 
-_PINT_GRADE_ORDER = {"unrecomputable": 0, "poor": 1, "marginal": 2, "good": 3}
+_PINT_GRADE_ORDER = {"unrecomputable": 0, "poor": 1, "marginal": 2, "good": 3, "excellent": 4}
+
+# Seuils de l'EVALUATION, plus souples que ceux de la selection
+# automatique (AUTO_PINT_*) - demande explicite utilisateur ("il faudrait
+# assouplir les criteres poor, marginal etc car en paleointensite, c'est
+# souvent tres difficile d'avoir des bonnes donnees", contribution 19939).
+# poor = a ne pas garder sans raison forte ; marginal = a regarder.
+EVAL_PINT_POOR_Q = 2.0
+EVAL_PINT_POOR_F = 0.30
+EVAL_PINT_POOR_K = 1.0         # diagramme tres courbe depuis la NRM
+EVAL_PINT_MARGINAL_Q = AUTO_PINT_MIN_Q
+EVAL_PINT_MARGINAL_F = AUTO_PINT_MIN_F
+EVAL_PINT_MARGINAL_K = AUTO_PINT_MAX_K_ORIGIN
+EVAL_PINT_MARGINAL_BETA = 0.10  # sigma(b)/|b| (CCRIT) - remplace la SSE, trop severe sur
+                                # les segments longs (19939 : 124 segments publies > 0.004)
+EVAL_PINT_MARGINAL_MAD = AUTO_PINT_MAX_MAD
+EVAL_PINT_MARGINAL_DANG = AUTO_PINT_MAX_DANG
+# "excellent" (demande utilisateur : "pour la 19939, je noterais les
+# resultats entre good et excellent") - un "good" qui satisfait aussi tous
+# ces seuils ; calibre pour couper la 19939 a peu pres en deux (297/585).
+EVAL_PINT_EXCELLENT_Q = 10.0
+EVAL_PINT_EXCELLENT_F = 0.60
+EVAL_PINT_EXCELLENT_K = 0.164   # Paterson
+EVAL_PINT_EXCELLENT_BETA = 0.05
+EVAL_PINT_EXCELLENT_MAD = 5.0
+EVAL_PINT_EXCELLENT_DANG = 5.0
+EVAL_PINT_EXCELLENT_CHECK = 0.05  # tous les controles pTRM de l'intervalle
 
 
 def _num(row: Dict[str, str], key: str) -> Optional[float]:
@@ -1989,33 +2093,55 @@ def evaluate_pmagint(rows: Dict[str, Dict[str, str]], donnees) -> Tuple[List[Pin
         poor, marginal = [], []
         if ev.h_saved and abs(fit.h - ev.h_saved) > 0.02 * ev.h_saved:
             ev.notes.append(f"H recomputed = {fit.h:.1f} (saved {ev.h_saved:.1f}) - measurements changed since?")
-        n_max, bad, gap = ptrm_check_cutoff(pts, checks)
+        isolated: list = []
+        n_max, bad, gap = ptrm_check_cutoff(pts, checks, isolated=isolated)
+        pos = {p.k: i for i, p in enumerate(pts, 1)}
         if bad is not None and n_max < n2:
             done_at = pts[n_max].temp if n_max < len(pts) else bad.temp
-            poor.append(f"the interval goes past a failed pTRM check (step {bad.temp:g} re-tested after "
-                        f"{done_at:g} differs by {100 * gap:.0f}% of the TRM)")
-        if fit.qq < AUTO_PINT_MIN_Q:
-            poor.append(f"q = {fit.qq:.1f} < {AUTO_PINT_MIN_Q:g}")
-        if fit.f < AUTO_PINT_MIN_F:
-            poor.append(f"f = {fit.f:.2f} < {AUTO_PINT_MIN_F:g}")
+            poor.append(f"the interval goes past a failed pTRM check, confirmed by the next one (step "
+                        f"{bad.temp:g} re-tested after {done_at:g} differs by {100 * gap:.0f}% of the TRM)")
+        for c, g in isolated:
+            if pos.get(c.k, 99) <= n2:
+                ev.notes.append(f"isolated failed pTRM check (step {c.temp:g} re-tested after "
+                                f"{pts[pos[c.k] - 1].temp:g}: {100 * g:.0f}% of the TRM), the next check passes")
+        if fit.qq < EVAL_PINT_POOR_Q:
+            poor.append(f"q = {fit.qq:.1f} < {EVAL_PINT_POOR_Q:g}")
+        elif fit.qq < EVAL_PINT_MARGINAL_Q:
+            marginal.append(f"q = {fit.qq:.1f} < {EVAL_PINT_MARGINAL_Q:g}")
+        if fit.f < EVAL_PINT_POOR_F:
+            poor.append(f"f = {fit.f:.2f} < {EVAL_PINT_POOR_F:g}")
+        elif fit.f < EVAL_PINT_MARGINAL_F:
+            marginal.append(f"f = {fit.f:.2f} < {EVAL_PINT_MARGINAL_F:g}")
         origin = [] if _is_nrm_point(pts[0]) else [(0.0, 1.0)]
         if len(origin) + n2 >= 4:
-            k = arai_curvature([o[0] for o in origin] + [p.xp for p in pts[:n2]],
-                               [o[1] for o in origin] + [p.yp for p in pts[:n2]]).k
-            if abs(k) > AUTO_PINT_MAX_K_ORIGIN:
+            k = abs(arai_curvature([o[0] for o in origin] + [p.xp for p in pts[:n2]],
+                                   [o[1] for o in origin] + [p.yp for p in pts[:n2]]).k)
+            if k > EVAL_PINT_POOR_K:
+                poor.append(f"Arai diagram very curved from the NRM to the end of the interval "
+                            f"(|k| = {k:.2f} > {EVAL_PINT_POOR_K:g})")
+            elif k > EVAL_PINT_MARGINAL_K:
                 marginal.append(f"Arai diagram curved from the NRM to the end of the interval "
-                                f"(|k| = {abs(k):.2f} > {AUTO_PINT_MAX_K_ORIGIN:g})")
-        if n2 - n1 >= 3:
-            sse = arai_curvature([p.xp for p in pts[n1 - 1:n2]], [p.yp for p in pts[n1 - 1:n2]]).sse
-            if sse > AUTO_PINT_MAX_SSE:
-                marginal.append(f"segment not linear (circle-fit SSE {sse:.4f} > {AUTO_PINT_MAX_SSE:g})")
+                                f"(|k| = {k:.2f} > {EVAL_PINT_MARGINAL_K:g})")
+        beta = fit.sigma / abs(fit.b) if fit.b else 0.0
+        if beta > EVAL_PINT_MARGINAL_BETA:
+            marginal.append(f"scattered segment (beta = sigma(b)/|b| = {beta:.3f} > {EVAL_PINT_MARGINAL_BETA:g})")
         d = fit_arai_direction(pts, n1, n2, e, orientation=1)
-        if d.free_mad is not None and d.free_mad > AUTO_PINT_MAX_MAD:
-            marginal.append(f"NRM not linear (MAD {d.free_mad:.1f} > {AUTO_PINT_MAX_MAD:g})")
-        if d.dang is not None and d.dang > AUTO_PINT_MAX_DANG:
-            marginal.append(f"NRM does not go to the origin (DANG {d.dang:.1f} > {AUTO_PINT_MAX_DANG:g})")
+        if d.free_mad is not None and d.free_mad > EVAL_PINT_MARGINAL_MAD:
+            marginal.append(f"NRM not linear (MAD {d.free_mad:.1f} > {EVAL_PINT_MARGINAL_MAD:g})")
+        if d.dang is not None and d.dang > EVAL_PINT_MARGINAL_DANG:
+            marginal.append(f"NRM does not go to the origin (DANG {d.dang:.1f} > {EVAL_PINT_MARGINAL_DANG:g})")
         ev.notes = poor + marginal + ev.notes
         ev.grade = "poor" if poor else ("marginal" if marginal else "good")
+        if ev.grade == "good":
+            total = max(p.xp for p in pts) or 1.0
+            gaps = [abs(c.xt - c.xtptrm) / total for c in checks if pos.get(c.k, 99) <= n2]
+            k_ok = (len(origin) + n2 < 4) or k <= EVAL_PINT_EXCELLENT_K
+            if (fit.qq >= EVAL_PINT_EXCELLENT_Q and fit.f >= EVAL_PINT_EXCELLENT_F and k_ok
+                    and beta <= EVAL_PINT_EXCELLENT_BETA
+                    and (d.free_mad or 0.0) <= EVAL_PINT_EXCELLENT_MAD
+                    and (d.dang or 0.0) <= EVAL_PINT_EXCELLENT_DANG
+                    and all(g <= EVAL_PINT_EXCELLENT_CHECK for g in gaps)):
+                ev.grade = "excellent"
         a = auto_arai_interval(points, checks, e, hlab)
         if a.n1 is None:
             ev.auto = f"automatic: rejected - {a.reason}"
@@ -2056,12 +2182,16 @@ def format_pmagint_evaluation(evals: List[PintEvaluation], site_lines: List[str]
     counts: Dict[str, int] = {}
     for ev in evals:
         counts[ev.grade] = counts.get(ev.grade, 0) + 1
-    summary = ", ".join(f"{g}: {counts[g]}" for g in ("unrecomputable", "poor", "marginal", "good") if g in counts)
+    summary = ", ".join(f"{g}: {counts[g]}" for g in ("unrecomputable", "poor", "marginal", "good", "excellent") if g in counts)
     out = [f"Paleointensity estimates evaluation - {source} - {len(evals)} specimen(s) - {summary}",
-           f"Rules of the automatic interpretation: pTRM checks <= {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM, "
-           f"q >= {AUTO_PINT_MIN_Q:g}, f >= {AUTO_PINT_MIN_F:g} (poor otherwise);",
-           f"|k| NRM->n2 <= {AUTO_PINT_MAX_K_ORIGIN:g}, SSE <= {AUTO_PINT_MAX_SSE:g}, MAD <= {AUTO_PINT_MAX_MAD:g}, "
-           f"DANG <= {AUTO_PINT_MAX_DANG:g} (marginal otherwise). Nothing is changed.", ""]
+           f"poor: pTRM check failed and confirmed by the next one inside the interval, q < {EVAL_PINT_POOR_Q:g}, "
+           f"f < {EVAL_PINT_POOR_F:g} or |k| NRM->n2 > {EVAL_PINT_POOR_K:g};",
+           f"marginal: q < {EVAL_PINT_MARGINAL_Q:g}, f < {EVAL_PINT_MARGINAL_F:g}, |k| > {EVAL_PINT_MARGINAL_K:g}, "
+           f"beta > {EVAL_PINT_MARGINAL_BETA:g}, MAD > {EVAL_PINT_MARGINAL_MAD:g} or DANG > {EVAL_PINT_MARGINAL_DANG:g}. "
+           f"excellent: good, and q >= {EVAL_PINT_EXCELLENT_Q:g}, f >= {EVAL_PINT_EXCELLENT_F:g}, "
+           f"|k| <= {EVAL_PINT_EXCELLENT_K:g}, beta <= {EVAL_PINT_EXCELLENT_BETA:g}, MAD <= {EVAL_PINT_EXCELLENT_MAD:g}, "
+           f"DANG <= {EVAL_PINT_EXCELLENT_DANG:g}, every pTRM check of the interval <= "
+           f"{100 * EVAL_PINT_EXCELLENT_CHECK:.0f}% of the TRM. Nothing is changed.", ""]
     for ev in sorted(evals, key=lambda e: (_PINT_GRADE_ORDER.get(e.grade, 9), e.specimen)):
         h = f"H={ev.h_saved:.1f}" if ev.h_saved is not None else "H=n.d"
         q = f"q={ev.q_saved:.1f}" if ev.q_saved is not None else ""

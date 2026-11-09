@@ -3701,7 +3701,7 @@ class STARpaleomagApp:
             c = auto.failed_check
             done_at = points[auto.n_max].temp if auto.n_max < len(points) else c.temp
             lines.append(
-                f" pTRM check failed: step {c.temp:g} re-tested after {done_at:g} differs by "
+                f" pTRM check failed (confirmed by the next one): step {c.temp:g} re-tested after {done_at:g} differs by "
                 f"{100 * auto.check_gap:.0f}% of the TRM (limit {100 * AUTO_PINT_MAX_CHECK:.0f}%)\n"
                 f"   -> steps from {done_at:g} on are not used")
         if auto.from_nrm:
@@ -3722,7 +3722,7 @@ class STARpaleomagApp:
             f"   (rules: NRM goes to the origin (MAD<={AUTO_PINT_MAX_MAD:g}, DANG<={AUTO_PINT_MAX_DANG:g}), "
             f"f>={AUTO_PINT_MIN_F:g}, q>={AUTO_PINT_MIN_Q:g},\n"
             f"    linear (circle-fit SSE<={AUTO_PINT_MAX_SSE:g}), diagram not curved from the NRM to n2 (|k|<={AUTO_PINT_MAX_K_ORIGIN:g}),\n"
-            f"    lowest start, stop before a failed pTRM check)")
+            f"    lowest start, stop before a failed pTRM check confirmed by the next one)")
         return "\n" + "\n".join(lines) + "\n"
 
     def _arai_step_tables(self, ech, points, checks, arno):
@@ -4364,7 +4364,7 @@ class STARpaleomagApp:
             f"f>={AUTO_PINT_MIN_F:g}, q>={AUTO_PINT_MIN_Q:g},")
         out.append(
             f"linear (circle-fit SSE<={AUTO_PINT_MAX_SSE:g}), diagram not curved from the NRM to n2 (|k|<={AUTO_PINT_MAX_K_ORIGIN:g}), lowest possible start,\n"
-            f"no step from a pTRM check differing by > {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM;")
+            f"no step from a pTRM check differing by > {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM and confirmed by the next one;")
         out.append(
             f"start from the NRM (0,1) when the first step removed >= {100 * AUTO_PINT_NRM_START_MIN_LOSS:.0f}% "
             f"of the NRM within {AUTO_PINT_NRM_START_MAX_ANGLE:g} deg of the ChRM.")
