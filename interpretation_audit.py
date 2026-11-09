@@ -31,7 +31,10 @@ Site (section a part) :
      intervalle de desaimantation devrait avoir la meme categorie de
      composante") ;
   7. specimens du site sans aucun resultat, pour lesquels l'automatique
-     propose une composante.
+     propose une composante ;
+  8. aimantation parasite AF (auto_interpretation.af_spurious_assess) :
+     niveau franc / leger ; les resultats AF qui atteignent la coupure d'un
+     cas franc sont notes et ramenes au mieux a "marginal".
 """
 
 import copy
@@ -147,6 +150,22 @@ def audit_results(results: List[FitResult], donnees) -> Tuple[List[QualityReport
         site_lines: List[str] = []
         echs = [s for s in donnees if (getattr(s, "magic_site", "") or "").strip() == site and s.mesures]
 
+        # 8 : aimantation parasite AF (hauts champs mieux groupes en repere
+        # echantillon qu'in situ) - resultats AF dont l'intervalle atteint
+        # la coupure signales en plus
+        afs = ai.af_spurious_assess(echs) if ai.AUTO_AF_SPURIOUS_CHECK else None
+        if afs is not None:
+            site_lines.append("  " + ai.format_af_spurious(site, afs, 0).split(None, 1)[1]
+                              .replace(" left out (0 measurements)", " are suspect"))
+            if afs.cut is not None:
+                for res in site_res:
+                    if res.id in by_id and _cod_at(by_id[res.id], res.step_last) == "F" \
+                            and res.step_last >= afs.cut and id(res) in rep_of:
+                        rep_of[id(res)].notes.append(
+                            f"the fit reaches {res.step_last:g} mT, inside the high AF steps of this site "
+                            f"suspected of spurious AF magnetization (from {afs.cut:g} mT)")
+                        _degrade(rep_of[id(res)], "marginal")
+
         # 3 + 7 : proposition automatique du site, sur des COPIES
         suggestions = {}
         try:
@@ -154,6 +173,9 @@ def audit_results(results: List[FitResult], donnees) -> Tuple[List[QualityReport
             # meme preparation que les menus d'interpretation automatique
             # (app._reduce_grm_before_fit : GRM methode 1), sur les copies
             reduce_grm_before_fit(copies, method=1)
+            if afs is not None and afs.cut is not None:
+                for c in copies:  # comme automatic_results : paliers suspects retires
+                    c.mesures[:] = [m for m in c.mesures if not (m.cod1 == "F" and m.etape >= afs.cut)]
             suggestions = ai.propose_components_for_site(copies)
         except Exception as exc:  # un site atypique ne doit pas bloquer l'audit
             site_lines.append(f"  automatic interpretation failed for this site ({exc})")

@@ -50,7 +50,7 @@ from interpretation_quality import evaluate_result, evaluate_results, format_qua
 from interpretation_audit import audit_results, format_site_section
 from auto_interpretation import (
     AUTO_MIN_K, AUTO_MIN_SPECIMENS, automatic_results, propose_components, propose_components_for_site,
-    format_suggestions, remove_spurious_steps,
+    format_suggestions, remove_spurious_steps, format_af_spurious,
 )
 from calcul import (
     AniTensor,
@@ -6382,6 +6382,10 @@ class STARpaleomagApp:
         if auto.excluded:
             lines.append("Left out of the means by the site-level checks:")
             lines += [f"  {site:10s} {spec:12s} {why}" for site, spec, why in auto.excluded]
+        if getattr(auto, "af_cuts", None):
+            lines.append("Spurious AF magnetization (high AF directions better grouped in specimen than in situ "
+                         "coordinates - ARM/GRM/IRM from the demagnetizer):")
+            lines += ["  " + format_af_spurious(site, res, n) for site, res, n in auto.af_cuts]
         if auto.spurious:
             lines.append("Isolated measurement errors left out (in memory only, like Remove step):")
             lines += [f"  {spec:12s} {step}: {why}" for spec, step, why in auto.spurious]
@@ -6476,6 +6480,8 @@ class STARpaleomagApp:
             lines += [f"  not written: {spec} ({why})" for spec, why in auto.not_written]
             lines += [f"  measurement error left out: {spec} step {step} ({why})"
                       for spec, step, why in auto.spurious]
+            lines += ["  " + format_af_spurious(s_, res, n).split(None, 1)[1]
+                      for s_, res, n in getattr(auto, "af_cuts", [])]
             self._afficher("\n".join(lines) + "\n")
             if not auto.specimens:
                 continue

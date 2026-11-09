@@ -1919,6 +1919,8 @@ class AutomaticResults:
     incoherent: List[Tuple[str, str, int, float, int]] = field(default_factory=list)
     # (site, composante, "rejected"/"warning", [raisons]) - voir AUTO_SITE_MAX_SOFT_ALARMS
     alarms: List[Tuple[str, str, str, List[str]]] = field(default_factory=list)
+    # (site, coupure AF, profil [(champ, k_ech, k_in_situ)], nb de mesures retirees)
+    af_cuts: List[tuple] = field(default_factory=list)
     # (site, composante, specimen, intervalle d'origine, nouvel intervalle, ecart avant, apres)
     refined: List[Tuple[str, str, str, str, str, float, float]] = field(default_factory=list)
 
@@ -2017,6 +2019,178 @@ def _refine_far_lines(kept, ech_of, out, site, component):
     return kept
 
 
+# Aimantation parasite du desaimanteur AF (ARM par champ residuel, GRM) :
+# elle est liee a l'ECHANTILLON, pas au champ ancien - aux hauts champs les
+# directions d'un site se groupent alors mieux en coordonnees echantillon
+# qu'in situ. Demande explicite utilisateur (20687 R044 : "c'est mieux groupe
+# en coordonnees echantillon qu'en in situ pour les directions au dessus de
+# 70 mT"). Par site : champ le plus bas a partir duquel TOUS les paliers AF
+# superieurs sont mieux groupes en repere echantillon, avec au moins un
+# palier net (k_ech >= AUTO_AF_SPURIOUS_MIN_K et >= RATIO x k_in_situ) ; ces
+# paliers sont retires en memoire avant l'interpretation.
+AUTO_AF_SPURIOUS_CHECK = True
+AUTO_AF_SPURIOUS_MIN_K = 20.0
+AUTO_AF_SPURIOUS_RATIO = 1.5
+AUTO_AF_SPURIOUS_MIN_SPECIMENS = 5
+# Gradation (exemples de l'utilisateur, RST_Magic.pdf p. 31-33 : NED15,
+# CF26/27/31, AZ16) - "avertir quand c'est bien franc", "ca peut etre fort
+# parfois" mais aussi "un petit qq chose sur plusieurs echantillons" :
+#  - franc  : coupure ci-dessus ET (k_ech >= STRONG_RATIO x k_in_situ, ou
+#             ratio >= RATIO avec la moitie des specimens dont l'intensite
+#             remonte aux hauts champs (NED15) ou dont la direction converge
+#             vers la direction commune en repere echantillon (CF26)) ;
+#  - leger  : pas de coupure, mais au moins 2 des 3 derniers paliers AF
+#             avec k_ech >= SLIGHT_MIN_K et >= RATIO x k_in_situ -> simple
+#             avertissement, rien n'est retire.
+AUTO_AF_SPURIOUS_STRONG_RATIO = 3.0
+AUTO_AF_SPURIOUS_EVIDENCE = 0.5     # fraction de specimens (remontee ou convergence)
+AUTO_AF_SPURIOUS_RISE = 1.3         # intensite finale / minimum AF anterieur
+AUTO_AF_SPURIOUS_CONV_DEG = 10.0    # rapprochement minimal de la direction commune
+AUTO_AF_SPURIOUS_SLIGHT_MIN_K = 10.0
+
+
+@dataclass
+class AFSpurious:
+    level: str                       # "clear" | "slight"
+    cut: Optional[float]             # champ de coupure (clear seulement)
+    profile: List[Tuple[float, float, float]]   # (champ, k_echantillon, k_in_situ)
+    n_rise: int
+    n_conv: int
+    n: int
+
+
+def _af_profile(echs):
+    # une seule mesure par (specimen, palier) : la premiere - les paliers
+    # repetes (positions aARM des C4 du Beagle, 13CB35) ne sont pas des
+    # specimens supplementaires
+    per: Dict[float, Tuple[list, list]] = {}
+    for e in echs:
+        seen = set()
+        for m in e.mesures:
+            if m.cod1 != "F" or m.etape <= 0 or not (m.x or m.y or m.z) or m.etape in seen:
+                continue
+            seen.add(m.etape)
+            _, d1, i1 = polere(m.x, m.y, m.z)
+            _, d2, i2 = polere(*apply_orientation(m.x, m.y, m.z, e, 2))
+            a, b = per.setdefault(m.etape, ([], []))
+            a.append((d1, i1))
+            b.append((d2, i2))
+    return [(f, fisher_mean(a), fisher_mean(b)) for f, (a, b) in sorted(per.items())
+            if len(a) >= AUTO_AF_SPURIOUS_MIN_SPECIMENS]
+
+
+def _af_specimen_evidence(echs, top_field, top_mean) -> Tuple[int, int, int]:
+    """(n remontee d'intensite, n convergence vers la direction commune en
+    repere echantillon, n specimens examines)."""
+    target = _unit_vector(top_mean.dec, top_mean.inc)
+    n_rise = n_conv = n = 0
+    for e in echs:
+        F, seen = [], set()
+        for m in e.mesures:
+            if m.cod1 == "F" and m.etape > 0 and (m.x or m.y or m.z) and m.etape not in seen:
+                seen.add(m.etape)
+                F.append(m)
+        if len(F) < 4:
+            continue
+        n += 1
+        inten = [math.sqrt(m.x * m.x + m.y * m.y + m.z * m.z) for m in F]
+        k = min(range(len(inten)), key=inten.__getitem__)
+        if k < len(inten) - 1 and inten[-1] > AUTO_AF_SPURIOUS_RISE * inten[k]:
+            n_rise += 1
+        hi = [(m, v) for m, v in zip(F, inten) if m.etape >= 0.5 * top_field]
+        if len(hi) >= 3:
+            ang = [math.degrees(math.acos(max(-1.0, min(1.0, float(np.array([m.x, m.y, m.z]) @ target) / v))))
+                   for m, v in hi]
+            if ang[-1] < ang[0] - AUTO_AF_SPURIOUS_CONV_DEG and ang[-1] < 30.0:
+                n_conv += 1
+    return n_rise, n_conv, n
+
+
+def af_spurious_assess(echs) -> Optional[AFSpurious]:
+    """Aimantation parasite AF d'un site : niveau "clear" (avec champ de
+    coupure) ou "slight" (avertissement seul), ou None."""
+    rows = _af_profile(echs)
+    if len(rows) < 3:
+        return None
+    prof = [(f, a.k, b.k) for f, a, b in rows]
+    cut = None
+    for f, ks, kg in reversed(prof):
+        if ks > kg:
+            cut = f
+        else:
+            break
+    if cut is not None and cut > prof[0][0]:
+        top = [(f, ks, kg) for f, ks, kg in prof if f >= cut]
+        if any(ks >= AUTO_AF_SPURIOUS_MIN_K and ks >= AUTO_AF_SPURIOUS_RATIO * kg for _, ks, kg in top):
+            n_rise, n_conv, n = _af_specimen_evidence(echs, rows[-1][0], rows[-1][1])
+            strong = any(ks >= AUTO_AF_SPURIOUS_MIN_K and ks >= AUTO_AF_SPURIOUS_STRONG_RATIO * kg
+                         for _, ks, kg in top)
+            evidence = n and max(n_rise, n_conv) >= AUTO_AF_SPURIOUS_EVIDENCE * n
+            if strong or evidence:
+                return AFSpurious("clear", cut, top, n_rise, n_conv, n)
+            # rien ne confirme (Beagle 12TU89 : ratio 1.6, 0/10 remontee ou
+            # convergence) : avertissement seul, aucune mesure retiree
+            return AFSpurious("slight", None, top, n_rise, n_conv, n)
+    last = prof[-3:]
+    hits = [r for r in last if r[1] >= AUTO_AF_SPURIOUS_SLIGHT_MIN_K and r[1] >= AUTO_AF_SPURIOUS_RATIO * r[2]]
+    n_rise, n_conv, n = _af_specimen_evidence(echs, rows[-1][0], rows[-1][1])
+    if len(hits) >= 2:
+        return AFSpurious("slight", None, last, n_rise, n_conv, n)
+    # signature des specimens seule, k trop faibles pour le test de
+    # groupement (16645 CF31 : k 3/2 a 130 mT mais intensite remontante 6/7,
+    # convergence 4/7 - exemple de l'utilisateur, RST_Magic p. 32) ; aucun
+    # site des 5 jeux de reference ne la montre
+    if (n >= AUTO_AF_SPURIOUS_MIN_SPECIMENS and n_rise >= AUTO_AF_SPURIOUS_EVIDENCE * n
+            and n_conv >= AUTO_AF_SPURIOUS_EVIDENCE * n and rows[-1][1].k >= rows[-1][2].k):
+        return AFSpurious("slight", None, last, n_rise, n_conv, n)
+    return None
+
+
+def af_spurious_cutoff(echs) -> Optional[Tuple[float, List[Tuple[float, float, float]]]]:
+    """(champ de coupure, [(champ, k_echantillon, k_in_situ)]) ou None."""
+    r = af_spurious_assess(echs)
+    if r is None or r.cut is None:
+        return None
+    return r.cut, r.profile
+
+
+def remove_af_spurious(samples) -> List[Tuple[str, AFSpurious, int]]:
+    """Evalue chaque site ; retire (en memoire) les paliers AF >= coupure
+    quand il y en a une. Retourne [(site, AFSpurious, nb mesures retirees)],
+    avertissements "slight" sans coupure compris."""
+    by_site: Dict[str, list] = {}
+    for e in samples:
+        site = (getattr(e, "magic_site", "") or "").strip()
+        if site:
+            by_site.setdefault(site, []).append(e)
+    out = []
+    for site, echs in sorted(by_site.items()):
+        res = af_spurious_assess(echs)
+        if res is None:
+            continue
+        n = 0
+        if res.cut is not None:
+            for e in echs:
+                keep = [m for m in e.mesures if not (m.cod1 == "F" and m.etape >= res.cut)]
+                n += len(e.mesures) - len(keep)
+                e.mesures[:] = keep
+        out.append((site, res, n))
+    return out
+
+
+def format_af_spurious(site: str, res: AFSpurious, n_removed: int) -> str:
+    prof = " ".join(f"{f:g}:{ks:.0f}/{kg:.0f}" for f, ks, kg in res.profile)
+    ev = (f"; intensity rising again in {res.n_rise}/{res.n}, directions converging in "
+          f"specimen coordinates in {res.n_conv}/{res.n}") if res.n else ""
+    if res.level == "clear":
+        head = "CLEAR spurious AF magnetization"
+    else:
+        head = "slight hint of spurious AF magnetization"
+    act = (f" - AF steps from {res.cut:g} mT left out ({n_removed} measurements)"
+           if res.cut is not None else " - nothing removed, check the high AF steps in specimen coordinates")
+    return f"{site:10s} {head} (k specimen/k in situ {prof}{ev}){act}"
+
+
 def _orient_mean_to_endpoints(stats, kept, ech_of, orientation):
     """Polarite d'une moyenne dominee par les grands cercles : l'intersection
     n'a pas de sens propre (combinaison axiale), on la tourne vers les fins
@@ -2069,6 +2243,7 @@ def automatic_results(samples: list, donnees, existing_ids: Optional[set] = None
     set_dataset_nrm_reference([e for e in (donnees or samples) if getattr(e, "mesures", None)])
     # paliers aberrants isoles retires d'abord (en memoire, comme Remove step)
     spurious = remove_spurious_steps(samples)
+    af_cuts = remove_af_spurious(samples) if AUTO_AF_SPURIOUS_CHECK else []
     by_site: Dict[str, list] = {}
     suggestions: Dict[str, List[ComponentSuggestion]] = {}
     for ech in samples:
@@ -2082,6 +2257,7 @@ def automatic_results(samples: list, donnees, existing_ids: Optional[set] = None
 
     out = AutomaticResults([], [], [], [])
     out.spurious = spurious
+    out.af_cuts = af_cuts
     # `c` deja pris dans le .pmagres de destination (mode site par site,
     # qui ecrit dans le .pmagres de l'utilisateur)
     existing: set = set(existing_ids or ())
