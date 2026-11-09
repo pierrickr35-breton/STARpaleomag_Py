@@ -6366,9 +6366,19 @@ class STARpaleomagApp:
             lines.append(f"Left out of the means (more than {OUTLIER_ASD_FACTOR:g} angular standard "
                          f"deviations and {AUTO_OUTLIER_MIN_DEG:g} deg from the mean):")
             lines += [f"  {site:10s} {comp}  {spec:12s} {dev:5.1f} deg" for site, comp, spec, dev in auto.outliers]
-        if auto.scattered:
-            lines.append(f"Means not reported, too scattered (k < {AUTO_MIN_K:g} in situ):")
-            lines += [f"  {site:10s} {comp}  N={n:<3d} k={k:.1f}" for site, comp, n, k in auto.scattered]
+        rejected = [a for a in getattr(auto, "alarms", []) if a[2] == "rejected"]
+        warned = [a for a in getattr(auto, "alarms", []) if a[2] == "warning"]
+        if rejected:
+            lines.append(f"{ERROR_MARK}Means NOT reported (site checks / several alarms):{ERROR_MARK}")
+            lines += [f"  {site:10s} {comp}  " + "; ".join(why) for site, comp, _v, why in rejected]
+        if getattr(auto, "refined", None):
+            lines.append("Re-interpreted (k < 100: farthest specimens, a better segment of the same specimen "
+                         "closer to the mean computed without it):")
+            lines += [f"  {site:10s} {comp}  {spec:12s} {a} -> {b}  ({d0:.0f} -> {d1:.0f} deg)"
+                      for site, comp, spec, a, b, d0, d1 in auto.refined]
+        if warned:
+            lines.append("Means reported with an alarm - check them:")
+            lines += [f"  {site:10s} {comp}  " + "; ".join(why) for site, comp, _v, why in warned]
         if auto.excluded:
             lines.append("Left out of the means by the site-level checks:")
             lines += [f"  {site:10s} {spec:12s} {why}" for site, spec, why in auto.excluded]
@@ -6456,8 +6466,12 @@ class STARpaleomagApp:
                       f"{a:g}-{b:g}" for _s, comp, spec, dev, a, b in auto.far_to_plane]
             lines += [f"  left out: {spec} ({comp}, {dev:.1f} deg from the mean)"
                       for _s, comp, spec, dev in auto.outliers]
-            lines += [f"  mean {comp} not reported: N={n} k={k:.1f} (k < {AUTO_MIN_K:g})"
-                      for _s, comp, n, k in auto.scattered]
+            lines += [f"  {ERROR_MARK}mean {comp} NOT reported: {'; '.join(why)}{ERROR_MARK}"
+                      for _s, comp, v, why in getattr(auto, "alarms", []) if v == "rejected"]
+            lines += [f"  re-interpreted: {spec} {a} -> {b} ({d0:.0f} -> {d1:.0f} deg from the mean without it)"
+                      for _s, comp, spec, a, b, d0, d1 in getattr(auto, "refined", [])]
+            lines += [f"  alarm on mean {comp}: {'; '.join(why)}"
+                      for _s, comp, v, why in getattr(auto, "alarms", []) if v == "warning"]
             lines += [f"  left out: {spec} ({why})" for _s, spec, why in auto.excluded]
             lines += [f"  not written: {spec} ({why})" for spec, why in auto.not_written]
             lines += [f"  measurement error left out: {spec} step {step} ({why})"

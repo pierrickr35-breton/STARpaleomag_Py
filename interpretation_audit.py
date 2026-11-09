@@ -141,6 +141,7 @@ def audit_results(results: List[FitResult], donnees) -> Tuple[List[QualityReport
             per_site.setdefault(site, []).append(res)
 
     lines: List[str] = []
+    ai.set_dataset_nrm_reference([e for e in donnees if getattr(e, "mesures", None)])
     for site in sorted(per_site):
         site_res = per_site[site]
         site_lines: List[str] = []

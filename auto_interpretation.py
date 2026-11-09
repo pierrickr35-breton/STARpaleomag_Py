@@ -59,7 +59,7 @@ l'utilisateur accepte une suggestion.
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -1121,8 +1121,18 @@ def _site_component_letters(specimens: list, per_specimen: Dict[str, List[Compon
             continue
         sg = suggestions[0]
         v = in_situ(ech_id, sg)
-        to_a = math.degrees(math.acos(min(1.0, abs(float(v @ ref_a)))))
-        to_b = math.degrees(math.acos(min(1.0, abs(float(v @ ref_b)))))
+        if (ref_a_or is not None and ref_b_or is not None and float(ref_a_or @ ref_b_or) < 0):
+            # A et B de polarites opposees (reaimantation normale sur une
+            # composante inverse) : presque antipodales, elles sont AXIALEMENT
+            # la meme direction - comparer les directions orientees. Bug reel :
+            # 20687 R105, droites inverses ~255/-57 numerotees B "a 6 deg de la
+            # seconde composante" (normale 8/68, 90/52...), moyennes A et B
+            # quasi identiques.
+            to_a = math.degrees(math.acos(max(-1.0, min(1.0, float(v @ ref_a_or)))))
+            to_b = math.degrees(math.acos(max(-1.0, min(1.0, float(v @ ref_b_or)))))
+        else:
+            to_a = math.degrees(math.acos(min(1.0, abs(float(v @ ref_a)))))
+            to_b = math.degrees(math.acos(min(1.0, abs(float(v @ ref_b)))))
         if to_b < to_a and to_b <= _FREE_SAME_COMPONENT_DEG:
             sg.component = "B"
             sg.notes.append(
@@ -1162,6 +1172,40 @@ _GC_MIN_PLANES = 4
 _GC_LINE_KEEP_DEG = 10.0
 _LIGHTNING_NRM_RATIO = 10.0
 _GC_MAX_TWO_COMP_FRACTION = 0.5
+# Le passage en grands cercles exige un indice de foudre - demande explicite
+# utilisateur ("pour un effet de foudre c'est OK mais sans evidence de foudre
+# c'est souvent impossible") : intensite mediane de la NRM du site >=
+# _GC_LIGHTNING_SITE_RATIO x la mediane du jeu de donnees (Tibet 15NQ31/35,
+# 14NQ12 x50-170, CARF P04/P12/P38/P39/P46 x9-40 ; 20687 R012/R013/R019/R020
+# x0.2-0.3, R046/R054/R076 x0.5-0.9). La mediane du jeu est fournie par
+# automatic_results (set_dataset_nrm_reference) ; sans elle, pas de condition.
+_GC_LIGHTNING_SITE_RATIO = 3.0
+# Grands cercles trop mal definis (MAD mediane) : pas d'interpretation par
+# grands cercles - demande utilisateur (20687 R056 : "les grands cercles sont
+# tres mal identifies car les echantillons sont trop reaimantes", MAD mediane
+# 9.1 ; sites valides a la main 4.1-8.3).
+_GC_EXCLUDE_UNCONVERGED_LIGHTNING = True  # voir _site_great_circles (20687 R066)
+_GC_CLUSTER_DEG = 15.0
+_GC_CLUSTER_FRACTION = 2.0 / 3.0
+_GC_MAX_MEDIAN_MAD = 8.5  # sites valides P46 8.2, M07 8.3 ; R056 9.1 - marge etroite
+_DATASET_NRM_MEDIAN: Optional[float] = None
+
+
+def _nrm_intensity(ech) -> Optional[float]:
+    ms = _zijderveld_measurements(ech)
+    if not ms:
+        return None
+    m = ms[0]
+    return math.sqrt(m.x * m.x + m.y * m.y + m.z * m.z)
+
+
+def set_dataset_nrm_reference(samples) -> Optional[float]:
+    """Mediane des intensites de NRM du jeu (reference de l'indice de
+    foudre, voir _GC_LIGHTNING_SITE_RATIO)."""
+    global _DATASET_NRM_MEDIAN
+    vals = sorted(v for v in (_nrm_intensity(e) for e in samples if getattr(e, "mesures", None)) if v)
+    _DATASET_NRM_MEDIAN = vals[len(vals) // 2] if vals else None
+    return _DATASET_NRM_MEDIAN
 
 
 def _sequence_end(mesures: list, first: int) -> int:
@@ -1272,6 +1316,9 @@ def _site_great_circles(specimens: list, per_specimen: Dict[str, List[ComponentS
     if two_comp > _GC_MAX_TWO_COMP_FRACTION * len(rows):
         return False
     median_nrm = float(np.median([r[2] for r in rows]))
+    if (_GC_LIGHTNING_SITE_RATIO is not None and _DATASET_NRM_MEDIAN
+            and median_nrm < _GC_LIGHTNING_SITE_RATIO * _DATASET_NRM_MEDIAN):
+        return False  # pas d'indice de foudre : pas d'interpretation par grands cercles seuls
     lightning = {r[0].id for r in rows if median_nrm > 0 and r[2] >= _LIGHTNING_NRM_RATIO * median_nrm}
     poles = [dec_inc(r[5]) for r in rows
              if r[4] is not None and r[4]["mad"] <= _GC_PLANE_MAX_MAD and r[0].id not in lightning]
@@ -1281,9 +1328,48 @@ def _site_great_circles(specimens: list, per_specimen: Dict[str, List[ComponentS
     best_line_a95 = line_stats.a95
     if len(secondaries) >= 3:
         best_line_a95 = min(best_line_a95, fisher_mean(combine_antipodal_groups(secondaries)[0]).a95)
+    mads = sorted(r[4]["mad"] for r in rows if r[4] is not None and r[0].id not in lightning)
+    # seulement si les droites sont dispersees (sinon le site n'est pas un
+    # cas de grands cercles : C16/P45/P50/R004/R031... k droites 37-688)
+    if (_GC_MAX_MEDIAN_MAD is not None and mads and mads[len(mads) // 2] > _GC_MAX_MEDIAN_MAD
+            and line_stats.k < _GC_MAX_LINE_K):
+        # site foudroye (indice d'intensite) aux grands cercles mal definis :
+        # specimens trop reaimantes, aucune direction fiable - ni l'intersection
+        # ni les droites, qui portent la reaimantation elle-meme (20687 R056,
+        # avis utilisateur : "meme l'autre polarite est sans doute fausse").
+        # Tous les specimens sont exclus de la moyenne de site.
+        reason = (f"probable lightning site (NRM {median_nrm / _DATASET_NRM_MEDIAN:.0f} times the data-file "
+                  f"median) with poorly defined great circles (median MAD {mads[len(mads) // 2]:.1f}): "
+                  f"specimens too remagnetized, no reliable site direction"
+                  if _DATASET_NRM_MEDIAN else "poorly defined great circles")
+        for ech, *_ in rows:
+            for sg in per_specimen.get(ech.id) or []:
+                sg.site_outlier = reason
+        return False
     gc = fisher_combine_lines_planes([], poles)
     if not (line_stats.k < _GC_MAX_LINE_K and gc.a95 <= _GC_A95_RATIO * best_line_a95
             and gc.a95 <= _GC_MAX_A95):
+        # pas de groupe dominant de droites (moins de 2/3 a moins de 15 deg les
+        # unes des autres) : sinon le site garde ses droites (Tibet 14NQ17 8/10,
+        # CARF P09 8/9 ; R066 6/13, R089 3/13, R050 4/12)
+        vecs = [r[3] for r in rows if r[3] is not None]
+        cluster = max((sum(1 for w in vecs if abs(float(v @ w)) >= math.cos(math.radians(_GC_CLUSTER_DEG)))
+                       for v in vecs), default=0)
+        if (_GC_EXCLUDE_UNCONVERGED_LIGHTNING and line_stats.k < _GC_MAX_LINE_K and _DATASET_NRM_MEDIAN
+                and _GC_LIGHTNING_SITE_RATIO is not None and cluster < _GC_CLUSTER_FRACTION * len(vecs)):
+            # site foudroye (indice d'intensite), droites dispersees et grands
+            # cercles qui ne convergent pas : les droites, meme tres bien
+            # definies, ne sont que des degres de reaimantation differents
+            # (20687 R066 : NRM x60, droites MAD < 1.3 etalees de 319/-33 a
+            # 51/-5 ; avis utilisateur : "le R066 est affecte par la foudre").
+            reason = (f"probable lightning site (NRM {median_nrm / _DATASET_NRM_MEDIAN:.0f} times the "
+                      f"data-file median): lines scattered (k={line_stats.k:.1f}, largest group "
+                      f"{cluster}/{len(vecs)} within {_GC_CLUSTER_DEG:g} deg) and great circles not "
+                      f"converging (a95={gc.a95:.1f}) - specimens remagnetized to different degrees, "
+                      f"no reliable site direction")
+            for ech, *_ in rows:
+                for sg in per_specimen.get(ech.id) or []:
+                    sg.site_outlier = reason
         return False
 
     target = unit(gc.dec, gc.inc)
@@ -1631,6 +1717,121 @@ AUTO_MIN_SPECIMENS = 3  # specimens minimum pour une moyenne de site automatique
 # utilisateur (15NQ34 : "highly scattered and with k < 5, these means should
 # not be reported")
 AUTO_MIN_K = 5.0
+# Controle de site AVANT le tri des valeurs aberrantes - demande explicite
+# utilisateur (contribution 20687, site R012 : 16 directions dispersees dans
+# tout l'espace, 5 retirees comme aberrantes et 2 remplacees par des grands
+# cercles, puis une moyenne k correct sur les 11 restantes "qui n'a plus rien
+# a voir avec les donnees") : pas de moyenne si les resultats du site, TOUS
+# pris ensemble, sont trop disperses (k < AUTO_SITE_MIN_K_ALL), ou si plus
+# de AUTO_SITE_MAX_REJECTED des resultats sont retires ou remplaces.
+AUTO_SITE_MIN_K_ALL = 3.0
+AUTO_SITE_MAX_REJECTED = 1.0 / 3.0
+# Site domine par les grands cercles (moins de AUTO_SITE_MIN_LINE_FRACTION
+# de droites - regle "au moins 1/3 de droites" de l'utilisateur) : moyenne
+# seulement si les grands cercles suivent la desaimantation presque jusqu'au
+# bout (couverture mediane >= AUTO_GC_MIN_COVERAGE de la sequence). 20687
+# R012/R013/R019/R020 : 15-16 cercles s'arretant a mi-sequence (0.50-0.61,
+# composante basse coercivite seule), sites non publies par les auteurs ;
+# les sites a grands cercles valides a la main (Tibet 15NQ31/35, 14NQ12,
+# CARF P04/P12/P38/P39/P46/J10/J25) couvrent 0.75-1.00. La regle des 1/3 de
+# droites seule supprimait ces sites valides.
+AUTO_SITE_MIN_LINE_FRACTION = 1.0 / 3.0
+AUTO_GC_MIN_COVERAGE = 0.7
+# Alarmes "douces" d'une moyenne de site - demande explicite utilisateur ("il
+# ne faut pas hesiter a rejeter des moyennes si plusieurs alarmes ou
+# incoherences apparaissent ; meme en manuel, les utilisateurs font des
+# erreurs dramatiques ; en automatique, il vaut mieux faire sonner les
+# alarmes") : une alarme seule est signalee, AUTO_SITE_MAX_SOFT_ALARMS + 1
+# alarmes ou plus rejettent la moyenne. Les conditions "dures" (k de tous
+# les resultats < AUTO_SITE_MIN_K_ALL, plus de AUTO_SITE_MAX_REJECTED
+# retires, grands cercles courts, k < AUTO_MIN_K) rejettent seules.
+AUTO_SITE_MAX_SOFT_ALARMS = 1
+AUTO_REJECT_LIGHTNING_SECONDARY = True  # voir automatic_results (20687 R073)
+AUTO_ALARM_COHERENT_DEG = 30.0      # droite "coherente" : a moins de 30 deg de la moyenne
+AUTO_ALARM_MIN_COHERENT_LINES = 3
+AUTO_ALARM_OPPOSITE_DEG = 120.0     # autre composante du site de polarite opposee
+AUTO_ALARM_REMOVED_FRACTION = 0.2   # et au moins 2 resultats
+AUTO_ALARM_ANTIPODAL_DEG = 20.0
+AUTO_ALARM_K_ALL = 5.0
+AUTO_ALARM_A95 = 15.0
+# Roches volcaniques du Miocene a l'actuel : k < 25 signale toujours quelque
+# chose de complexe - regle explicite de l'utilisateur. Lithologie et age
+# lus dans les champs MagIC des specimens (magic_gc/magic_smt/magic_li,
+# magic_age + unite) ; sans age ou sans lithologie connus, pas d'alarme.
+AUTO_ALARM_YOUNG_VOLCANIC_K = 25.0
+AUTO_ALARM_YOUNG_MAX_AGE_MA = 23.03
+_VOLCANIC_WORDS = ("extrusive", "lava", "flow", "basalt", "andesite", "dacite", "rhyolite", "trachy",
+                   "basanite", "nephelinite", "phonolite", "volcanic", "ignimbrite", "scoria", "dyke", "dike")
+
+
+def _young_volcanic(echs) -> bool:
+    """Site volcanique d'age Miocene a actuel d'apres les champs MagIC."""
+    for e in echs:
+        text = " ".join(str(getattr(e, k, "") or "") for k in ("magic_gc", "magic_smt", "magic_li")).lower()
+        if not any(w in text for w in _VOLCANIC_WORDS):
+            continue
+        try:
+            age = float(getattr(e, "magic_age", "") or "nan")
+        except ValueError:
+            continue
+        unit = (getattr(e, "magic_age_unit", "") or "").strip().lower()
+        factor = {"ma": 1.0, "ka": 1e-3, "years bp": 1e-6, "years ad (+/-)": 0.0, "years cal bp": 1e-6,
+                  "ga": 1e3, "years": 1e-6}.get(unit)
+        if factor is None or not math.isfinite(age):
+            continue
+        return age * factor <= AUTO_ALARM_YOUNG_MAX_AGE_MA
+    return False
+
+
+def _site_alarms(kept, k_all, n_all, n_removed, stats, other_means, young_volcanic=False) -> List[str]:
+    """Alarmes douces d'une moyenne (stats in situ) - voir AUTO_SITE_MAX_SOFT_ALARMS."""
+    alarms = []
+    if young_volcanic and stats.k < AUTO_ALARM_YOUNG_VOLCANIC_K:
+        alarms.append(f"k={stats.k:.0f} < {AUTO_ALARM_YOUNG_VOLCANIC_K:g} for Miocene-to-recent volcanic "
+                      f"rocks - something complex, analyse with care")
+    mean = _unit_vector(stats.dec, stats.inc)
+    line_dots = [float(_unit_vector(*_correct_dec_inc(r, 2)) @ mean) for r in kept if r.cat1 != "P"]
+    coherent = sum(1 for d in line_dots
+                   if math.degrees(math.acos(min(1.0, abs(d)))) <= AUTO_ALARM_COHERENT_DEG)
+    if coherent < AUTO_ALARM_MIN_COHERENT_LINES:
+        alarms.append(f"only {coherent} line(s) within {AUTO_ALARM_COHERENT_DEG:g} deg of the mean")
+    lines_v = [_unit_vector(*_correct_dec_inc(r, 2)) for r in kept if r.cat1 != "P"]
+    pos = [v for v in lines_v if float(v @ mean) > 0]
+    neg = [v for v in lines_v if float(v @ mean) < 0]
+    if len(pos) >= 2 and len(neg) >= 2:
+        # deux groupes de polarites opposees : normal s'ils sont antipodaux
+        # (inversion enregistree dans le site, 13CB16), alarme sinon
+        mp, mn = np.sum(pos, axis=0), np.sum(neg, axis=0)
+        anti = math.degrees(math.acos(max(-1.0, min(1.0, float(
+            -(mp / np.linalg.norm(mp)) @ (mn / np.linalg.norm(mn)))))))
+        if anti > AUTO_ALARM_ANTIPODAL_DEG:
+            alarms.append(f"both polarities in the mean ({len(pos)} / {len(neg)} lines), "
+                          f"not antipodal ({anti:.0f} deg)")
+    for comp, om in other_means:
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, float(_unit_vector(om.dec, om.inc) @ mean)))))
+        # une reaimantation de polarite opposee est classique (14NQ13) ; alarme
+        # seulement si CETTE composante repose sur moins de resultats que
+        # l'autre (20687 R074 : 2 droites inverses contre 12 normales)
+        if ang > AUTO_ALARM_OPPOSITE_DEG and om.n > n_all:
+            alarms.append(f"component {comp} of the same site has the opposite polarity ({ang:.0f} deg) - "
+                          f"two units, or a remagnetization?")
+    if n_all and n_removed >= 2 and n_removed > AUTO_ALARM_REMOVED_FRACTION * n_all:
+        alarms.append(f"{n_removed} of {n_all} results left out or replaced")
+    if k_all < AUTO_ALARM_K_ALL:
+        alarms.append(f"results scattered before the outliers were removed (k={k_all:.1f})")
+    if stats.a95 > AUTO_ALARM_A95:
+        alarms.append(f"a95={stats.a95:.1f} deg")
+    return alarms
+
+
+def _plane_coverage(res, ech) -> Optional[float]:
+    """Fraction de la sequence de desaimantation couverte par le grand
+    cercle `res` (rang du dernier palier / nombre de paliers)."""
+    if ech is None:
+        return None
+    ms = _zijderveld_measurements(ech)
+    j = next((k for k, m in enumerate(ms) if m.etape == res.step_last), None)
+    return (j + 1) / len(ms) if j is not None and ms else None
 
 
 # droite a plus de _FAR_LINE_DEG de la moyenne de site : grand cercle ou
@@ -1714,6 +1915,133 @@ class AutomaticResults:
     # (site, composante, specimen, ecart de la droite, palier debut, palier fin du grand cercle)
     far_to_plane: List[Tuple[str, str, str, float, float, float]] = field(default_factory=list)
     spurious: List[Tuple[str, str, str]] = field(default_factory=list)  # (specimen, palier, raison)
+    # (site, composante, N, k de tous les resultats, nb retires/remplaces) - voir AUTO_SITE_*
+    incoherent: List[Tuple[str, str, int, float, int]] = field(default_factory=list)
+    # (site, composante, "rejected"/"warning", [raisons]) - voir AUTO_SITE_MAX_SOFT_ALARMS
+    alarms: List[Tuple[str, str, str, List[str]]] = field(default_factory=list)
+    # (site, composante, specimen, intervalle d'origine, nouvel intervalle, ecart avant, apres)
+    refined: List[Tuple[str, str, str, str, str, float, float]] = field(default_factory=list)
+
+
+# Affinage des specimens les plus eloignes - demande explicite utilisateur
+# ("quand le k est < 100, est-ce possible d'affiner les determinations en
+# testant une nouvelle determination sur les echantillons avec les directions
+# les plus eloignees de la moyenne"). Garde-fous contre l'auto-confirmation :
+# moyenne de reference SANS le specimen teste ; segment de remplacement
+# valable en lui-meme (MAD <= min(15, max(2 x MAD d'origine, 5)), au moins 15 %
+# de la NRM, sans changement de traitement) ; gain d'au moins AUTO_REFINE_MIN_GAIN.
+AUTO_REFINE_MAX_K = 100.0
+AUTO_REFINE_DEV_FACTOR = 1.5     # specimens a plus de 1.5 ecart angulaire (81/sqrt(k))
+AUTO_REFINE_MIN_GAIN = 10.0      # deg
+AUTO_REFINE_MIN_NRM = 0.15
+AUTO_REFINE_MIN_OVERLAP = 0.5   # fraction de l'intervalle d'origine recouverte
+AUTO_REFINE_REQUIRE_WITHIN = True  # le nouveau segment doit tomber dans la dispersion du site
+
+
+def _refine_far_lines(kept, ech_of, out, site, component):
+    """Voir AUTO_REFINE_*. Remplace dans `kept` (et out.specimens) les
+    droites eloignees par un meilleur segment du meme specimen ; renvoie
+    la nouvelle liste."""
+    stats = fisher_from_results(kept, orientation=2, combine_antipodal=True)
+    if stats.k >= AUTO_REFINE_MAX_K or len(kept) < AUTO_MIN_SPECIMENS + 1:
+        return kept
+    csd = 81.0 / math.sqrt(max(stats.k, 1e-6))
+    kept = list(kept)
+
+    def axial_dev(vec, mean_vec):
+        return math.degrees(math.acos(min(1.0, abs(float(vec @ mean_vec)))))
+
+    lines = [r for r in kept if r.cat1 != "P"]
+    devs = []
+    for r in lines:
+        others = [x for x in kept if x is not r]
+        m = fisher_from_results(others, orientation=2, combine_antipodal=True)
+        devs.append((axial_dev(_unit_vector(*_correct_dec_inc(r, 2)), _unit_vector(m.dec, m.inc)), r, m))
+    for dev, r, m in sorted(devs, key=lambda t: -t[0]):
+        if dev <= AUTO_REFINE_DEV_FACTOR * csd:
+            break
+        ech = ech_of.get(r.id)
+        if ech is None:
+            continue
+        mean_vec = _unit_vector(m.dec, m.inc)
+        ms = _zijderveld_measurements(ech)
+        first = _first_demag_index(ms)
+        last = _sequence_end(ms, first)
+        breaks = _treatment_breaks(ms)
+        pts = [(x.x, x.y, x.z) for x in ms]
+        mad_max = min(_LINE_MAD_THRESHOLD, max(2.0 * r.mad, 5.0))
+        # intervalle d'origine (indices) : le nouveau segment doit en recouvrir
+        # au moins AUTO_REFINE_MIN_OVERLAP - on affine la MEME composante, on
+        # n'en choisit pas une autre qui tomberait pres de la moyenne
+        # (14NQ0702B 650-675 -> 170-420, R001-0011A 10-200 -> 2-10 : refuses)
+        oi = next((k for k, x in enumerate(ms) if x.etape == r.step_first), None)
+        oj = next((k for k, x in enumerate(ms) if x.etape == r.step_last), None)
+        if oi is None or oj is None or oj <= oi:
+            continue
+        best = None
+        for i in range(first, last + 1):
+            for anchored in (True, False):
+                min_pts = MIN_POINTS_ANCHORED if anchored else MIN_POINTS
+                for j in range(i + min_pts - 1, last + 1):
+                    if any(i <= k < j for k in breaks):
+                        break
+                    ov = min(j, oj) - max(i, oi)
+                    if ov < AUTO_REFINE_MIN_OVERLAP * (oj - oi):
+                        continue
+                    fit = linear_fit(pts[i:j + 1], anchored=anchored, mad_threshold=180.0)
+                    if fit is None or fit["mad"] > mad_max:
+                        continue
+                    frac = _nrm_fraction(ms, i, j)
+                    if frac is None or frac < AUTO_REFINE_MIN_NRM:
+                        continue
+                    v = np.array(apply_orientation(*fit["direction"], ech, 2))
+                    d = axial_dev(v / np.linalg.norm(v), mean_vec)
+                    key = (d, -(j - i))
+                    if best is None or key < best[0]:
+                        best = (key, i, j, anchored, fit["mad"])
+        if best is None or best[0][0] > dev - AUTO_REFINE_MIN_GAIN:
+            continue
+        if AUTO_REFINE_REQUIRE_WITHIN and best[0][0] > AUTO_REFINE_DEV_FACTOR * csd:
+            continue  # reste hors de la dispersion du site : on garde l'interpretation d'origine
+        _, i, j, anchored, _mad = best
+        new = fit_line(ech, i + 1, j + 1, anchored=anchored, numcomp=r.numcomp)
+        if new is None:
+            continue
+        new.component, new.c = r.component, r.c
+        kept[kept.index(r)] = new
+        if r in out.specimens:
+            out.specimens[out.specimens.index(r)] = new
+        out.refined.append((site, component, r.id, f"{r.step_first:g}-{r.step_last:g}",
+                            f"{new.step_first:g}-{new.step_last:g}{'' if anchored else ' free'}",
+                            dev, best[0][0]))
+    return kept
+
+
+def _orient_mean_to_endpoints(stats, kept, ech_of, orientation):
+    """Polarite d'une moyenne dominee par les grands cercles : l'intersection
+    n'a pas de sens propre (combinaison axiale), on la tourne vers les fins
+    de desaimantation des specimens (moyenne vectorielle des 3 derniers
+    paliers, meme repere). Bug reel : CARF P04/P12/P38/P39 et 20687 R056
+    sortaient antipodaux (176-179 deg) aux moyennes manuelles/publiees ;
+    la comparaison axiale du banc d'essai le masquait."""
+    n_planes = sum(1 for r in kept if r.cat1 == "P")
+    if n_planes <= len(kept) - n_planes:
+        return stats
+    target = _unit_vector(stats.dec, stats.inc)
+    votes = 0
+    for r in kept:
+        ech = ech_of.get(r.id)
+        if ech is None:
+            continue
+        ms = _zijderveld_measurements(ech)
+        if len(ms) < 3:
+            continue
+        v = np.mean([[m.x, m.y, m.z] for m in ms[-3:]], axis=0)
+        _, dec, inc = polere(*apply_orientation(*v, ech, orientation))
+        votes += 1 if float(_unit_vector(dec, inc) @ target) >= 0 else -1
+    if votes < 0:
+        return _dc_replace(stats, dec=(stats.dec + 180.0) % 360.0, inc=-stats.inc)
+    return stats
 
 
 def automatic_results(samples: list, donnees, existing_ids: Optional[set] = None) -> AutomaticResults:
@@ -1737,6 +2065,8 @@ def automatic_results(samples: list, donnees, existing_ids: Optional[set] = None
     n'entrent dans aucune moyenne. N'ecrit rien : voir
     calcul.write_results_file. Les ajustements passent par fit_line/
     fit_plane, comme un ajustement manuel (seuils MAD 15/25 deg compris)."""
+    # reference d'intensite pour l'indice de foudre (tout le jeu, pas le seul site)
+    set_dataset_nrm_reference([e for e in (donnees or samples) if getattr(e, "mesures", None)])
     # paliers aberrants isoles retires d'abord (en memoire, comme Remove step)
     spurious = remove_spurious_steps(samples)
     by_site: Dict[str, list] = {}
@@ -1783,20 +2113,76 @@ def automatic_results(samples: list, donnees, existing_ids: Optional[set] = None
                 per_site.setdefault((site, component), []).append(res)
 
     sample_of = {ech.id: (ech.magic_sample or "").strip() for ech in samples}
+    prelim = {key: fisher_from_results(res, orientation=2, combine_antipodal=True)
+              for key, res in per_site.items() if len(res) >= AUTO_MIN_SPECIMENS}
     for (site, component), results in sorted(per_site.items()):
         if len(results) < AUTO_MIN_SPECIMENS:
             continue
+        n_all = len(results)
+        k_all = fisher_from_results(results, orientation=2, combine_antipodal=True).k
+        n_far_before = len(out.far_to_plane) + len(out.outliers)
         results = _far_lines_to_planes(results, ech_of, sg_of, out)
+        n_far = len(out.far_to_plane) + len(out.outliers) - n_far_before
         kept, rejected, _ = split_outliers(results, orientation=2, combine_antipodal=True,
                                            min_deviation=AUTO_OUTLIER_MIN_DEG, sample_of=sample_of)
         out.outliers += [(site, component, r.id, d) for r, d in rejected]
+        n_removed = n_far + len(rejected)
+        n_lines = sum(1 for r in kept if r.cat1 != "P")
+        short_gc = False
+        if AUTO_SITE_MIN_LINE_FRACTION is not None and n_lines < AUTO_SITE_MIN_LINE_FRACTION * len(kept):
+            cov = sorted(c for c in (_plane_coverage(r, ech_of.get(r.id)) for r in kept if r.cat1 == "P")
+                         if c is not None)
+            if cov and cov[len(cov) // 2] < AUTO_GC_MIN_COVERAGE:
+                short_gc = True
+        if (AUTO_SITE_MIN_K_ALL is not None and k_all < AUTO_SITE_MIN_K_ALL) or \
+                (AUTO_SITE_MAX_REJECTED is not None and n_removed > AUTO_SITE_MAX_REJECTED * n_all) or \
+                short_gc:
+            out.scattered.append((site, component, n_all, k_all))
+            out.incoherent.append((site, component, n_all, k_all, n_removed))
+            hard = []
+            if AUTO_SITE_MIN_K_ALL is not None and k_all < AUTO_SITE_MIN_K_ALL:
+                hard.append(f"results too scattered (k={k_all:.1f} before outlier removal)")
+            if AUTO_SITE_MAX_REJECTED is not None and n_removed > AUTO_SITE_MAX_REJECTED * n_all:
+                hard.append(f"{n_removed} of {n_all} results left out or replaced")
+            if short_gc:
+                hard.append("great circles stop half-way through the demagnetization")
+            out.alarms.append((site, component, "rejected", hard))
+            continue
         in_situ = fisher_from_results(kept, orientation=2, combine_antipodal=True)
         if in_situ.k < AUTO_MIN_K:
             out.scattered.append((site, component, in_situ.n, in_situ.k))
+            out.alarms.append((site, component, "rejected", [f"k={in_situ.k:.1f} < {AUTO_MIN_K:g}"]))
             continue
+        if (AUTO_REJECT_LIGHTNING_SECONDARY and component != "A" and _DATASET_NRM_MEDIAN
+                and _GC_LIGHTNING_SITE_RATIO is not None):
+            nrm_site = sorted(v for v in (_nrm_intensity(ech_of[r.id]) for r in kept if r.id in ech_of) if v)
+            ratio = nrm_site[len(nrm_site) // 2] / _DATASET_NRM_MEDIAN if nrm_site else 0.0
+            if ratio >= _GC_LIGHTNING_SITE_RATIO:
+                # site foudroye : la composante secondaire est l'aimantation de la
+                # foudre, pas une direction geomagnetique (20687 R073 : B 76/19,
+                # avis utilisateur "l'interpretation auto propose une direction
+                # secondaire (celle de la foudre) en comp B")
+                out.alarms.append((site, component, "rejected", [
+                    f"probable lightning site (NRM {ratio:.0f} times the data-file median): component "
+                    f"{component} is the lightning remagnetization, not a geomagnetic direction"]))
+                continue
+        others = [(c, m) for (st, c), m in prelim.items() if st == site and c != component]
+        alarms = _site_alarms(kept, k_all, n_all, n_removed, in_situ, others,
+                              young_volcanic=_young_volcanic([ech_of[r.id] for r in kept if r.id in ech_of]))
+        if AUTO_SITE_MAX_SOFT_ALARMS is not None and len(alarms) > AUTO_SITE_MAX_SOFT_ALARMS:
+            out.alarms.append((site, component, "rejected", alarms))
+            out.incoherent.append((site, component, n_all, k_all, n_removed))
+            continue
+        if alarms:
+            out.alarms.append((site, component, "warning", alarms))
+        # affinage APRES les alarmes, sur une moyenne deja acceptee : il ne
+        # doit jamais repecher une moyenne rejetee (20687 R019 A, R099 B...)
+        if AUTO_REFINE_MAX_K is not None and in_situ.k < AUTO_REFINE_MAX_K:
+            kept = _refine_far_lines(kept, ech_of, out, site, component)
         lat, lon = site_lat_lon_from_donnees(site, donnees) or (0.0, 0.0)
         for orientation in (2, 3):
             stats = fisher_from_results(kept, orientation=orientation, combine_antipodal=True)
+            stats = _orient_mean_to_endpoints(stats, kept, ech_of, orientation)
             out.means.append(build_site_mean_result(stats, kept, site, orientation, lat, lon,
                                                     component=component))
     return out

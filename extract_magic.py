@@ -982,6 +982,7 @@ def magic_site_means(sites_source, combined=True) -> Optional[List[dict]]:
 
     rows = []
     n_skipped_sample_coords = 0
+    n_assumed_untilted = 0
     for _, row_series in df.iterrows():
         row = row_series.to_dict()
         dec = parse_float_val(row.get("dir_dec", ""), None)
@@ -993,7 +994,18 @@ def magic_site_means(sites_source, combined=True) -> Optional[List[dict]]:
             continue
         tilt = clean_str(row.get("dir_tilt_correction", ""))
         orientation = _resolve_tilt_orientation(tilt)
-        if orientation is None:
+        if orientation is not None:
+            orientations = [orientation]
+        elif not tilt and abs(parse_float_val(row.get("bed_dip", ""), 0.0) or 0.0) < 1e-9:
+            # dir_tilt_correction ABSENT et site sans pendage (bed_dip 0 ou
+            # absent) : geographique = apres pendage - demande explicite
+            # utilisateur (contribution 20687, laves recentes : "there is no
+            # tilt correction needed. This is a good assumption") ; la
+            # moyenne est rangee dans les deux reperes. Un "-1" explicite
+            # (coordonnees specimen) ou un site incline reste ecarte.
+            orientations = [2.0, 3.0]
+            n_assumed_untilted += 1
+        else:
             n_skipped_sample_coords += 1
             continue
 
@@ -1004,7 +1016,8 @@ def magic_site_means(sites_source, combined=True) -> Optional[List[dict]]:
         if n is None:
             n = parse_float_val(row.get("dir_n_samples", ""), len(specimens))
 
-        rows.append({
+        for orientation in orientations:
+          rows.append({
             "site": site,
             "orientation": orientation,
             "dec": dec,
@@ -1037,11 +1050,14 @@ def magic_site_means(sites_source, combined=True) -> Optional[List[dict]]:
             # (comptes alors depuis les resultats specimen inclus).
             "n_lines": parse_float_val(row.get("dir_n_specimens_lines", ""), None),
             "n_planes": parse_float_val(row.get("dir_n_specimens_planes", ""), None),
-        })
+          })
+    if n_assumed_untilted:
+        print(f"ℹ️  {n_assumed_untilted} site mean(s) without dir_tilt_correction on untilted sites "
+              f"(bed_dip 0 or absent): taken as geographic = tilt corrected.")
     if n_skipped_sample_coords:
         print(f"⚠️  {n_skipped_sample_coords} site mean(s) skipped: dir_tilt_correction "
-              f"missing or '-1' (specimen coordinates) - a multi-specimen mean is not "
-              f"meaningful in sample coordinates.")
+              f"'-1' (specimen coordinates), or missing on a tilted site - a multi-specimen mean "
+              f"is not meaningful in sample coordinates.")
     return rows
 
 
