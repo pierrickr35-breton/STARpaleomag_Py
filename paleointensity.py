@@ -939,6 +939,19 @@ AUTO_PINT_MAX_CHECK = 0.10
 # MAX_ANGLE de la ChRM du segment (meme composante, pas un parasite) ET
 # que le segment prolonge passe toutes les autres regles.
 AUTO_PINT_NRM_START_MIN_LOSS = 0.20
+# Regle 3, version stricte - demande utilisateur (GHI05B01, contribution
+# 19614 : l'automatique demarrait a 400 degC apres 44 % de NRM enlevee,
+# a 9 deg de la ChRM : meme composante, diagramme a deux pentes) : un
+# debut au-dessus du premier palier n'est permis que si la NRM sautee
+# (NRM0 - NRM(n1)) est faible (< AUTO_PINT_MAX_SKIPPED) OU est un
+# parasite, a plus de AUTO_PINT_SKIPPED_PARASITE_DEG de la ChRM du
+# segment. None = pas de contrainte.
+AUTO_PINT_MAX_SKIPPED = 0.25
+# Facteur R de Coe et al. (1984), % de CRM acquise (compute_crm) - Chauvin,
+# Roperch & Levi 2005 : R <= 15 %. Seulement en Thellier classique (champ
+# de labo selon z du specimen) ; None = pas de critere.
+AUTO_PINT_MAX_CRM = None
+AUTO_PINT_SKIPPED_PARASITE_DEG = 15.0
 AUTO_PINT_NRM_START_MAX_ANGLE = 15.0
 
 
@@ -962,6 +975,8 @@ class AutoAraiResult:
     from_nrm: bool = False
     nrm_loss: float = 0.0    # fraction de NRM enlevee par le 1er palier
     nrm_angle: float = 0.0   # angle (NRM -> T1) / ChRM du segment
+    susc_temp: Optional[float] = None  # coupure par la susceptibilite (voir AUTO_PINT_SUSC_FACTOR)
+    susc_ratio: float = 1.0
 
 
 # Un controle rate ISOLE (le suivant passe) n'est pas une alteration :
@@ -1042,6 +1057,56 @@ def _choose_end(valid, points=None, n1=None):
     return next(v for v in valid if v[1].qq >= AUTO_PINT_END_Q_FRACTION * qmax)
 
 
+# Susceptibilite mesuree a chaque palier (chauffes sous vide, Rennes) -
+# demande utilisateur : "une evolution drastique de la susceptibilite est
+# aussi un critere" d'alteration. Des que la susceptibilite sort de
+# [k0/F, F*k0] (k0 = premiere valeur mesuree), CONFIRME par la valeur
+# suivante, plus aucun palier a partir de cette temperature (meme logique
+# que les controles pTRM). Valeurs nulles ignorees (non mesurees).
+AUTO_PINT_SUSC_FACTOR = 2.0
+_SUSC_SKIP_CODES = ("X", "Y", "Z", "D", "F", "A", "M", "Q", "L")
+
+
+# Reference = premiere valeur APRES la premiere chauffe (la valeur du palier
+# 0 differe souvent de toutes les suivantes, puis stables : 10CL3701A 677
+# puis ~1400 ; 19CO303A 207 puis ~63) ; chaque mesure est datee par la
+# temperature MAXIMALE deja atteinte (une mesure faite apres un controle
+# pTRM porte la temperature du controle, pas celle de la chauffe la plus
+# haute). Susceptibilites trop faibles (< AUTO_PINT_SUSC_MIN_VALUE, en
+# unites du fichier) ignorees : 2-8 unites, la resolution de lecture fait
+# deja un facteur 2.
+AUTO_PINT_SUSC_MIN_VALUE = 10.0
+
+
+def susceptibility_cutoff(ech: SelectedSample, factor: Optional[float] = None) -> Tuple[Optional[float], float]:
+    """(temperature a partir de laquelle la susceptibilite a change
+    drastiquement, rapport k/k0) ou (None, 1.0)."""
+    factor = AUTO_PINT_SUSC_FACTOR if factor is None else factor
+    if not factor:
+        return None, 1.0
+    serie, tmax = [], 0.0
+    for m in ech.mesures:
+        if m.cod1 in _SUSC_SKIP_CODES or m.cod1 == "N":
+            continue
+        tmax = max(tmax, m.etape)
+        if m.s and tmax > 0:
+            serie.append((tmax, m.s))
+    if len(serie) < 4:
+        return None, 1.0
+    # mediane des 3 premieres valeurs : une lecture aberrante isolee
+    # (10CL3901F : 23 au milieu de ~105) ne sert pas de reference
+    k0 = sorted(v for _, v in serie[:3])[1]
+    if k0 < AUTO_PINT_SUSC_MIN_VALUE:
+        return None, 1.0
+    for i, (t, v) in enumerate(serie[1:], start=1):
+        r = v / k0
+        if r >= factor or r <= 1.0 / factor:
+            nxt = serie[i + 1][1] / k0 if i + 1 < len(serie) else None
+            if nxt is None or nxt >= factor or nxt <= 1.0 / factor:
+                return t, r
+    return None, 1.0
+
+
 def _is_nrm_point(p: AraiPoint) -> bool:
     return p.xp == 0.0 and abs(p.yp - 1.0) < 1e-9
 
@@ -1051,15 +1116,30 @@ def _auto_arai_core(
 ) -> AutoAraiResult:
     out = AutoAraiResult(points=points)
     origin = [] if points and _is_nrm_point(points[0]) else [(0.0, 1.0)]
+    susc_t, susc_r = susceptibility_cutoff(ech)
+    is_thellier = detect_method_and_hlab(ech.mesures, ech.com)[0] == "THELLIER"
+    nrm0 = points[0].nrm_vec if points and _is_nrm_point(points[0]) else nrm0_vector(ech, orientation=1)
     n_max, bad, gap = ptrm_check_cutoff(points, checks)
     out.n_max, out.failed_check, out.check_gap = n_max, bad, gap
+    if susc_t is not None:
+        n_susc = sum(1 for p in points if p.temp < susc_t - 0.5)
+        if n_susc < n_max:
+            out.n_max, out.susc_temp, out.susc_ratio = n_susc, susc_t, susc_r
+            out.failed_check, out.check_gap = None, 0.0
+            n_max, bad = n_susc, None
     if n_max < AUTO_PINT_MIN_POINTS:
-        out.reason = (f"pTRM check failed too early (step {bad.temp:g} re-tested at "
-                      f"{points[n_max].temp:g}, gap {100 * gap:.0f}% of the TRM)" if bad
-                      else "not enough points")
+        if out.susc_temp is not None:
+            out.reason = (f"susceptibility changed too early (x{out.susc_ratio:.2f} at {out.susc_temp:g}, "
+                          f"confirmed by the next step)")
+        elif bad:
+            out.reason = (f"pTRM check failed too early (step {bad.temp:g} re-tested at "
+                          f"{points[n_max].temp:g}, gap {100 * gap:.0f}% of the TRM)")
+        else:
+            out.reason = "not enough points"
         return out
     h_stats = hlab if hlab else 1.0  # q/f/g ne dependent pas de Hlab, fit_arai_line les saute si 0
     best_fail = None  # (f, q, raison) du meilleur essai, pour expliquer un rejet
+    two_slope = None  # premier segment refuse seulement par la regle des deux pentes
     for n1 in range(1, n_max - AUTO_PINT_MIN_POINTS + 2):
         valid = []  # (n2, fit, direction) acceptables pour ce debut
         for n2 in range(n_max, n1 + AUTO_PINT_MIN_POINTS - 2, -1):
@@ -1089,6 +1169,17 @@ def _auto_arai_core(
                     why = f"NRM not linear (MAD {d.free_mad if d.free_mad is not None else 99:.0f})"
                 elif d.dang is None or d.dang > AUTO_PINT_MAX_DANG:
                     why = f"NRM does not go to the origin (DANG {d.dang if d.dang is not None else 99:.0f})"
+                elif (AUTO_PINT_MAX_CRM is not None and is_thellier
+                      and compute_crm(points, n1, n2, 1.0).rcrm > AUTO_PINT_MAX_CRM):
+                    why = f"CRM acquired (R = {compute_crm(points, n1, n2, 1.0).rcrm:.0f}% > {AUTO_PINT_MAX_CRM:g}%)"
+                elif AUTO_PINT_MAX_SKIPPED is not None and n1 > 1 and nrm0 is not None:
+                    skipped = 1.0 - points[n1 - 1].yp
+                    if skipped >= AUTO_PINT_MAX_SKIPPED:
+                        removed = tuple(nrm0[i] - points[n1 - 1].nrm_vec[i] for i in range(3))
+                        ang = angle_between_vectors(removed, d.anchored_specimen_frame)
+                        if ang is not None and ang <= AUTO_PINT_SKIPPED_PARASITE_DEG:
+                            why = (f"two-slope diagram: {100 * skipped:.0f}% of the same component "
+                                   f"({ang:.0f} deg from the ChRM) removed before the segment")
             if why is None:
                 valid.append((n2, fit, d))
                 if AUTO_PINT_END_RULE == "highest":
@@ -1096,6 +1187,8 @@ def _auto_arai_core(
                 continue
             if best_fail is None or fit.qq > best_fail[1]:
                 best_fail = (fit.f, fit.qq, f"{points[n1 - 1].temp:g}-{points[n2 - 1].temp:g}: {why}")
+            if why.startswith("two-slope") and two_slope is None:
+                two_slope = f"{points[n1 - 1].temp:g}-{points[n2 - 1].temp:g} would pass but is a {why}"
         if valid:
             n2, fit, d = _choose_end(valid, points, n1)
             if not hlab:
@@ -1104,7 +1197,9 @@ def _auto_arai_core(
                 fit.f, fit.qq = f1.f, f1.qq
             out.n1, out.n2, out.fit, out.direction = n1, n2, fit, d
             return out
-    if best_fail is None:
+    if two_slope is not None:
+        out.reason = two_slope
+    elif best_fail is None:
         out.reason = f"no segment with f >= {AUTO_PINT_MIN_F:g} before the failed pTRM check" if bad \
             else f"no segment with f >= {AUTO_PINT_MIN_F:g}"
     else:
@@ -2100,6 +2195,10 @@ def evaluate_pmagint(rows: Dict[str, Dict[str, str]], donnees) -> Tuple[List[Pin
             done_at = pts[n_max].temp if n_max < len(pts) else bad.temp
             poor.append(f"the interval goes past a failed pTRM check, confirmed by the next one (step "
                         f"{bad.temp:g} re-tested after {done_at:g} differs by {100 * gap:.0f}% of the TRM)")
+        st, sr = susceptibility_cutoff(e)
+        if st is not None and t2 >= st - 0.5:
+            poor.append(f"the interval reaches {st:g}, where the susceptibility has changed drastically "
+                        f"(x{sr:.2f}, confirmed by the next measurement)")
         for c, g in isolated:
             if pos.get(c.k, 99) <= n2:
                 ev.notes.append(f"isolated failed pTRM check (step {c.temp:g} re-tested after "
@@ -2130,6 +2229,14 @@ def evaluate_pmagint(rows: Dict[str, Dict[str, str]], donnees) -> Tuple[List[Pin
             marginal.append(f"NRM not linear (MAD {d.free_mad:.1f} > {EVAL_PINT_MARGINAL_MAD:g})")
         if d.dang is not None and d.dang > EVAL_PINT_MARGINAL_DANG:
             marginal.append(f"NRM does not go to the origin (DANG {d.dang:.1f} > {EVAL_PINT_MARGINAL_DANG:g})")
+        if AUTO_PINT_MAX_SKIPPED is not None and n1 > 1 and 1.0 - pts[n1 - 1].yp >= AUTO_PINT_MAX_SKIPPED:
+            nrm0 = pts[0].nrm_vec if _is_nrm_point(pts[0]) else nrm0_vector(e, orientation=1)
+            if nrm0 is not None:
+                removed = tuple(nrm0[i] - pts[n1 - 1].nrm_vec[i] for i in range(3))
+                ang = angle_between_vectors(removed, d.anchored_specimen_frame)
+                if ang is not None and ang <= AUTO_PINT_SKIPPED_PARASITE_DEG:
+                    marginal.append(f"two-slope diagram: {100 * (1.0 - pts[n1 - 1].yp):.0f}% of the same component "
+                                    f"({ang:.0f} deg from the ChRM) removed before the interval")
         ev.notes = poor + marginal + ev.notes
         ev.grade = "poor" if poor else ("marginal" if marginal else "good")
         if ev.grade == "good":
@@ -2184,10 +2291,12 @@ def format_pmagint_evaluation(evals: List[PintEvaluation], site_lines: List[str]
         counts[ev.grade] = counts.get(ev.grade, 0) + 1
     summary = ", ".join(f"{g}: {counts[g]}" for g in ("unrecomputable", "poor", "marginal", "good", "excellent") if g in counts)
     out = [f"Paleointensity estimates evaluation - {source} - {len(evals)} specimen(s) - {summary}",
-           f"poor: pTRM check failed and confirmed by the next one inside the interval, q < {EVAL_PINT_POOR_Q:g}, "
+           f"poor: pTRM check failed and confirmed by the next one inside the interval, susceptibility changed "
+           f"by more than x{AUTO_PINT_SUSC_FACTOR:g} inside the interval, q < {EVAL_PINT_POOR_Q:g}, "
            f"f < {EVAL_PINT_POOR_F:g} or |k| NRM->n2 > {EVAL_PINT_POOR_K:g};",
            f"marginal: q < {EVAL_PINT_MARGINAL_Q:g}, f < {EVAL_PINT_MARGINAL_F:g}, |k| > {EVAL_PINT_MARGINAL_K:g}, "
-           f"beta > {EVAL_PINT_MARGINAL_BETA:g}, MAD > {EVAL_PINT_MARGINAL_MAD:g} or DANG > {EVAL_PINT_MARGINAL_DANG:g}. "
+           f"beta > {EVAL_PINT_MARGINAL_BETA:g}, MAD > {EVAL_PINT_MARGINAL_MAD:g}, DANG > {EVAL_PINT_MARGINAL_DANG:g} "
+           f"or a two-slope diagram (>= {100 * AUTO_PINT_MAX_SKIPPED:.0f}% of the same component before the interval). "
            f"excellent: good, and q >= {EVAL_PINT_EXCELLENT_Q:g}, f >= {EVAL_PINT_EXCELLENT_F:g}, "
            f"|k| <= {EVAL_PINT_EXCELLENT_K:g}, beta <= {EVAL_PINT_EXCELLENT_BETA:g}, MAD <= {EVAL_PINT_EXCELLENT_MAD:g}, "
            f"DANG <= {EVAL_PINT_EXCELLENT_DANG:g}, every pTRM check of the interval <= "

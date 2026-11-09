@@ -150,6 +150,7 @@ from paleointensity import (
     AUTO_PINT_NRM_START_MAX_ANGLE,
     AUTO_PINT_NRM_START_MIN_LOSS,
     AUTO_PINT_MAX_SSE,
+    AUTO_PINT_SUSC_FACTOR,
     AUTO_PINT_MIN_F,
     AUTO_PINT_MIN_Q,
     read_pmagint,
@@ -1975,8 +1976,82 @@ class STARpaleomagApp:
         # la fin des conversions"). AVANT self._afficher(msg), meme
         # raison que ouvrir_convert_legacy_dialog.
         self._load_data_file(output_path, announce=False)
+        # .pmagint calcule directement a partir du fichier redo (intervalles
+        # publies) - demande explicite utilisateur ("lors de l'importation
+        # des contributions Magic avec des paleointensites, faire le
+        # .pmagint directement a partir du redo sans que l'utilisateur
+        # n'ait a le faire manuellement").
+        if redo_pint_path and nb_pint:
+            self._afficher(
+                f"\nComputing the paleointensities of the {nb_pint} published interval(s) "
+                f"(native calculation + PmagPy) -> .pmagint ...\n")
+            n_written = self._pmagint_from_redo(redo_pint_path)
+            pint_note = (f"Paleointensity: {n_written} of {nb_pint} published interval(s) recomputed and "
+                         f"written to {os.path.basename(pmagint_path_for(self.results_path))}"
+                         + (f" ({nb_pint - n_written} not computed: specimen or interval not found in "
+                            f"the measurements, or no lab field)" if n_written < nb_pint else "") + "\n")
+            msg = msg.replace("(use View Paleoint Results... to replay them)\n", pint_note)
         self._afficher(msg)
         self._showinfo("Conversion complete", msg.replace(ERROR_MARK, ""))
+
+    def _pmagint_from_redo(self, redo_path):
+        """Rejoue sans interaction un fichier redo (specimen Tmin Tmax
+        [cooling] [aniso]) et ecrit le .pmagint - meme calcul que "Rapid
+        view/recompute from redo file..." (ouvrir_openfilepint_dialog,
+        reutilise tel quel) : les reponses sont donnees automatiquement
+        (Entree = specimen suivant, valeurs par defaut, pas de sauvegarde
+        de la direction ancree dans .pmagres), le detail n'est pas affiche,
+        seule une progression l'est. Retourne le nombre de lignes ecrites."""
+        try:
+            with open(redo_path, "r", encoding="iso-8859-1", errors="replace") as f:
+                n_entries = sum(1 for l in f if len(l.split()) >= 3 and not l.strip().startswith("!"))
+        except OSError:
+            return 0
+        pmagint_path = pmagint_path_for(self.results_path) if self.results_path else None
+        if not n_entries or not pmagint_path:
+            return 0
+
+        def count_lines():
+            if not os.path.exists(pmagint_path):
+                return 0
+            with open(pmagint_path, encoding="utf-8", errors="replace") as fh:
+                return sum(1 for l in fh if l.strip() and not l.startswith("#") and not l.startswith("specimen"))
+
+        before = count_lines()
+        state = {"n": 0}
+        orig_aff = self._afficher
+        orig_ask = filedialog.askopenfilename
+        orig_sel = self.selection
+
+        def auto_input(prompt, default=""):
+            p = prompt.strip()
+            if p.startswith("Type the line number"):
+                state["n"] += 1
+                if state["n"] == 1:
+                    return "1"
+                if state["n"] > n_entries:
+                    return "q"
+                if state["n"] % 50 == 0:
+                    orig_aff(f"  {state['n']}/{n_entries}\n")
+                    self.root.update_idletasks()
+                return ""
+            if "Save the anchored direction" in p:
+                return "n"
+            return default
+
+        try:
+            self._console_input = auto_input
+            self._afficher = lambda *a, **k: None
+            self._refresh_current_graphic = lambda *a, **k: None
+            filedialog.askopenfilename = lambda **k: redo_path
+            self.ouvrir_openfilepint_dialog()
+        finally:
+            for name in ("_console_input", "_afficher", "_refresh_current_graphic"):
+                self.__dict__.pop(name, None)  # retour aux methodes de la classe
+            filedialog.askopenfilename = orig_ask
+            self.selection = orig_sel
+            self._tag_selection(self.selection)
+        return count_lines() - before
 
     def _run_magic_check(self, path, output_path):
         """Controle detaille de la contribution (voir magic_check.py) -
@@ -3709,6 +3784,10 @@ class STARpaleomagApp:
                 f" Start from the NRM: the first step ({points[1].temp:g}) removed "
                 f"{100 * auto.nrm_loss:.0f}% of the NRM, parallel to the ChRM ({auto.nrm_angle:.0f} deg)\n"
                 f"   -> virtual NRM point (0,1) added as point 1 (step 0), the other points are renumbered +1")
+        if auto.susc_temp is not None:
+            lines.append(
+                f" Susceptibility changed drastically: x{auto.susc_ratio:.2f} at {auto.susc_temp:g} "
+                f"(confirmed by the next measurement)\n   -> steps from {auto.susc_temp:g} on are not used")
         if auto.n1 is None:
             lines.append(f" Automatic interpretation: REJECTED - {auto.reason}")
         else:
@@ -4265,6 +4344,8 @@ class STARpaleomagApp:
             points = auto.points
             cut = "start from the NRM (first step removed " \
                 f"{100 * auto.nrm_loss:.0f}%, {auto.nrm_angle:.0f} deg from the ChRM)" if auto.from_nrm else ""
+            if auto.susc_temp is not None:
+                cut += ("; " if cut else "") + f"from {auto.susc_temp:g} on left out: susceptibility x{auto.susc_ratio:.2f}"
             if auto.failed_check is not None and auto.n_max < len(points):
                 cut += ("; " if cut else "") + f"from {points[auto.n_max].temp:g} on left out: pTRM check {100 * auto.check_gap:.0f}% of the TRM"
             arch = archived.get(ech.id.strip())
@@ -4364,7 +4445,8 @@ class STARpaleomagApp:
             f"f>={AUTO_PINT_MIN_F:g}, q>={AUTO_PINT_MIN_Q:g},")
         out.append(
             f"linear (circle-fit SSE<={AUTO_PINT_MAX_SSE:g}), diagram not curved from the NRM to n2 (|k|<={AUTO_PINT_MAX_K_ORIGIN:g}), lowest possible start,\n"
-            f"no step from a pTRM check differing by > {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM and confirmed by the next one;")
+            f"no step from a pTRM check differing by > {100 * AUTO_PINT_MAX_CHECK:.0f}% of the TRM and confirmed by the next one,\n"
+            f"nor from a drastic change of susceptibility (x{AUTO_PINT_SUSC_FACTOR:g} or /{AUTO_PINT_SUSC_FACTOR:g}, confirmed);")
         out.append(
             f"start from the NRM (0,1) when the first step removed >= {100 * AUTO_PINT_NRM_START_MIN_LOSS:.0f}% "
             f"of the NRM within {AUTO_PINT_NRM_START_MAX_ANGLE:g} deg of the ChRM.")
