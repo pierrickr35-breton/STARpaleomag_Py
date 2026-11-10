@@ -23,7 +23,7 @@ from import_new_data import (
     parse_jr6_file, parse_legacy_new_measurements, parse_minispin_file, archive_new_measurements,
 )
 from convert_ren_to_r import convert_file as convert_ren_to_r_file
-from convert_magic_to_r import convert_magic_file, scan_dip_sign, scan_site_coordinates
+from convert_magic_to_r import convert_magic_file, orientation_source_note, scan_dip_sign, scan_site_coordinates
 from magic_check import check_contribution, check_folder, report_path_for
 from convert_utrecht_to_r import convert_files as convert_utrecht_files
 from convert_ipgp_to_r import convert_files as convert_ipgp_files
@@ -32,7 +32,10 @@ from convert_pmd_to_r import convert_files as convert_pmd_files, list_pmd_files
 from convert_jr6_paleo_to_r import (
     convert_file as convert_jr6_paleo_file, read_jr6_paleo_file as read_jr6_paleo,
 )
+from dataclasses import replace as _dc_replace
 from irm import build_irm_figure, has_irm_data
+from magstrat import (StratPoint, angular_deviation, build_magstrat_figure, gad_inclination,
+                      polarity_of, polarity_zones)
 from selection import (
     select_samples,
     select_samples_by_site,
@@ -45,6 +48,7 @@ from selection import (
     sample_info,
     _build_selected_sample,
     polere,
+    apply_orientation,
 )
 from interpretation_quality import evaluate_result, evaluate_results, format_quality_report
 from interpretation_audit import audit_results, format_site_section
@@ -116,6 +120,8 @@ from calcul import (
     compute_anicor_factor,
     _ANI_CODE2,
     _correct_dec_inc,
+    dir_to_vgp,
+    fisher_mean,
     _unit_vector,
     mean_components,
 )
@@ -424,6 +430,7 @@ class STARpaleomagApp:
         self._help_anchor = None
         self._current_graphic = None  # ("zijderveld", sample_id) / ("stereo"|"xygraph"|"susceptibility"|"arai", None)
         self._arai_state = None  # (ech, points, checks, arno, fit_ou_None, hlab) pour kind=="arai"
+        self._magstrat_state = None  # (points, titre, lat, attendue) pour kind=="magstrat"
         self._paleoint_review_state = None  # (ech, points, checks, arno, fit) pour kind=="paleoint_review"
 
         self._setup_menu()
@@ -820,6 +827,8 @@ class STARpaleomagApp:
         graph_menu.add_command(label=self._labeled("Susceptibility", "suscep"),
                                 command=self._menu_cmd("graphics-plots", self.afficher_susceptibilite))
         graph_menu.add_command(label="Plot IRM", command=self._menu_cmd("graphics-plots", self.afficher_irm))
+        graph_menu.add_command(label="Magnetostratigraphy (Dec/Inc vs height)...",
+                                command=self._menu_cmd("graphics-plots", self.afficher_magstrat))
         graph_menu.add_separator()
         graph_menu.add_command(label="Clear Screen",
                                 command=self._menu_cmd("graphics-session", self.clear_screen))
@@ -961,6 +970,14 @@ class STARpaleomagApp:
             build_irm_figure(self.selection, fig=self.fig)  # appelle deja fig.tight_layout()
             self._redraw_canvas()
             return
+        elif kind == "magstrat":
+            if self._magstrat_state is None:
+                return
+            points, title, lat, third, reference = self._magstrat_state
+            self.fig.set_size_inches(6.5 if third is None else 8.0, 8.5, forward=True)
+            build_magstrat_figure(points, fig=self.fig, title=title, lat=lat, third=third, reference=reference)
+            self._redraw_canvas()
+            return
         elif kind == "arai":
             if self._arai_state is None:
                 return
@@ -1050,6 +1067,8 @@ class STARpaleomagApp:
             self._show_pick_info(f"[XY graph] {item}\n")
         elif kind == "irm_specimen":
             self._show_pick_info(f"[IRM] {item}\n")
+        elif kind == "magstrat_point":
+            self._show_pick_info(f"[Magnetostratigraphy] {item}\n")
         elif kind == "arai_point":
             # Memes colonnes/unites que le tableau imprime (voir
             # _arai_step_tables) : "n" = numero de la ligne du tableau.
@@ -1844,8 +1863,7 @@ class STARpaleomagApp:
             dip_warning_note = (
                 f"WARNING: {dip_scan['n_positive']}/{dip_scan['n_total']} dip value(s) "
                 f"({pct:.0f}%) found in this file are positive "
-                f"({dip_scan['n_from_specimen']} from specimen-level orientation, the "
-                f"rest from sample-level).\n"
+                f"({orientation_source_note(dip_scan)}).\n"
                 "In practice, the raw MagIC dip (angle of the core's X axis from the "
                 "horizontal) should only ever be negative or zero - a positive value "
                 "signals a problem, most likely that this contribution already recorded "
@@ -3692,6 +3710,229 @@ class STARpaleomagApp:
             )
             return
         self._current_graphic = ("irm", None)
+        self._refresh_current_graphic()
+
+    def afficher_magstrat(self):
+        """Magnetostratigraphie : declinaison (gauche) et inclinaison
+        (droite) en fonction de `stratigraphic_height` - demande explicite
+        utilisateur (voir magstrat.py). Source : resultats specimen d'une
+        composante (droites) ou mesure a un palier donne ; panneau
+        optionnel d'ecart angulaire a une direction attendue (comme
+        lismesdepth)."""
+        if not self.selection:
+            self._showwarning("No selection", "Select some samples first.")
+            return
+        self.text_area.insert(tk.END, "\n--- Magnetostratigraphy plot (Escape to cancel) ---\n", "prompt")
+        heights = self._prompt_magstrat_heights()
+        if not heights:
+            if heights is not None:
+                self._showwarning("No stratigraphic height",
+                                  "No stratigraphic_height for the selection. Fill it in with PmagFile -> "
+                                  "Complete sample information...")
+            return
+        orientation = self.orientation.get()
+        if orientation == 1:
+            orientation = 2
+            self._afficher("Specimen coordinates make no sense here: directions plotted in situ.\n")
+        by_id = {e.id: e for e in self.selection}
+
+        results = list(self.results)
+        if not results and self.results_path and os.path.exists(self.results_path):
+            results = [r for r in _iter_result_lines(self.results_path) if not r.id.startswith("mean")]
+        results = [r for r in results if not r.id.startswith("mean") and r.id in by_id]
+        src = self._console_input(
+            "Plot specimen results (r) or the direction at one demagnetization step (s): ",
+            "r" if results else "s")
+        if src is None:
+            return
+        points = []
+        if src.strip().lower().startswith("r"):
+            if not results:
+                self._showwarning("No results", "No specimen result for the selection.")
+                return
+            comps = sorted({r.component or "A" for r in results})
+            comp = self._console_input(f"Component ({'/'.join(comps)}): ", comps[0])
+            if comp is None:
+                return
+            comp = (comp.strip() or comps[0]).upper()
+            latest = {}
+            n_planes = 0
+            for r in results:
+                if (r.component or "A") != comp:
+                    continue
+                if r.cat1 != "L":
+                    n_planes += r.cat1 == "P"
+                    continue
+                latest[r.id] = r  # derniere interpretation de chaque specimen
+            for sid, r in latest.items():
+                h = heights.get(sid)
+                if h is None:
+                    continue
+                # direction archivee en repere echantillon : orientation du
+                # specimen reprise des donnees (non stockee dans le .pmagres)
+                e = by_id[sid]
+                r = _dc_replace(r, cin=e.cin, caz=e.caz, dip=e.dip, str_=e.str_)
+                dec, inc = _correct_dec_inc(r, orientation)
+                points.append(StratPoint(h, dec, inc, sid,
+                                         info=f"{comp} {r.cat1} {r.step_first:g}-{r.step_last:g} MAD {r.mad:.1f}"))
+            label = f"component {comp} (lines)"
+            if n_planes:
+                self._afficher(f"{n_planes} great circle(s) of component {comp} not plotted.\n")
+        else:
+            # famille de traitement de chaque specimen (majorite de ses
+            # paliers hors NRM) - selection mixte TH + AF : une valeur de
+            # palier par famille (demande explicite utilisateur : "si il y
+            # a TH et AF demander valeur etape en TH et etape en AF")
+            af_codes, th_codes = ("A", "F"), ("D", "T", "S", "K")
+
+            def family(ech):
+                n_af = sum(1 for m in ech.mesures if m.cod1 in af_codes and m.etape > 0)
+                n_th = sum(1 for m in ech.mesures if m.cod1 in th_codes and m.etape > 0)
+                return "AF" if n_af > n_th else "TH" if n_th else None
+
+            fam = {sid: family(by_id[sid]) for sid in heights if sid in by_id}
+            present = [f for f in ("TH", "AF") if f in fam.values()] or ["TH"]
+            steps = {}
+            # palier unique ("20") ou intervalle ("60-80") - demande explicite
+            # utilisateur ("proposer un range 60 - 80 mT ou 400 - 500 deg") :
+            # sur un intervalle, moyenne de Fisher des directions des paliers
+            # du specimen compris dedans (tolerance 0.5 : paliers 400.1...)
+            for f in present:
+                unit = "°C" if f == "TH" else "mT"
+                prompt = (f"{'Thermal' if f == 'TH' else 'AF'} step or range ({unit}, e.g. "
+                          f"{'400 or 400-500' if f == 'TH' else '20 or 60-80'}; 0 = NRM): " if len(present) > 1
+                          else f"Demagnetization step or range ({unit}, e.g. "
+                               f"{'400 or 400-500' if f == 'TH' else '20 or 60-80'}; 0 = NRM): ")
+                step_s = self._console_input(prompt, "0")
+                if step_s is None:
+                    return
+                mr = re.match(r"^\s*([\d.]+)\s*(?:-|–|to|a|à)?\s*([\d.]+)?\s*$", step_s or "0")
+                try:
+                    lo = float(mr.group(1))
+                    hi = float(mr.group(2)) if mr.group(2) else lo
+                except (AttributeError, ValueError):
+                    self._showerror("Error", "Give a step (20) or a range (60-80).")
+                    return
+                steps[f] = (min(lo, hi), max(lo, hi))
+            detail = {}
+            for sid, h in heights.items():
+                ech = by_id.get(sid)
+                if ech is None:
+                    continue
+                f = fam.get(sid) or present[0]
+                lo, hi = steps.get(f, (0.0, 0.0))
+                codes = af_codes if f == "AF" else th_codes
+                if hi == 0:
+                    ms = [m for m in ech.mesures if m.etape == 0][:1]
+                elif lo == hi:
+                    m = min((m for m in ech.mesures if m.cod1 in codes and abs(m.etape - lo) < 0.5),
+                            key=lambda m: abs(m.etape - lo), default=None)
+                    ms = [m] if m is not None else []
+                else:
+                    seen, ms = set(), []
+                    for m in ech.mesures:  # premiere mesure de chaque palier
+                        if ((m.cod1 in codes or (lo == 0 and m.etape == 0))
+                                and lo - 0.5 < m.etape < hi + 0.5 and m.etape not in seen):
+                            seen.add(m.etape)
+                            ms.append(m)
+                dirs, names = [], []
+                for m in ms:
+                    if m.x or m.y or m.z:
+                        _, d, i = polere(*apply_orientation(m.x, m.y, m.z, ech, orientation))
+                        dirs.append((d, i))
+                        names.append("NRM" if m.etape == 0 else
+                                     f"step {m.cod1} {m.etape:g} {'mT' if m.cod1 in af_codes else '°C'}")
+                if not dirs:
+                    continue
+                if len(dirs) == 1:
+                    dec, inc = dirs[0]
+                    info = names[0]
+                else:
+                    fm = fisher_mean(dirs)
+                    dec, inc = fm.dec, fm.inc
+                    detail[sid] = (len(dirs), fm.a95)
+                    info = f"mean of {len(dirs)} steps {lo:g}-{hi:g} {'mT' if f == 'AF' else '°C'} (a95 {fm.a95:.1f})"
+                points.append(StratPoint(h, dec, inc, sid, info=info,
+                                         steps=[[d, i, None, None, nm] for (d, i), nm in zip(dirs, names)]
+                                         if len(dirs) > 1 else None))
+            parts = []
+            for f in present:
+                n_f = sum(1 for p in points if (fam.get(p.specimen) or present[0]) == f)
+                lo, hi = steps[f]
+                u = "°C" if f == "TH" else "mT"
+                txt = "NRM" if hi == 0 else (f"{f} {lo:g} {u}" if lo == hi else f"{f} {lo:g}-{hi:g} {u}")
+                parts.append(txt + (f" ({n_f})" if len(present) > 1 else ""))
+            label = "NRM" if all(hi == 0 for _lo, hi in steps.values()) else " + ".join(parts)
+            missing = len([s for s in heights if s in by_id]) - len(points)
+            if missing:
+                self._afficher(f"{missing} specimen(s) without that step - not plotted.\n")
+            if detail:
+                ns = [n for n, _ in detail.values()]
+                a95s = sorted(a for _, a in detail.values())
+                self._afficher(
+                    f"Range: Fisher mean of the step directions of each specimen (filled; the steps as open "
+                    f"circles) - {min(ns)} to {max(ns)} steps, "
+                    f"a95 median {a95s[len(a95s) // 2]:.1f} deg, max {a95s[-1]:.1f} deg"
+                    + (" (" + ", ".join(f"{sid} {a:.0f}" for sid, (n, a) in sorted(detail.items(), key=lambda x: -x[1][1])
+                                       if a > 15) + " above 15 deg)" if a95s[-1] > 15 else "") + ".\n")
+        if not points:
+            self._showwarning("Nothing to plot", "No direction with a stratigraphic height.")
+            return
+
+        # VGP (coordonnees du site) et angle de renversement (angle a une
+        # direction normale de reference, GAD par defaut) calcules pour tous
+        # les points : ils servent aussi a la colonne de polarite (latitude
+        # du VGP en priorite, sinon angle < 90 deg = normal)
+        lats = [by_id[p.specimen].lat for p in points if by_id[p.specimen].lat]
+        lat = sum(lats) / len(lats) if lats else None
+        has_site = all(by_id[p.specimen].lat or by_id[p.specimen].rlong for p in points)
+        third = self._console_input(
+            "Third panel: VGP latitude (v), reversal angle (a), none (n): ", "v" if has_site else "a")
+        if third is None:
+            return
+        third = {"v": "vgp", "a": "angle"}.get(third.strip().lower()[:1], None)
+        if third == "vgp" and not has_site:
+            self._afficher("No site coordinates (lat/lon) for some specimens: reversal angle plotted instead.\n")
+            third = "angle"
+        gad = round(gad_inclination(lat), 1) if lat is not None else 0.0
+        reference = (0.0, gad)
+        if third == "angle":
+            d_s = self._console_input("Reference normal direction - declination: ", "0.0")
+            if d_s is None:
+                return
+            i_s = self._console_input("Reference normal direction - inclination (default GAD): ", f"{gad:g}")
+            if i_s is None:
+                return
+            try:
+                reference = (float(d_s or 0), float(i_s or gad))
+            except ValueError:
+                self._showerror("Error", "Declination / Inclination must be numbers.")
+                return
+        for p in points:
+            p.deviation = angular_deviation(p.dec, p.inc, *reference)
+            e = by_id[p.specimen]
+            if has_site:
+                p.vgp_lat = dir_to_vgp(p.dec, p.inc, e.lat, e.rlong)[0]
+            for st in p.steps or []:
+                st[3] = angular_deviation(st[0], st[1], *reference)
+                if has_site:
+                    st[2] = dir_to_vgp(st[0], st[1], e.lat, e.rlong)[0]
+
+        coord = "in situ" if orientation == 2 else "tilt corrected"
+        title = f"{label}, {coord} - {len(points)} specimens"
+        self._magstrat_state = (points, title, lat, third, reference)
+        lines = [f"{'height':>8s}  {'specimen':12s} {'dec':>6s} {'inc':>6s} {'VGPlat':>7s} {'angle':>6s}  pol"]
+        for p in sorted(points, key=lambda p: p.height):
+            vl = f"{p.vgp_lat:7.1f}" if p.vgp_lat is not None else f"{'-':>7s}"
+            lines.append(f"{p.height:8.2f}  {p.specimen:12s} {p.dec:6.1f} {p.inc:6.1f} {vl} {p.deviation:6.1f}  "
+                         f"{polarity_of(p) or '?'}")
+        zones = polarity_zones(points)
+        lines.append("Polarity zones (bottom-top, N = normal, R = reverse, ? = undetermined): "
+                     + "; ".join(f"{z[2]} {z[0]:g}-{z[1]:g} m ({z[3]} level{'s' if z[3] > 1 else ''})"
+                                 for z in zones))
+        self._afficher(f"Magnetostratigraphy: {title} - reversal angle to {reference[0]:g}/{reference[1]:g}\n"
+                       + "\n".join(lines) + "\n")
+        self._current_graphic = ("magstrat", None)
         self._refresh_current_graphic()
 
     def _anchored_direction_fit_result(self, ech, direction, points, n1, n2):

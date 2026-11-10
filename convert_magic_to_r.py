@@ -392,7 +392,7 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
     converted_ids = {row.get("specimen", "") for row in tables.get("measurements", [])}
     converted_ids.discard("")
 
-    n_total = n_positive = n_negative = n_zero = n_from_specimen = 0
+    n_total = n_positive = n_negative = n_zero = n_from_specimen = n_positive_specimen = 0
     max_abs_negative = None
     for specimen_id in converted_ids:
         spec_row = specimens.get(specimen_id)
@@ -405,6 +405,8 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
             n_from_specimen += 1
         if dip_raw > 0:
             n_positive += 1
+            if from_specimen:
+                n_positive_specimen += 1
         elif dip_raw < 0:
             n_negative += 1
             max_abs_negative = max(max_abs_negative or 0.0, -dip_raw)
@@ -418,12 +420,29 @@ def scan_dip_sign(path_in: str) -> Dict[str, object]:
         "n_negative": n_negative,
         "n_zero": n_zero,
         "n_from_specimen": n_from_specimen,
+        "n_positive_specimen": n_positive_specimen,
         "max_abs_negative": max_abs_negative,
         "majority_positive": majority_positive,
         "looks_like_utrecht": (
             majority_positive and n_negative > 0 and max_abs_negative <= 30.0
         ),
     }
+
+
+def orientation_source_note(dip_scan: Dict[str, object]) -> str:
+    """Table MagIC ou se trouvent les dips positifs (samples et/ou
+    specimens), en clair - l'ancien libelle "(0 from specimen-level
+    orientation, the rest from sample-level)" n'etait pas compris par
+    l'utilisateur ("what does that mean" - "it is an error at sample
+    level") : c'est la table a corriger dans la contribution qu'il faut
+    nommer."""
+    npos = dip_scan["n_positive"]
+    nps = dip_scan.get("n_positive_specimen", 0)
+    if nps == 0:
+        return "all in the samples table (sample dip): the error is at sample level"
+    if nps == npos:
+        return "all in the specimens table (specimen dip): the error is at specimen level"
+    return f"{npos - nps} in the samples table, {nps} in the specimens table"
 
 
 def _orientation_source(spec_row, sample_row) -> Tuple[Optional[float], Optional[float], bool]:
@@ -1117,8 +1136,8 @@ if __name__ == "__main__":
         pct = 100.0 * dip_scan["n_positive"] / dip_scan["n_total"]
         print(
             f"WARNING: {dip_scan['n_positive']}/{dip_scan['n_total']} dip value(s) "
-            f"({pct:.0f}%) in this file are positive ({dip_scan['n_from_specimen']} "
-            "from specimen-level orientation) - in practice raw MagIC dip should only "
+            f"({pct:.0f}%) in this file are positive ({orientation_source_note(dip_scan)})"
+            " - in practice raw MagIC dip should only "
             "ever be negative or zero. Check --dip-mode raw/utrecht if this "
             "contribution did not use the standard MagIC convention.\n"
         )
