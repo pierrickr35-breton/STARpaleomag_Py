@@ -1866,10 +1866,15 @@ class STARpaleomagApp:
                 f"({orientation_source_note(dip_scan)}).\n"
                 "In practice, the raw MagIC dip (angle of the core's X axis from the "
                 "horizontal) should only ever be negative or zero - a positive value "
-                "signals a problem, most likely that this contribution already recorded "
-                "dip in the STARpaleomag_Py convention (cin) instead of the raw MagIC "
-                "one.\n"
+                "means that the dip was not entered in the MagIC convention by the "
+                "authors of this contribution.\n"
             )
+            # demande explicite utilisateur ("Why most likely that this
+            # contribution already recorded dip in the STARpaleomag_Py
+            # convention (cin)") : hypothese abandonnee - une contribution
+            # d'un autre laboratoire n'a aucune raison d'utiliser la
+            # convention STARpaleomag_Py ; la cause probable (Utrecht) n'est
+            # avancee que si la signature est la (paragraphe suivant).
             # Signature Utrecht - demande explicite utilisateur ("I was
             # right to suspect the Utrecht flaw... the few negative
             # values in this magic files are explained exactly by the
@@ -1885,7 +1890,9 @@ class STARpaleomagApp:
                     f"small (max {dip_scan['max_abs_negative']:.0f} degrees) - this "
                     "matches the Utrecht convention (a portable drill goes from "
                     "vertical down to horizontal, rarely a few degrees past it, "
-                    "almost never near 45 degrees upward).\n"
+                    "almost never near 45 degrees upward): the most likely cause is "
+                    "a contribution prepared with the Utrecht convention "
+                    "(choice 2 below).\n"
                 )
             # Affiche IMMEDIATEMENT (tag "warn", voir WARN_MARK) pour donner
             # le contexte de la question qui suit - MAIS ce console sera
