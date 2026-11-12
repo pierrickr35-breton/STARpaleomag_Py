@@ -799,8 +799,6 @@ class STARpaleomagApp:
                                  command=self._menu_cmd("calcul-diffsub", self.afficher_diff_measurements))
         calcul_menu.add_command(label="Subtraction...",
                                  command=self._menu_cmd("calcul-diffsub", self.ouvrir_subtraction_dialog))
-        calcul_menu.add_command(label="Autoinverse",
-                                 command=self._menu_cmd("calcul-diffsub", lambda: self._not_implemented("Autoinverse")))
         calcul_menu.add_separator()
         calcul_menu.add_command(label="Detect GRM...",
                                  command=self._menu_cmd("calcul-grm", self.ouvrir_detect_grm_dialog))
