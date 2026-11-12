@@ -8,6 +8,15 @@ authors:
     given-names: Pierrick
     affiliation: "Paleomagnetist - Retired - France"
     orcid: "https://orcid.org/0000-0002-1145-6658"
+doi: "10.5281/zenodo.24170591"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.24170591"
+    description: "Concept DOI: all versions (resolves to the latest)"
+  - type: doi
+    value: "10.5281/zenodo.24170592"
+    description: "Version v1.3.0"
+version: "v1.3.0"
 repository-code: "https://github.com/pierrickr35-breton/STARpaleomag_Py"
 license: MIT
 date-released: 2026-11-12

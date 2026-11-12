@@ -1,5 +1,7 @@
 # STARpaleomag_Py
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24170591.svg)](https://doi.org/10.5281/zenodo.24170591)
+
 Paleomagnetism and rock-magnetism data analysis (demagnetization diagrams, component fitting, site means, paleointensity, anisotropy of remanence, MagIC import/export) — Python port of the Starmac software.
 
 STARpaleomag_Py is a plain **Python 3** program (Tkinter + Matplotlib). It runs on **Windows, Linux and macOS**. For Macs with an Apple Silicon processor, a ready-to-use application is also provided.
@@ -75,3 +77,9 @@ In the program: *Help > User Guide*. The same guide is in this repository: `help
 ## License
 
 MIT — see `LICENSE`.
+
+## How to cite
+
+Roperch, P. (2026). *STARpaleomag_Py* [Software]. Zenodo. https://doi.org/10.5281/zenodo.24170591
+
+This DOI covers all versions; please also give the version you used (each release has its own DOI on Zenodo). GitHub's "Cite this repository" button gives the same reference in APA and BibTeX.
