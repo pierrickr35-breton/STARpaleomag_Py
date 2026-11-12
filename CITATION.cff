@@ -1,0 +1,50 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below, with the date or commit of the version you used."
+type: software
+title: "STARpaleomag_Py: paleomagnetic data processing software"
+abstract: "Python software for paleomagnetic data processing: demagnetization diagrams, direction fitting (PCA, great circles, automatic interpretation), site means, paleointensity (Thellier-type, Arai diagrams), anisotropy of remanence, and MagIC import/export. Python version of the Starmac programs of the paleomagnetism laboratory of Rennes."
+authors:
+  - family-names: Roperch
+    given-names: Pierrick
+    affiliation: "Paleomagnetist - Retired - France"
+    orcid: "https://orcid.org/0000-0002-1145-6658"
+repository-code: "https://github.com/pierrickr35-breton/STARpaleomag_Py"
+license: MIT
+date-released: 2026-11-12
+keywords:
+  - paleomagnetism
+  - rock magnetism
+  - demagnetization
+  - paleointensity
+  - MagIC
+references:
+  - type: article
+    title: "PmagPy: Software package for paleomagnetic data analysis and a bridge to the Magnetics Information Consortium (MagIC) Database"
+    authors:
+      - family-names: Tauxe
+        given-names: Lisa
+      - family-names: Shaar
+        given-names: Ron
+      - family-names: Jonestrask
+        given-names: Lori
+      - family-names: Swanson-Hysell
+        given-names: Nicholas L.
+      - family-names: Minnett
+        given-names: Rupert
+      - family-names: Koppers
+        given-names: Anthony A. P.
+      - family-names: Constable
+        given-names: Catherine G.
+      - family-names: Jarboe
+        given-names: Nicholas
+      - family-names: Gaastra
+        given-names: Kristin
+      - family-names: Fairchild
+        given-names: Luke
+    journal: "Geochemistry, Geophysics, Geosystems"
+    volume: 17
+    issue: 6
+    start: 2450
+    end: 2463
+    year: 2016
+    doi: "10.1002/2016GC006307"
