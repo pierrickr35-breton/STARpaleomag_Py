@@ -170,6 +170,7 @@ from datatools import (
     remove_step,
     remove_bad_quality_steps,
     eliminate_grm,
+    has_grm_triplets,
     reduce_grm_before_fit,
     convert_z_minus,
     export_thellier_tdt,
@@ -3111,7 +3112,11 @@ class STARpaleomagApp:
         _ANISO_CODE_PRIORITY = ("A0", "AA", "F0", "N0")
         aniso_tensors = {}
         aniso_mean_tensors = {}
-        export_samples = list(self.selection)
+        # mesures BRUTES (triplets GRM compris) pour MagIC - voir _force_grm_reduction
+        export_samples = []
+        for e in self.selection:
+            raw = getattr(e, "_raw_mesures", None)
+            export_samples.append(_dc_replace(e, mesures=list(raw)) if raw is not None else e)
 
         # Specimen avec un resultat/une paleointensite archives mais SANS
         # mesure de desaimantation/paleointensite dans la selection
@@ -5338,6 +5343,13 @@ class STARpaleomagApp:
             ech = matches[0] if matches else None
             if ech is None:
                 continue
+            # ICI SEULEMENT, l'affichage montre les mesures avec les triplets
+            # GRM reduits (methode 1), comme le calcul de la droite - demande
+            # explicite utilisateur ("pour une meilleure visualisation des
+            # resultats"). `ech` est une copie : la selection et self.donnees
+            # gardent les mesures brutes.
+            if has_grm_triplets(ech):
+                eliminate_grm(ech, method=1)
             traite += 1
             self._clear_figure()
 
@@ -5657,6 +5669,8 @@ class STARpaleomagApp:
         ):
             return
         for ech in self.selection:
+            if has_grm_triplets(ech) and not hasattr(ech, "_raw_mesures"):
+                ech._raw_mesures = list(ech.mesures)
             n = eliminate_grm(ech, method=method)
             self._afficher(f"{ech.id}: {n} triplet(s) reduced ({len(ech.mesures)} measurements remaining).\n")
 
@@ -6450,12 +6464,32 @@ class STARpaleomagApp:
         utilisateur ("au cours de l'analyse en best fit, reduire les GRM
         d'abord si il y a des mesures en FX, FY et FZ"). Comme `Suppress
         GRM`, la reduction vaut pour la selection de cette session."""
-        done = reduce_grm_before_fit(self.selection, method=1)
-        if done:
+        self._force_grm_reduction(self.selection, "before fitting")
+
+    def _force_grm_reduction(self, samples, when=""):
+        """Reduction des triplets AF X/Y/Z (GRM), methode 1, JUSTE AVANT un
+        calcul (droites, plans) - pas a la selection, ni a l'affichage :
+        l'utilisateur doit pouvoir voir les donnees brutes et decide seul,
+        pour les autres options (XY...), de reduire ou non via Suppress GRM
+        (demande explicite). Pendant une commande d'ajustement (voir
+        _restore_grm_after), les mesures d'avant la reduction sont notees
+        et rendues a la selection a la fin de la commande. Les mesures
+        brutes sont aussi gardees (`_raw_mesures`) pour l'export MagIC."""
+        done = []
+        saved = getattr(self, "_grm_saved", None)
+        for ech in samples:
+            if has_grm_triplets(ech):
+                if saved is not None and id(ech) not in saved:
+                    saved[id(ech)] = list(ech.mesures)
+                if not hasattr(ech, "_raw_mesures"):
+                    ech._raw_mesures = list(ech.mesures)
+                done.append((ech.id, eliminate_grm(ech, method=1)))
+        if done and when:
             self._afficher(
-                f"GRM triplets (FX/FY/FZ) reduced before fitting on {len(done)} specimen(s): "
-                + ", ".join(f"{sid} ({n})" for sid, n, _ in done) + "\n"
+                f"GRM triplets (FX/FY/FZ) reduced (method 1) {when} on {len(done)} specimen(s): "
+                + ", ".join(f"{sid} ({n})" for sid, n in done) + "\n"
             )
+        return done
 
     def ouvrir_ajuslig_dialog(self):
         """Equivalent GUI de `ajuslig` (ajustement de droite par ACP,
@@ -8577,6 +8611,36 @@ class STARpaleomagApp:
                 details = ", ".join(f"{r.cat1}{r.component or 'A'}" for r in rs)
                 msg += f"   {sid}: {len(rs)} results ({details})\n"
         self._afficher(msg)
+
+
+def _restore_grm_after(fn):
+    """Commande d'ajustement : la reduction GRM (methode 1) faite juste avant
+    le calcul ne vaut que le temps de la commande ; a la fin, la selection
+    retrouve ses mesures d'avant (brutes, ou reduites par Suppress GRM si
+    l'utilisateur l'a choisi) - voir _force_grm_reduction."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        outer = getattr(self, "_grm_saved", None) is not None
+        if not outer:
+            self._grm_saved = {}
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            if not outer:
+                saved, self._grm_saved = self._grm_saved, None
+                for ech in self.selection:
+                    raw = saved.get(id(ech))
+                    if raw is not None:
+                        ech.mesures = raw
+    return wrapper
+
+
+for _name in ("ouvrir_ajuslig_dialog", "interpretation_toute_automatique", "interpretation_auto_par_site",
+              "ouvrir_autointerpretation_dialog", "ouvrir_ajusplans_dialog", "ouvrir_ajusfisher_dialog",
+              "ouvrir_ajusligauto_dialog"):
+    setattr(STARpaleomagApp, _name, _restore_grm_after(getattr(STARpaleomagApp, _name)))
 
 
 def _set_dock_icon(root):

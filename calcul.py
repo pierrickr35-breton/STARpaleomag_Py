@@ -2242,6 +2242,16 @@ def recompute_fit_geometry(res: FitResult, donnees) -> FitResult:
 
     if res.cat1 not in ("L", "P") or not getattr(ech, "mesures", None):
         return res
+    # Les triplets AF X/Y/Z (GRM) sont reduits avant tout best fit (methode 1,
+    # voir datatools.reduce_grm_before_fit) : le segment doit etre recalcule
+    # sur les memes mesures reduites, sinon l'ajustement sur les triplets bruts
+    # echoue (MAD/linearite) et la droite disparait du Zijderveld (15XL3103A,
+    # triplets 70-100 mT). Copie : les mesures chargees ne sont pas modifiees.
+    from datatools import eliminate_grm, has_grm_triplets
+    if has_grm_triplets(ech):
+        import copy as _copy
+        ech = _copy.deepcopy(ech)
+        eliminate_grm(ech, method=1)
     jdeb = next((i + 1 for i, m in enumerate(ech.mesures) if m.etape == res.step_first), None)
     jfin = next((i + 1 for i, m in enumerate(ech.mesures) if m.etape == res.step_last), None)
     if jdeb is None or jfin is None or jfin < jdeb:
