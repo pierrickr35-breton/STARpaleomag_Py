@@ -76,33 +76,82 @@ def _data_model_dir() -> Optional[str]:
 
 
 DATA_MODEL_URL = "https://magic.earthref.org/MagIC/data-models/3.0.json"
+# Vocabulaires controles et codes de methode : EarthRef ne les publie pas en
+# fichier JSON, mais ce sont les modules JavaScript du depot du site MagIC
+# (github.com/earthref/MagIC), ceux-la memes que l'outil de depot de MagIC
+# utilise pour valider - voir _js_object_to_json.
+VOCABULARIES_URL = ("https://raw.githubusercontent.com/earthref/MagIC/main/"
+                    "lib/modules/er/controlled_vocabularies.js")
+METHOD_CODES_URL = ("https://raw.githubusercontent.com/earthref/MagIC/main/"
+                    "lib/configs/magic/method_codes.js")
 _REFRESH_DAYS = 30
 
 
-def _cache_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".STARpaleomag_Py", "magic_data_model_3.0.json")
+def _cache_path(name: str = "magic_data_model_3.0.json") -> str:
+    return os.path.join(os.path.expanduser("~"), ".STARpaleomag_Py", name)
 
 
-def _bundled_path() -> str:
+def _bundled_path(name: str = "data_model_3.0.json") -> str:
     import sys
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "magic_model", "data_model_3.0.json")
+    return os.path.join(base, "magic_model", name)
 
 
-def _official_data_model() -> Tuple[Optional[dict], str]:
-    """Modele officiel MagIC 3.0 tel que publie par EarthRef - demande
-    explicite utilisateur ("est-ce possible de verifier aupres de
-    https://magic.earthref.org/MagIC/data-models/3.0") : la copie livree
-    avec PmagPy date de 2019 alors que le modele officiel continue d'evoluer
-    (colonnes ajoutees, bornes elargies - specimens.dip passe a -180/180,
-    samples.bed_dip n'a plus de borne, measurements.sequence n'est plus
-    obligatoire...). Ordre : copie locale rafraichie depuis EarthRef au plus
-    tous les 30 jours (delai de 5 s, sans bloquer si hors ligne), sinon la
-    copie livree avec STARpaleomag_Py (magic_model/). Retourne (modele,
-    provenance)."""
+def _js_object_to_json(text: str):
+    """Objet litteral d'un module JavaScript ("export const x = {...}") ->
+    objet Python. Les fichiers de vocabulaires et de codes de MagIC sont
+    deja du JSON a trois details pres : l'en-tete "export const", des
+    commentaires // ou /* */ et des virgules finales. Retire ces trois
+    choses (hors chaines) puis json.loads - donne exactement le meme
+    resultat que json5 sur les deux fichiers, sans ajouter de dependance."""
+    out = []
+    i, n, in_string = 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if c == "\\":
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        elif text.startswith("/*", i):
+            i = text.index("*/", i) + 2
+            continue
+        out.append(c)
+        i += 1
+    body = "".join(out)
+    body = re.sub(r",(\s*[}\]])", r"\1", body[body.index("{"):body.rindex("}") + 1])
+    return json.loads(body)
+
+
+def _official_file(url: str, cache_name: str, bundled_name: str, parse, valid) -> Tuple[Optional[object], str]:
+    """Fichier officiel MagIC (modele, vocabulaires ou codes de methode) -
+    demande explicite utilisateur ("est-ce possible de verifier aupres de
+    https://magic.earthref.org/MagIC/data-models/3.0", puis "il faudrait
+    verifier que le programme ne contienne pas des validations anterieures
+    au model 3.0") : les copies livrees avec PmagPy datent de 2019 alors que
+    MagIC continue d'evoluer (bornes elargies - specimens.dip passe a
+    -180/180, samples.bed_dip n'a plus de borne ; valeurs ajoutees aux
+    vocabulaires - 'u' pour result_quality et dir_polarity, Besnus et
+    Verwey pour critical_temp_type, les noms de laboratoires...). Ordre :
+    copie locale rafraichie depuis la source officielle au plus tous les 30
+    jours (delai de 5 s, sans bloquer si hors ligne), sinon la copie livree
+    avec STARpaleomag_Py (magic_model/). `parse` convertit le texte
+    telecharge, `valid` verifie le resultat avant de l'ecrire en cache.
+    Retourne (contenu, provenance)."""
     import time
     import urllib.request
-    cache = _cache_path()
+    cache = _cache_path(cache_name)
     fresh = os.path.exists(cache) and time.time() - os.path.getmtime(cache) < _REFRESH_DAYS * 86400
     if not fresh:
         try:
@@ -115,16 +164,17 @@ def _official_data_model() -> Tuple[Optional[dict], str]:
                 context = ssl.create_default_context(cafile=certifi.where())
             except ImportError:
                 context = ssl.create_default_context()
-            with urllib.request.urlopen(DATA_MODEL_URL, timeout=5, context=context) as response:
-                text = response.read().decode("utf-8-sig")
-            if "tables" in json.loads(text):
+            with urllib.request.urlopen(url, timeout=5, context=context) as response:
+                content = parse(response.read().decode("utf-8-sig"))
+            if valid(content):
                 os.makedirs(os.path.dirname(cache), exist_ok=True)
                 with open(cache, "w", encoding="utf-8") as f:
-                    f.write(text)
+                    json.dump(content, f)
         except Exception:
             pass
-    for path, origin in ((cache, f"EarthRef ({DATA_MODEL_URL})"), (_bundled_path(), "copy shipped with "
-                                                                    "STARpaleomag_Py")):
+    for path, origin in ((cache, f"official ({url}), refreshed {_file_day(cache)}"),
+                         (_bundled_path(bundled_name), "copy shipped with STARpaleomag_Py, "
+                                                       f"{_file_day(_bundled_path(bundled_name))}")):
         try:
             with open(path, encoding="utf-8-sig") as f:
                 return json.load(f), origin
@@ -133,64 +183,74 @@ def _official_data_model() -> Tuple[Optional[dict], str]:
     return None, ""
 
 
+def _file_day(path: str) -> str:
+    import time
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return "?"
+
+
+def _official_data_model() -> Tuple[Optional[dict], str]:
+    return _official_file(DATA_MODEL_URL, "magic_data_model_3.0.json", "data_model_3.0.json",
+                          json.loads, lambda d: isinstance(d, dict) and "tables" in d)
+
+
+def _official_vocabularies() -> Tuple[Optional[dict], str]:
+    return _official_file(VOCABULARIES_URL, "magic_controlled_vocabularies.json", "controlled_vocabularies.json",
+                          _js_object_to_json,
+                          lambda d: isinstance(d, dict) and len(d) > 20 and "lithology" in d)
+
+
+def _official_method_codes() -> Tuple[Optional[dict], str]:
+    return _official_file(METHOD_CODES_URL, "magic_method_codes.json", "method_codes.json",
+                          _js_object_to_json,
+                          lambda d: isinstance(d, dict) and sum(len(c.get("codes", [])) for c in d.values()) > 500)
+
+
 class DataModel:
+    """Modele, vocabulaires controles et codes de methode OFFICIELS de MagIC
+    (voir _official_file). Les copies de PmagPy (2019) ne servent qu'en
+    tout dernier recours, si ni la source officielle, ni le cache, ni la
+    copie livree avec STARpaleomag_Py ne sont lisibles - et le resume du
+    rapport le dit alors explicitement."""
+
     def __init__(self):
         folder = _data_model_dir()
-        if folder is None:
-            raise RuntimeError("PmagPy's MagIC data model files were not found")
 
-        def load(name):
+        def load_pmagpy(name):
+            if folder is None:
+                raise RuntimeError("no MagIC data model found (official copy and PmagPy's both missing)")
+            if name.startswith("controlled_vocabularies_"):
+                files = sorted(f for f in os.listdir(folder) if f.startswith("controlled_vocabularies_"))
+                if not files:
+                    return {}
+                name = files[-1]
             with open(os.path.join(folder, name), encoding="utf-8-sig") as f:
                 return json.load(f)
 
         model, self.origin = _official_data_model()
         if model is None:
-            model, self.origin = load("data_model.json"), "copy shipped with PmagPy"
+            model, self.origin = load_pmagpy("data_model.json"), "OUTDATED copy shipped with PmagPy (2019)"
         self.version = model.get("data_model_version", "?")
         self.updated = model.get("updated_day", "?")
         self.tables = model["tables"]
-        # Codes de methode officiels (magic_model/method_codes.json, telecharge
-        # par l'utilisateur depuis magic.earthref.org/MagIC/method-codes le
-        # 2026-10-21, 673 codes) plutot que la liste de PmagPy (2019, 630) :
-        # 47 codes ajoutes depuis (LP-T, LP-AF, LP-CA-*, LT-AF-Z-XYZ...), 4
-        # retires (LP-PI-CA-*, remplaces par LP-CA-*).
-        official_codes = os.path.join(os.path.dirname(_bundled_path()), "method_codes.json")
-        try:
-            with open(official_codes, encoding="utf-8-sig") as f:
-                code_tables = json.load(f)
-            self.codes_origin = "official list (October 2026)"
-        except (OSError, ValueError):
-            code_tables = load("method_codes.json")
-            self.codes_origin = "PmagPy list (2019)"
-        self.codes = {c["code"] for cat in code_tables.values() for c in cat["codes"]}
+
+        code_tables, self.codes_origin = _official_method_codes()
+        if code_tables is None:
+            code_tables, self.codes_origin = (load_pmagpy("method_codes.json"),
+                                              "OUTDATED copy shipped with PmagPy (2019)")
+        self.codes = {c["code"] for cat in code_tables.values() for c in cat.get("codes", [])}
         self.codes_upper = {c.upper(): c for c in self.codes}
-        vocab_files = sorted(f for f in os.listdir(folder) if f.startswith("controlled_vocabularies_"))
-        vocab = load(vocab_files[-1]) if vocab_files else {}
+
+        vocab, self.vocab_origin = _official_vocabularies()
+        if vocab is None:
+            vocab, self.vocab_origin = (load_pmagpy("controlled_vocabularies_"),
+                                        "OUTDATED copy shipped with PmagPy (2019)")
         self.vocab = {
-            name: {str(item["item"]) for item in entry.get("items", []) if "item" in item}
+            name: {str(item["item"]) for item in entry.get("items", []) if isinstance(item, dict) and "item" in item}
             for name, entry in vocab.items() if isinstance(entry, dict)
         }
-        # Listes officielles plus recentes livrees avec STARpaleomag_Py
-        # (magic_model/vocabulary_<nom>.txt, une valeur par ligne) : elles
-        # REMPLACENT celles de PmagPy (2019) - EarthRef ne publie plus ces
-        # listes en fichier ; "lithology" (1003 termes, oct. 2026, fournie
-        # par l'utilisateur) contient par exemple "Granitoid", absent de la
-        # liste de PmagPy et signale a tort auparavant.
-        self.updated_vocabularies = []
-        folder_model = os.path.dirname(_bundled_path())
-        try:
-            names = sorted(os.listdir(folder_model))
-        except OSError:
-            names = []
-        for fname in names:
-            m = re.match(r"vocabulary_(.+)\.txt$", fname)
-            if not m:
-                continue
-            with open(os.path.join(folder_model, fname), encoding="utf-8") as f:
-                terms = {line.strip() for line in f if line.strip() and not line.startswith("#")}
-            if terms:
-                self.vocab[m.group(1)] = terms
-                self.updated_vocabularies.append(m.group(1))
         self.vocab_upper = {name: {v.upper(): v for v in values} for name, values in self.vocab.items()}
 
     def columns(self, table: str) -> Dict[str, dict]:
@@ -879,10 +939,15 @@ def _check_measurements(tables: Dict[str, Table], report: Report):
     for k, r in enumerate(meas.rows):
         codes = _tokens(r.get("method_codes", ""))
         spec = r.get("specimen", "")
-        specimens_seen.add(spec)
-        # Magnetisme des roches (K-T, hysteresis, backfield) : mesures sans
-        # traitement de laboratoire - aucun code LT- attendu.
-        rockmag = any(c.startswith(("LP-X", "LP-HYS", "LP-BCR", "LP-IRM-DCD")) for c in codes)
+        # Magnetisme des roches (K-T, hysteresis, backfield, courbes MPMS
+        # basse temperature RT-SIRM/ZFC/FC) : courbes mesurees en fonction du
+        # champ ou de la temperature, pas des etapes de desaimantation -
+        # aucun code LT- attendu, pas de NRM, et des centaines de points au
+        # meme treat_dc_field ne sont pas des "etapes repetees".
+        rockmag = any(c.startswith(("LP-X", "LP-HYS", "LP-BCR", "LP-IRM-DCD", "LP-ZFC", "LP-FC",
+                                    "LP-PFC", "LP-CW-")) for c in codes)
+        if not rockmag:
+            specimens_seen.add(spec)
         if not rockmag and not any(c.startswith("LT-") for c in codes):
             report.add("WARNING", "Treatment codes",
                        "measurements without any LT- treatment code (only LP-/other codes): the type of step "
@@ -924,6 +989,8 @@ def _check_measurements(tables: Dict[str, Table], report: Report):
         if dc is not None and any(c in codes for c in ("LT-T-I", "LT-PTRM-I")) and abs(dc) > 1e-3:
             report.add("WARNING", "Units", "paleointensity laboratory field above 1000 uT - unit error?",
                        f"{_where(meas, k)}: {dc} T")
+        if rockmag:
+            continue
         is_nrm = "LT-NO" in codes or (not temp or temp <= 300) and not af and not dc and \
             not any(c.startswith(("LT-T", "LT-AF", "LT-IRM", "LT-M")) for c in codes)
         if is_nrm:
@@ -980,10 +1047,7 @@ def check_contribution(path: str) -> Report:
                        "use MagIC 3.0)")
     report.summary.append(f"  reference used for the checks: MagIC data model {model.version} updated "
                           f"{model.updated}, {model.origin}; method codes: {model.codes_origin}; controlled "
-                          "vocabularies: "
-                          + (f"{', '.join(model.updated_vocabularies)} from the official lists (October 2026), "
-                             "the others" if model.updated_vocabularies else "all")
-                          + " as shipped with PmagPy (2019)")
+                          f"vocabularies: {model.vocab_origin}")
 
     index: Dict[str, set] = {}
     for t in tables.values():

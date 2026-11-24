@@ -82,6 +82,7 @@ from calcul import (
     results_path_for,
     ani_path_for,
     pmagint_path_for,
+    _format_result_line,
     _iter_result_lines,
     find_duplicate_measurements,
     find_duplicate_results,
@@ -2976,14 +2977,14 @@ class STARpaleomagApp:
         extra_tables = None
         metadata_samples = []
         ans = self._console_input(
-            "Add rock-magnetic data (K-T, hysteresis) from a MagIC file made by "
+            "Add rock-magnetic data (K-T, hysteresis, MPMS) from a MagIC file made by "
             "StereoUtils_Py? y/N: ", "N")
         if ans is None:
             return
         if ans.strip().lower() == "y":
             # Plusieurs fichiers possibles (K-T + hysteresis).
             extra_paths = filedialog.askopenfilenames(
-                title="Rock-magnetic MagIC file(s) (K-T, hysteresis)",
+                title="Rock-magnetic MagIC file(s) (K-T, hysteresis, MPMS)",
                 filetypes=[("MagIC text", "*.txt"), ("All files", "*.*")])
             if extra_paths:
                 extra_tables = {}
@@ -3500,7 +3501,8 @@ class STARpaleomagApp:
         if not out_path:
             return
 
-        counts = export_stereo_project(self.results, out_path, orientation=orientation)
+        counts = export_stereo_project(self.results, out_path, orientation=orientation,
+                                       donnees=self._all_donnees)
         if not any(counts.values()):
             self._showinfo("Nothing to export", "No exportable line/plane/mean result found.")
             return
@@ -8401,32 +8403,20 @@ class STARpaleomagApp:
         return True
 
     def _reload_results_if_stale(self):
-        """Si results_path a change sur le disque depuis la derniere lecture
-        (mtime) - typiquement une edition manuelle/externe du .pmagres,
-        ex. un dedoublonnage ou une correction faite hors de l'appli -
-        self.results et self._archived_ids sont vides/recalcules avant
-        de charger, plutot que d'accumuler par-dessus un etat perime
-        (des resultats deja retires du fichier resteraient sinon
-        visibles en memoire) - demande explicite utilisateur ("is it
-        possible to reload the file before any selection of results:
-        this file is usually edited by the user"). Comportement
-        d'accumulation NORMAL (selres, "the selection of results should
-        not initialize the previous list") inchange tant que le fichier
-        n'a pas change entre deux selections consecutives. Partage entre
-        ouvrir_selres_dialog et ouvrir_select_results_by_site_dialog -
-        suppose que _require_results_file() vient deja de confirmer que
-        self.results_path existe."""
-        current_mtime = os.path.getmtime(self.results_path)
-        if self._results_path_mtime is not None and current_mtime != self._results_path_mtime:
-            if self.results:
-                self._afficher(
-                    f"({self.results_path} was modified on disk since it was last read - "
-                    f"reloading from disk, {len(self.results)} previously loaded result(s) "
-                    "discarded)\n"
-                )
-            self.results = []
-            self._archived_ids = None
-        self._results_path_mtime = current_mtime
+        """Chaque selection de resultats relit le .pmagres sur le disque
+        (load_results/_iter_result_lines ouvrent le fichier a chaque appel,
+        sans cache) - demande explicite utilisateur ("de recharger le
+        fichier est la solution la plus simple sans se preoccuper de ce qui
+        est en memoire"). La liste en memoire n'est JAMAIS reinitialisee ni
+        modifiee ici ("ne pas reinitialiser la liste en memoire lors du
+        rechargement... il doit pouvoir cumuler et verifier lui-meme ce
+        qu'il fait") : un resultat modifie a la main dans le fichier est
+        ajoute dans sa nouvelle version a cote de l'ancienne (voir le test
+        de doublon de ouvrir_selres_dialog, sur le resultat complet).
+        Seul le cache des `c` deja utilises (_archived_ids) est oublie,
+        pour que le prochain archivage relise lui aussi le fichier."""
+        self._archived_ids = None
+        self._results_path_mtime = os.path.getmtime(self.results_path)
 
     def ouvrir_selres_dialog(self):
         """Equivalent GUI de `selres` (dataselect.f) : charge des resultats
@@ -8516,13 +8506,15 @@ class STARpaleomagApp:
         # initialize the previous list").
         # un resultat deja selectionne n'est pas ajoute une seconde fois (ex.
         # mode 's' puis 'm' sur le meme site - demande explicite utilisateur)
-        def _key(r):
-            return (r.id, r.c, r.par3_mean, round(r.dec, 2), round(r.inc, 2), r.step_first, r.step_last)
-        already = {_key(r) for r in self.results}
+        # doublon = MEME LIGNE de .pmagres (toutes les colonnes, telles
+        # qu'ecrites dans le fichier) : une version modifiee a la main n'est
+        # pas un doublon et est ajoutee, l'utilisateur voit les deux
+        already = {_format_result_line(r) for r in self.results}
         fresh = []
         for r in new_matches:
-            if _key(r) not in already:
-                already.add(_key(r))
+            line = _format_result_line(r)
+            if line not in already:
+                already.add(line)
                 fresh.append(r)
         n_dup = len(new_matches) - len(fresh)
         self.results = self.results + fresh

@@ -1,5 +1,5 @@
 {
-	"updated_day": "2026:09:29",
+	"updated_day": "2026:10:22",
 	"published_day": "2017:09:29",
 	"data_model_version": "3.0",
 	"criteria_map": {
@@ -1537,7 +1537,9 @@
 					"description": "Location direction in coordinates specified by tilt correction, Inclination",
 					"validations": [
 						"min(-90)",
-						"max(90)"
+						"max(90)",
+						"requiredIf(\"dir_inc_flat_low\")",
+						"requiredIf(\"dir_inc_flat_high\")"
 					],
 					"previous_columns": [
 						{
@@ -1596,10 +1598,36 @@
 						}
 					]
 				},
+				"dir_inc_flat_low": {
+					"label": "Flattening Corrected Inclination Low",
+					"group": "Direction",
+					"position": 51,
+					"type": "Number",
+					"unit": "Degrees",
+					"description": "Location flattening-corrected inclination in coordinates specified by tilt correction, Lower bound",
+					"notes": "Numerically lower bound of the corrected inclination range (the steeper value for negative inclinations) resulting from the uncertainty in the flattening factor. Indicate the correction method (e.g. DA-DIR-FLAT-SVEI) and confidence level (e.g. SM-BOOT-95) with method codes",
+					"validations": [
+						"min(-90)",
+						"max(90)"
+					]
+				},
+				"dir_inc_flat_high": {
+					"label": "Flattening Corrected Inclination High",
+					"group": "Direction",
+					"position": 52,
+					"type": "Number",
+					"unit": "Degrees",
+					"description": "Location flattening-corrected inclination in coordinates specified by tilt correction, Upper bound",
+					"notes": "Numerically upper bound of the corrected inclination range resulting from the uncertainty in the flattening factor. Indicate the correction method (e.g. DA-DIR-FLAT-SVEI) and confidence level (e.g. SM-BOOT-95) with method codes",
+					"validations": [
+						"min(-90)",
+						"max(90)"
+					]
+				},
 				"dir_r": {
 					"label": "Direction R",
 					"group": "Direction",
-					"position": 51,
+					"position": 53,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Location direction in coordinates specified by tilt correction, Resultant Fisher vector",
@@ -1616,7 +1644,7 @@
 				"dir_k": {
 					"label": "Direction K",
 					"group": "Direction",
-					"position": 52,
+					"position": 54,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Location direction in coordinates specified by tilt correction, Fisher's dispersion parameter Kappa",
@@ -1649,7 +1677,7 @@
 				"dir_k_ratio": {
 					"label": "Direction Tilt K Ratio",
 					"group": "Direction",
-					"position": 53,
+					"position": 55,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Comparison of Fisher dispersion K after and before tilt correction",
@@ -1666,7 +1694,7 @@
 				"dir_polarity": {
 					"label": "Direction Polarity",
 					"group": "Direction",
-					"position": 54,
+					"position": 56,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Location direction polarity is normal (n), reversed (r), transitional (t), excursion (e) or intermediate (i)",
@@ -1677,7 +1705,7 @@
 				"dir_n_sites": {
 					"label": "Direction N Sites",
 					"group": "Direction",
-					"position": 55,
+					"position": 57,
 					"type": "Integer",
 					"description": "Number of sites included in directional calculations",
 					"validations": [
@@ -1705,7 +1733,7 @@
 				"dir_n_samples": {
 					"label": "Direction N Samples",
 					"group": "Direction",
-					"position": 56,
+					"position": 58,
 					"type": "Integer",
 					"description": "Number of samples included in directional calculations",
 					"validations": [
@@ -1721,7 +1749,7 @@
 				"dir_n_specimens": {
 					"label": "Direction N Specimens",
 					"group": "Direction",
-					"position": 57,
+					"position": 59,
 					"type": "Integer",
 					"description": "Number of specimens included in directional calculations",
 					"validations": [
@@ -1731,7 +1759,7 @@
 				"fold_test_significance": {
 					"label": "Fold Test Significance",
 					"group": "Direction",
-					"position": 58,
+					"position": 60,
 					"type": "Number",
 					"unit": "%",
 					"description": "Significance level achieved in tilt correction calculations",
@@ -1749,7 +1777,7 @@
 				"fold_test": {
 					"label": "Fold Test",
 					"group": "Direction",
-					"position": 59,
+					"position": 61,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Classification and result of the folding test",
@@ -1766,7 +1794,7 @@
 				"conglomerate_test": {
 					"label": "Conglomerate Test",
 					"group": "Direction",
-					"position": 60,
+					"position": 62,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Classification and result of the (intra-formational) conglomerate test",
@@ -1783,7 +1811,7 @@
 				"contact_test": {
 					"label": "Baked Contact Test",
 					"group": "Direction",
-					"position": 61,
+					"position": 63,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Classification and result of the (inverse) contact test",
@@ -1800,7 +1828,7 @@
 				"reversal_test": {
 					"label": "Reversal Test",
 					"group": "Direction",
-					"position": 62,
+					"position": 64,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Classification and result of the reversal test",
@@ -1817,7 +1845,7 @@
 				"pole_lat": {
 					"label": "Pole Latitude",
 					"group": "Pole",
-					"position": 63,
+					"position": 65,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Pole latitude, average of site VGP latitudes, north pole",
@@ -1835,7 +1863,7 @@
 				"pole_lon": {
 					"label": "Pole Longitude",
 					"group": "Pole",
-					"position": 64,
+					"position": 66,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Pole longitude, average of site VGP longitudes, north pole",
@@ -1853,7 +1881,7 @@
 				"pole_dp": {
 					"label": "Pole DP",
 					"group": "Pole",
-					"position": 65,
+					"position": 67,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Pole parallel latitude uncertainty",
@@ -1872,7 +1900,7 @@
 				"pole_dm": {
 					"label": "Pole DM",
 					"group": "Pole",
-					"position": 66,
+					"position": 68,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Pole meridian uncertainty",
@@ -1891,7 +1919,7 @@
 				"pole_alpha95": {
 					"label": "Pole Alpha 95%",
 					"group": "Pole",
-					"position": 67,
+					"position": 69,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Pole direction, Fisher circle",
@@ -1909,7 +1937,7 @@
 				"pole_r": {
 					"label": "Pole R",
 					"group": "Pole",
-					"position": 68,
+					"position": 70,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Pole direction, Resultant Fisher vector",
@@ -1920,7 +1948,7 @@
 				"pole_k": {
 					"label": "Pole K",
 					"group": "Pole",
-					"position": 69,
+					"position": 71,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Pole direction,  Fisher's dispersion parameter Kappa",
@@ -1931,7 +1959,7 @@
 				"pole_conf": {
 					"label": "Pole Confidence Ellipse",
 					"group": "Pole",
-					"position": 70,
+					"position": 72,
 					"type": "Matrix",
 					"unit": "Degrees",
 					"urls": [
@@ -1971,7 +1999,7 @@
 				"pole_n_sites": {
 					"label": "Pole N Sites",
 					"group": "Pole",
-					"position": 71,
+					"position": 73,
 					"type": "Integer",
 					"description": "Number of sites included in pole calculations",
 					"validations": [
@@ -1987,7 +2015,7 @@
 				"pole_comp_name": {
 					"label": "Pole Component Name",
 					"group": "Pole",
-					"position": 72,
+					"position": 74,
 					"type": "String",
 					"description": "Name of magnetic component for which pole is calculated",
 					"examples": [
@@ -2008,7 +2036,7 @@
 				"pole_reversed_perc": {
 					"label": "Percentage Reversed Sites",
 					"group": "Pole",
-					"position": 73,
+					"position": 75,
 					"type": "Number",
 					"unit": "%",
 					"description": "Percentage of sites that are reversed",
@@ -2027,7 +2055,7 @@
 				"pole_antipodal_angle": {
 					"label": "Antipodal Angle",
 					"group": "Pole",
-					"position": 74,
+					"position": 76,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Great circle distance between normal and reversed poles",
@@ -2045,7 +2073,7 @@
 				"pole_vv_q": {
 					"label": "Van der Voo Q",
 					"group": "Pole",
-					"position": 75,
+					"position": 77,
 					"type": "Integer",
 					"urls": [
 						"http://dx.doi.org/10.1016/0040-1951(90)90116-P"
@@ -2059,7 +2087,7 @@
 				"pole_bc_q": {
 					"label": "Besse and Courtillot Q",
 					"group": "Pole",
-					"position": 76,
+					"position": 78,
 					"type": "Integer",
 					"urls": [
 						"http://dx.doi.org/10.1029/2000JB000050"
@@ -2073,10 +2101,39 @@
 				"pole_flattening": {
 					"label": "Flattening Ratio",
 					"group": "Pole",
-					"position": 77,
+					"position": 79,
 					"type": "Number",
 					"unit": "Dimensionless",
 					"description": "Flattening ratio. No flattening = 1.0",
+					"notes": "Indicate the flattening correction method with a DA-DIR-FLAT method code (e.g. DA-DIR-FLAT-EI, DA-DIR-FLAT-SVEI). Report uncertainty bounds in pole_flat_low and pole_flat_high",
+					"validations": [
+						"min(0)",
+						"max(1)",
+						"requiredIf(\"pole_flat_low\")",
+						"requiredIf(\"pole_flat_high\")"
+					]
+				},
+				"pole_flat_low": {
+					"label": "Flattening Ratio Low",
+					"group": "Pole",
+					"position": 80,
+					"type": "Number",
+					"unit": "Dimensionless",
+					"description": "Flattening ratio, Lower bound",
+					"notes": "Should be less than or equal to pole_flattening. Indicate the confidence level of the bounds with method codes (e.g. SM-BOOT-95)",
+					"validations": [
+						"min(0)",
+						"max(1)"
+					]
+				},
+				"pole_flat_high": {
+					"label": "Flattening Ratio High",
+					"group": "Pole",
+					"position": 81,
+					"type": "Number",
+					"unit": "Dimensionless",
+					"description": "Flattening ratio, Upper bound",
+					"notes": "Should be greater than or equal to pole_flattening. Indicate the confidence level of the bounds with method codes (e.g. SM-BOOT-95)",
 					"validations": [
 						"min(0)",
 						"max(1)"
@@ -2085,7 +2142,7 @@
 				"paleolat": {
 					"label": "Paleolatitude",
 					"group": "Paleoposition",
-					"position": 78,
+					"position": 82,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Paleolatitude",
@@ -2103,7 +2160,7 @@
 				"paleolat_sigma": {
 					"label": "Paleolatitude Sigma",
 					"group": "Paleoposition",
-					"position": 79,
+					"position": 83,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Paleolatitude, Uncertainty",
@@ -2122,7 +2179,7 @@
 				"paleolon": {
 					"label": "Paleolongitude",
 					"group": "Paleoposition",
-					"position": 80,
+					"position": 84,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Paleolongitude",
@@ -2140,7 +2197,7 @@
 				"paleolon_sigma": {
 					"label": "Paleolongitude Sigma",
 					"group": "Paleoposition",
-					"position": 81,
+					"position": 85,
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Paleolongitude, Uncertainty",
@@ -2159,7 +2216,7 @@
 				"paleopole_n_sites": {
 					"label": "Paleopole N Sites",
 					"group": "Paleoposition",
-					"position": 82,
+					"position": 86,
 					"type": "Integer",
 					"description": "Number of sites included in paleopole calculations",
 					"validations": [
@@ -2169,7 +2226,7 @@
 				"pdm": {
 					"label": "PDM",
 					"group": "PDM",
-					"position": 83,
+					"position": 87,
 					"type": "Number",
 					"unit": "Am^2",
 					"description": "Paleomagnetic dipole moment, Average of site VDMs",
@@ -2183,7 +2240,7 @@
 				"pdm_sigma": {
 					"label": "PDM Sigma",
 					"group": "PDM",
-					"position": 84,
+					"position": 88,
 					"type": "Number",
 					"unit": "Am^2",
 					"description": "Paleomagnetic dipole moment, Uncertainty",
@@ -2201,7 +2258,7 @@
 				"pdm_n_sites": {
 					"label": "PDM N Sites",
 					"group": "PDM",
-					"position": 85,
+					"position": 89,
 					"type": "Integer",
 					"description": "Number of sites included in PDM calculations",
 					"validations": [
@@ -2217,7 +2274,7 @@
 				"padm": {
 					"label": "PADM",
 					"group": "PADM",
-					"position": 86,
+					"position": 90,
 					"type": "Number",
 					"unit": "Am^2",
 					"description": "Paleomagnetic axial dipole moment, Average of site VADMs",
@@ -2231,7 +2288,7 @@
 				"padm_sigma": {
 					"label": "PADM Sigma",
 					"group": "PADM",
-					"position": 87,
+					"position": 91,
 					"type": "Number",
 					"unit": "Am^2",
 					"description": "Paleomagnetic axial dipole moment, Uncertainty",
@@ -2249,7 +2306,7 @@
 				"padm_n_sites": {
 					"label": "PADM N Sites",
 					"group": "PADM",
-					"position": 88,
+					"position": 92,
 					"type": "Integer",
 					"description": "Number of sites included in PADM calculations",
 					"validations": [
@@ -2265,7 +2322,7 @@
 				"int_abs": {
 					"label": "Absolute Paleointensity",
 					"group": "Paleointensity",
-					"position": 89,
+					"position": 93,
 					"type": "Number",
 					"unit": "T",
 					"description": "Absolute field strength",
@@ -2285,7 +2342,7 @@
 				"int_abs_sigma": {
 					"label": "Absolute Paleointensity Sigma",
 					"group": "Paleointensity",
-					"position": 90,
+					"position": 94,
 					"type": "Number",
 					"unit": "T",
 					"description": "Absolute field strength, Uncertainty",
@@ -2304,7 +2361,7 @@
 				"int_abs_sigma_perc": {
 					"label": "Absolute Paleointensity Sigma %",
 					"group": "Paleointensity",
-					"position": 91,
+					"position": 95,
 					"type": "Number",
 					"unit": "%",
 					"description": "Absolute field strength, Uncertainty in percent",
@@ -2323,7 +2380,7 @@
 				"int_n_sites": {
 					"label": "Paleointensity N Sites",
 					"group": "Paleointensity",
-					"position": 92,
+					"position": 96,
 					"type": "Integer",
 					"description": "Number of sites included in intensity calculations",
 					"validations": [
@@ -2339,7 +2396,7 @@
 				"int_n_samples": {
 					"label": "Paleointensity N Samples",
 					"group": "Paleointensity",
-					"position": 93,
+					"position": 97,
 					"type": "Integer",
 					"description": "Number of samples included in intensity calculations",
 					"validations": [
@@ -2355,7 +2412,7 @@
 				"int_n_specimens": {
 					"label": "Paleointensity N Specimens",
 					"group": "Paleointensity",
-					"position": 94,
+					"position": 98,
 					"type": "Integer",
 					"description": "Number of specimens included in intensity calculations",
 					"validations": [
@@ -2365,7 +2422,7 @@
 				"description": {
 					"label": "Description",
 					"group": "Metadata",
-					"position": 95,
+					"position": 99,
 					"type": "String",
 					"description": "Location and result description and comments",
 					"previous_columns": [
@@ -2382,7 +2439,7 @@
 				"rock_magnetic_test": {
 					"label": "Rock Magnetic Test",
 					"group": "Metadata",
-					"position": 96,
+					"position": 100,
 					"type": "String",
 					"unit": "Flag",
 					"description": "Classification and result of the various rock magnetic tests",
@@ -2399,7 +2456,7 @@
 				"rotation_sequence": {
 					"label": "Sequence of Rotations",
 					"group": "Metadata",
-					"position": 97,
+					"position": 101,
 					"type": "Matrix",
 					"description": "M by N matrix with M sequential rotations and the length of each row defined by the first element: the rotation type",
 					"examples": [
@@ -2434,7 +2491,7 @@
 				"criteria": {
 					"label": "Criteria Names",
 					"group": "Metadata",
-					"position": 98,
+					"position": 102,
 					"type": "List",
 					"description": "Colon-delimited list of criteria names",
 					"examples": [
@@ -2454,7 +2511,7 @@
 				"software_packages": {
 					"label": "Software Packages",
 					"group": "Metadata",
-					"position": 99,
+					"position": 103,
 					"type": "List",
 					"description": "Colon-delimited list of software used for data reduction",
 					"examples": [
@@ -2471,7 +2528,7 @@
 				"external_database_ids": {
 					"label": "External Database IDs",
 					"group": "Metadata",
-					"position": 100,
+					"position": 104,
 					"type": "Dictionary",
 					"description": "Dictionary of external databases and IDs where data are used",
 					"examples": [
@@ -2496,7 +2553,7 @@
 				"pis": {
 					"label": "Principal Investigator Names",
 					"group": "Metadata",
-					"position": 101,
+					"position": 105,
 					"type": "List",
 					"description": "Colon-delimited list of EarthRef handles or ORCIDs or names and emails for principal investigators who organized the expedition",
 					"examples": [
@@ -2515,7 +2572,7 @@
 				"scientists": {
 					"label": "Research Scientist Names",
 					"group": "Metadata",
-					"position": 102,
+					"position": 106,
 					"type": "List",
 					"description": "Colon-delimited list of EarthRef handles or ORCIDs or names and emails for scientists who described the location",
 					"examples": [
@@ -2538,7 +2595,7 @@
 				"analysts": {
 					"label": "Analyst Names",
 					"group": "Metadata",
-					"position": 103,
+					"position": 107,
 					"type": "List",
 					"description": "Colon-delimited list of EarthRef handles or ORCIDs or names and emails for analysts",
 					"examples": [
@@ -8113,7 +8170,7 @@
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Azimuth of specimen's x direction measured clockwise from north",
-					"notes": "The x direction of the specimen is aligned to the x-axis of the magnetometer when the magnetic moment of the sample is measured. See https://earthref.org/PmagPy/cookbook/#x1-260003.8.1 for a more detailed explanation and diagrams of a variety of orientation conventions.",
+					"notes": "The x direction of the specimen is aligned to the x-axis of the magnetometer when the magnetic moment of the specimen is measured. See https://earthref.org/PmagPy/cookbook/#x1-260003.8.1 for a more detailed explanation and diagrams of a variety of orientation conventions.",
 					"validations": [
 						"min(0)",
 						"max(360)"
@@ -8132,7 +8189,7 @@
 					"type": "Number",
 					"unit": "Degrees",
 					"description": "Dip of specimen's x direction from the horizontal increasing downward",
-					"notes": "The x direction of the specimen is aligned to the x-axis of the magnetometer when the magnetic moment of the sample is measured. See https://earthref.org/PmagPy/cookbook/#x1-260003.8.1 for a more detailed explanation and diagrams of a variety of orientation conventions.",
+					"notes": "The x direction of the specimen is aligned to the x-axis of the magnetometer when the magnetic moment of the specimen is measured. See https://earthref.org/PmagPy/cookbook/#x1-260003.8.1 for a more detailed explanation and diagrams of a variety of orientation conventions.",
 					"validations": [
 						"min(-180)",
 						"max(180)"
@@ -10919,6 +10976,7 @@
 					"group": "Hysteresis",
 					"position": 186,
 					"type": "Number",
+					"unit": "Dimensionless",
 					"description": "High field susceptibility, Volume normalized"
 				},
 				"hyst_xhf_mass": {

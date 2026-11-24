@@ -35,7 +35,10 @@ dans ce port) :
   ('g'), jamais seulement le point de son pole. `layer` = site (6 premiers
   caracteres du specimen, meme convention que magic_export._site_mean_row).
 - Bloc "mean directions" : UNE ligne par moyenne de site ("mean:",
-  cat1=='F').
+  cat1=='F'). `layer` = location du site (magic_loc), "Site_Means" si
+  elle n'est pas renseignee - demande explicite utilisateur ("pour les
+  directions moyennes, mettre la location du site a la place de
+  site_means").
 - Bloc "VGP" : UNE ligne par moyenne de site QUI PORTE un VGP (par4/par5
   renseignes) - paleolon/paleolat, pas dec/inc (point GEOGRAPHIQUE, jamais
   une direction de stereonet - voir StereoUtils_Py/stereo_pmagpy.
@@ -80,7 +83,7 @@ rester visuellement distinctes d'emblee."""
 
 from typing import List
 
-from calcul import FitResult, _correct_dec_inc, _ORIENT_TO_FILE_CODE, dp_dm_from_a95
+from calcul import FitResult, _correct_dec_inc, _find_site_specimen, _ORIENT_TO_FILE_CODE, dp_dm_from_a95
 
 _BLOCK_HEADERS = {
     "directions": ["layer", "id", "type", "dec", "inc", "alpha95",
@@ -96,7 +99,16 @@ def _tilt_code(orientation: int) -> str:
     return _ORIENT_TO_FILE_CODE.get(float(orientation), "0")
 
 
-def export_stereo_project(results: List[FitResult], out_path: str, orientation: int = 2) -> dict:
+def _mean_layer(site: str, donnees) -> str:
+    """Couche d'une moyenne de site : la location du site (magic_loc d'un
+    specimen du site, propriete commune a tout le site), sinon "Site_Means"."""
+    ech = _find_site_specimen(site, donnees) if donnees else None
+    loc = (getattr(ech, "magic_loc", "") or "").strip() if ech is not None else ""
+    return loc.replace("\t", " ") or "Site_Means"
+
+
+def export_stereo_project(results: List[FitResult], out_path: str, orientation: int = 2,
+                          donnees=None) -> dict:
     """Ecrit UN fichier "Stereo Project" a 3 blocs (voir docstring module).
     Retourne {"directions": n, "means": n, "vgp": n} - le nombre de lignes
     ecrites dans chaque bloc (0 si aucun resultat exploitable pour ce
@@ -131,7 +143,7 @@ def export_stereo_project(results: List[FitResult], out_path: str, orientation: 
             continue
         site = r.id[6:].strip()
         mean_rows.append([
-            "Site_Means", site, f"{r.dec:.1f}", f"{r.inc:.1f}", f"{r.mad:.1f}", str(r.nb),
+            _mean_layer(site, donnees), site, f"{r.dec:.1f}", f"{r.inc:.1f}", f"{r.mad:.1f}", str(r.nb),
             tilt, "e", "red", "0.55", "",
         ])
         if r.par4 or r.par5:

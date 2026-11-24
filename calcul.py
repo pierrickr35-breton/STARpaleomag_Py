@@ -2851,6 +2851,8 @@ def fill_missing_mean_codes(path: str, donnees) -> Tuple[int, List[str]]:
     if n_done:
         with open(path, "w", encoding="iso-8859-1", errors="replace", newline="\n") as f:
             f.write("\n".join(lines))
+            f.flush()
+            os.fsync(f.fileno())
     return n_done, failed
 
 
